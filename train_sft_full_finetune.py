@@ -5,6 +5,9 @@ Pushes full model to Hugging Face every 40 steps.
 Experiment: 400 steps, global batch 64, checkpoint every 40 steps to HF.
 Target: Lightning AI single T4 GPU.
 
+Loss is computed only on assistant tokens (system and user prompts are masked).
+Uses custom preprocessing to build assistant-only completion_mask for Qwen format.
+
 Usage:
     export HF_TOKEN=your_token
     export HF_REPO_ID=yourusername/wordle-full-qwen06b
@@ -50,6 +53,64 @@ def parse_args():
     p.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "wordle-sft"))
     p.add_argument("--wandb-name", default=None)
     return p.parse_args()
+
+
+# Qwen chat template markers for assistant-only loss masking
+ASSISTANT_START = "<|im_start|>assistant\n"
+ASSISTANT_END = "<|im_end|>"
+
+
+def _assistant_spans(text: str) -> list[tuple[int, int]]:
+    """Find character spans of assistant content in Qwen-formatted text."""
+    spans = []
+    start_marker = ASSISTANT_START
+    end_marker = ASSISTANT_END
+    pos = 0
+    while True:
+        start = text.find(start_marker, pos)
+        if start == -1:
+            break
+        content_start = start + len(start_marker)
+        end = text.find(end_marker, content_start)
+        if end == -1:
+            break
+        span_end = end + len(end_marker)
+        spans.append((content_start, span_end))
+        pos = span_end
+    return spans
+
+
+def tokenize_with_assistant_mask(example: dict, tokenizer, max_length: int) -> dict:
+    """
+    Tokenize text and build completion_mask for assistant tokens only.
+    Used when Qwen chat template lacks {% generation %} support.
+    """
+    text = example["text"]
+    encoding = tokenizer(
+        text,
+        truncation=True,
+        max_length=max_length,
+        return_offsets_mapping=True,
+        return_tensors=None,
+    )
+    input_ids = encoding["input_ids"]
+    offset_mapping = encoding["offset_mapping"]
+
+    spans = _assistant_spans(text)
+    completion_mask = [0] * len(input_ids)
+
+    for i, (start, end) in enumerate(offset_mapping):
+        if start is None or end is None:
+            continue
+        for span_start, span_end in spans:
+            if start < span_end and end > span_start:
+                completion_mask[i] = 1
+                break
+
+    return {
+        "input_ids": input_ids,
+        "completion_mask": completion_mask,
+    }
 
 
 class PushToHubCallback(TrainerCallback):
@@ -124,6 +185,16 @@ def main():
     dataset = dataset.map(format_conversation, remove_columns=dataset.column_names)
     print(f"Dataset size: {len(dataset)}")
 
+    def tokenize_example(example):
+        return tokenize_with_assistant_mask(example, tokenizer, args.seq_len)
+
+    dataset = dataset.map(
+        tokenize_example,
+        remove_columns=["text"],
+        desc="Tokenizing with assistant-only mask",
+    )
+    print("Tokenized with assistant-only loss masking")
+
     val_size = min(max(0, args.val_size), len(dataset) - 1)
     if val_size > 0:
         split = dataset.train_test_split(test_size=val_size, seed=args.seed, shuffle=True)
@@ -154,7 +225,9 @@ def main():
         gradient_checkpointing=True,
         report_to="wandb" if args.wandb else "none",
         run_name=args.wandb_name,
+        completion_only_loss=True,
         dataset_text_field="text",
+        dataset_kwargs={"skip_prepare_dataset": True},
         seed=args.seed,
     )
     if eval_dataset is not None:
