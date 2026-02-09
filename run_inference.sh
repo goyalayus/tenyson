@@ -26,5 +26,7 @@ sleep 2
 # Reduce memory fragmentation (PyTorch recommendation for OOM)
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
+# Unbuffered stdout so logs appear immediately under nohup
+export PYTHONUNBUFFERED=1
 
 python run_inference.py && bash push_inference_results.sh

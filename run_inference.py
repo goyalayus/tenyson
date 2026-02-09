@@ -1,7 +1,6 @@
 """
-Run inference on 10 LoRA checkpoints from Hugging Face.
+Run inference on 10 LoRA checkpoints from Hugging Face using Unsloth (2x faster).
 Plays full Wordle games for 3 words per checkpoint.
-No max token cap on model output.
 Saves results to inference_results.json for later HTML comparison.
 
 Usage (on T4 GPU):
@@ -12,13 +11,11 @@ Requires: HF_TOKEN or being logged in for goyalayus/wordle-lora-qwen06b
 """
 
 import json
-import os
 import re
-from pathlib import Path
 
 import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import snapshot_download
+from unsloth import FastLanguageModel
 
 # --- Config ---
 LORA_REPO = "goyalayus/wordle-lora-qwen06b"
@@ -32,6 +29,12 @@ OUTPUT_FILE = "inference_results.json"
 
 # 2^13 tokens max to avoid OOM on T4 (15GB)
 MAX_NEW_TOKENS = 8192
+
+
+def log(msg: str) -> None:
+    """Print with immediate flush for proper logging under nohup."""
+    print(msg, flush=True)
+
 
 SYSTEM_PROMPT = (
     "You are an expert AI playing Wordle.\n"
@@ -126,45 +129,23 @@ def run_one_game(
         inputs = tokenizer([text], return_tensors="pt").to(device)
         input_len = inputs.input_ids.shape[1]
 
-        # Token-by-token generation to track exact OOM position
         gen_kwargs = dict(
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
+            max_new_tokens=MAX_NEW_TOKENS,
         )
-        current_ids = inputs.input_ids
-        current_mask = inputs.get("attention_mask")
-        num_new_tokens = 0
-        last_out = None
+
         try:
             with torch.no_grad():
-                for _ in range(MAX_NEW_TOKENS):
-                    out = model.generate(
-                        current_ids,
-                        attention_mask=current_mask,
-                        max_new_tokens=1,
-                        **gen_kwargs,
-                    )
-                    last_out = out
-                    new_token = out[0][-1].item()
-                    if new_token == tokenizer.eos_token_id:
-                        break
-                    num_new_tokens += 1
-                    current_ids = out
-                    if current_mask is not None:
-                        current_mask = torch.cat(
-                            [current_mask, torch.ones((1, 1), device=current_mask.device, dtype=current_mask.dtype)],
-                            dim=1,
-                        )
-            out = last_out
+                out = model.generate(
+                    **inputs,
+                    **gen_kwargs,
+                )
         except torch.cuda.OutOfMemoryError as e:
-            total_at_failure = input_len + num_new_tokens
-            print(f"\n*** OOM ERROR ***")
-            print(f"  Checkpoint: {checkpoint}, Word: {target_word}, Turn: {turn_num + 1}")
-            print(f"  Prompt tokens: {input_len}")
-            print(f"  New tokens generated before OOM: {num_new_tokens}")
-            print(f"  Total context length at OOM: {total_at_failure} tokens")
-            print(f"  OOM occurred while generating token #{total_at_failure + 1}")
-            print(f"  Error: {e}")
+            log(f"\n*** OOM ERROR ***")
+            log(f"  Checkpoint: {checkpoint}, Word: {target_word}, Turn: {turn_num + 1}")
+            log(f"  Prompt tokens: {input_len}")
+            log(f"  Error: {e}")
             raise
 
         response_ids = out[0][input_len:]
@@ -209,44 +190,42 @@ def run_one_game(
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
-
-    print(f"Loading tokenizer from {BASE_MODEL}...")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    log(f"Device: {device}")
 
     results = {ckpt: [] for ckpt in CHECKPOINTS}
 
     for ckpt in CHECKPOINTS:
-        print(f"\n{'='*60}\nCheckpoint: {ckpt}\n{'='*60}")
-        # Load base + LoRA adapter for this checkpoint
-        base = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True,
+        log(f"\n{'='*60}")
+        log(f"Checkpoint: {ckpt}")
+        log(f"{'='*60}")
+
+        # Load adapter from HF (revision = branch) into temp dir, then Unsloth loads it
+        adapter_path = snapshot_download(LORA_REPO, revision=ckpt)
+        log(f"Loaded adapter from {adapter_path}")
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=adapter_path,
+            max_seq_length=8192,
+            dtype=None,
+            load_in_4bit=False,
         )
-        model = PeftModel.from_pretrained(
-            base, LORA_REPO, revision=ckpt
-        )
-        model.eval()
+        FastLanguageModel.for_inference(model)
+        log(f"Model ready (Unsloth fast inference enabled)")
 
         for word in EVAL_WORDS:
-            print(f"  Word: {word}")
+            log(f"  Word: {word}")
             game = run_one_game(model, tokenizer, word, device, checkpoint=ckpt)
             results[ckpt].append(game)
-            print(f"    -> {'WIN' if game['won'] else 'LOSS'} in {game['num_turns']} turns")
+            log(f"    -> {'WIN' if game['won'] else 'LOSS'} in {game['num_turns']} turns")
 
         del model
-        del base
         torch.cuda.empty_cache()
 
-    print(f"\nSaving to {OUTPUT_FILE}...")
+    log(f"\nSaving to {OUTPUT_FILE}...")
     with open(OUTPUT_FILE, "w") as f:
         json.dump(results, f, indent=2)
 
-    print("Done.")
+    log("Done.")
 
 
 if __name__ == "__main__":
