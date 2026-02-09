@@ -29,4 +29,11 @@ export TOKENIZERS_PARALLELISM=false
 # Unbuffered stdout so logs appear immediately under nohup
 export PYTHONUNBUFFERED=1
 
+# Activate conda if available (Lightning Studio)
+if [ -f "$HOME/miniconda3/bin/activate" ]; then
+  source "$HOME/miniconda3/bin/activate"
+elif [ -f "/home/zeus/miniconda3/bin/activate" ]; then
+  source "/home/zeus/miniconda3/bin/activate"
+fi
+
 python run_inference.py && bash push_inference_results.sh
