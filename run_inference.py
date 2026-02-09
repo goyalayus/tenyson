@@ -30,8 +30,8 @@ CHECKPOINTS = [
 ]
 OUTPUT_FILE = "inference_results.json"
 
-# No max cap: use large value so model can speak as much as it wants
-MAX_NEW_TOKENS = 4096
+# 2^13 tokens max to avoid OOM on T4 (15GB)
+MAX_NEW_TOKENS = 8192
 
 SYSTEM_PROMPT = (
     "You are an expert AI playing Wordle.\n"
@@ -109,7 +109,7 @@ def extract_guess(text: str) -> str | None:
 
 
 def run_one_game(
-    model, tokenizer, target_word: str, device: str
+    model, tokenizer, target_word: str, device: str, checkpoint: str = ""
 ) -> dict:
     """Play one full Wordle game. Returns game record."""
     messages = [
@@ -126,13 +126,46 @@ def run_one_game(
         inputs = tokenizer([text], return_tensors="pt").to(device)
         input_len = inputs.input_ids.shape[1]
 
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+        # Token-by-token generation to track exact OOM position
+        gen_kwargs = dict(
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        current_ids = inputs.input_ids
+        current_mask = inputs.get("attention_mask")
+        num_new_tokens = 0
+        last_out = None
+        try:
+            with torch.no_grad():
+                for _ in range(MAX_NEW_TOKENS):
+                    out = model.generate(
+                        current_ids,
+                        attention_mask=current_mask,
+                        max_new_tokens=1,
+                        **gen_kwargs,
+                    )
+                    last_out = out
+                    new_token = out[0][-1].item()
+                    if new_token == tokenizer.eos_token_id:
+                        break
+                    num_new_tokens += 1
+                    current_ids = out
+                    if current_mask is not None:
+                        current_mask = torch.cat(
+                            [current_mask, torch.ones((1, 1), device=current_mask.device, dtype=current_mask.dtype)],
+                            dim=1,
+                        )
+            out = last_out
+        except torch.cuda.OutOfMemoryError as e:
+            total_at_failure = input_len + num_new_tokens
+            print(f"\n*** OOM ERROR ***")
+            print(f"  Checkpoint: {checkpoint}, Word: {target_word}, Turn: {turn_num + 1}")
+            print(f"  Prompt tokens: {input_len}")
+            print(f"  New tokens generated before OOM: {num_new_tokens}")
+            print(f"  Total context length at OOM: {total_at_failure} tokens")
+            print(f"  OOM occurred while generating token #{total_at_failure + 1}")
+            print(f"  Error: {e}")
+            raise
 
         response_ids = out[0][input_len:]
         response = tokenizer.decode(response_ids, skip_special_tokens=False).strip()
@@ -201,7 +234,7 @@ def main():
 
         for word in EVAL_WORDS:
             print(f"  Word: {word}")
-            game = run_one_game(model, tokenizer, word, device)
+            game = run_one_game(model, tokenizer, word, device, checkpoint=ckpt)
             results[ckpt].append(game)
             print(f"    -> {'WIN' if game['won'] else 'LOSS'} in {game['num_turns']} turns")
 

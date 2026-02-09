@@ -16,4 +16,15 @@ if [ -f .env ]; then
   set +a
 fi
 
+# Clear GPU: kill any process using CUDA
+echo "Clearing GPU processes..."
+for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
+  kill -9 "$pid" 2>/dev/null || true
+done
+sleep 2
+
+# Reduce memory fragmentation (PyTorch recommendation for OOM)
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export TOKENIZERS_PARALLELISM=false
+
 python run_inference.py && bash push_inference_results.sh
