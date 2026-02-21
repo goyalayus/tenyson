@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>0.6B eval JSON viewer</title>
+  <style>
+    body {
+      font-family: Inter, system-ui, Arial, sans-serif;
+      margin: 16px;
+      background: #0b1020;
+      color: #e8ecf1;
+    }
+    h1 { margin: 0 0 8px 0; }
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 10px 0;
+    }
+    .meta {
+      background: #121a2e;
+      border: 1px solid #24314a;
+      border-radius: 8px;
+      padding: 10px;
+      margin: 10px 0;
+    }
+    .status {
+      color: #a8b3c2;
+      margin-left: 6px;
+    }
+    pre {
+      background: #0f172a;
+      border: 1px solid #24314a;
+      border-radius: 8px;
+      padding: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.35;
+      max-height: 80vh;
+      overflow: auto;
+    }
+    button {
+      background: #1e293b;
+      color: #e8ecf1;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    input[type="file"] {
+      color: #e8ecf1;
+    }
+    code {
+      background: #17223b;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Qwen3-0.6B eval JSON</h1>
+  <div class="row">
+    <button id="loadDefault">Load local <code>results_qwen3_06b_latest.json</code></button>
+    <input id="fileInput" type="file" accept=".json,application/json" />
+    <span class="status" id="status">Ready.</span>
+  </div>
+  <div class="meta" id="meta">No data loaded.</div>
+  <pre id="jsonOut">No JSON loaded yet.</pre>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const outEl = document.getElementById("jsonOut");
+    const metaEl = document.getElementById("meta");
+
+    function render(data, label) {
+      const model = data.model_label || "unknown";
+      const rev = data.adapter_revision_used || "unknown";
+      const cases = data.num_cases ?? "unknown";
+      const generated = data.generated_at_utc || "unknown";
+      metaEl.textContent =
+        `Source: ${label} | Model: ${model} | Revision: ${rev} | Cases: ${cases} | Generated: ${generated}`;
+      outEl.textContent = JSON.stringify(data, null, 2);
+      statusEl.textContent = "Loaded.";
+    }
+
+    async function loadDefaultFile() {
+      statusEl.textContent = "Loading default JSON...";
+      try {
+        const resp = await fetch("./results_qwen3_06b_latest.json");
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        render(data, "results_qwen3_06b_latest.json");
+      } catch (err) {
+        statusEl.textContent = `Auto-load failed (${err.message}). Use file picker.`;
+      }
+    }
+
+    document.getElementById("loadDefault").addEventListener("click", loadDefaultFile);
+
+    document.getElementById("fileInput").addEventListener("change", async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      statusEl.textContent = "Reading selected file...";
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        render(data, file.name);
+      } catch (err) {
+        statusEl.textContent = `Failed to parse JSON (${err.message})`;
+      }
+    });
+
+    loadDefaultFile();
+  </script>
+</body>
+</html>

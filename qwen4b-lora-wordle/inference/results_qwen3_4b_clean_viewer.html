@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wordle eval viewer (4B + 0.6B)</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 24px; background: #0b1020; color: #ecf1f8; }
+    h1 { margin: 0 0 10px 0; }
+    .meta { background: #111a2f; border: 1px solid #2a3553; border-radius: 12px; padding: 14px 16px; margin-bottom: 18px; }
+    .meta div { margin: 4px 0; color: #c5d2e5; }
+    .status { color: #a9b9d4; margin-bottom: 14px; }
+    .card { border: 1px solid #28324b; border-radius: 12px; margin: 14px 0; overflow: hidden; background: #10182b; }
+    .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; background: #131f37; border-bottom: 1px solid #253252; }
+    .cid { font-weight: 700; }
+    .cols { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; }
+    section { padding: 12px; border-right: 1px solid #253252; }
+    section:last-child { border-right: none; }
+    h3 { margin: 0 0 8px 0; font-size: 14px; color: #b9c8df; }
+    .guess { margin: 0 0 8px 0; color: #8fd3ff; font-family: ui-monospace, Menlo, monospace; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.4; }
+    code { background: #17223b; padding: 2px 5px; border-radius: 4px; }
+    @media (max-width: 1200px) {
+      .cols { grid-template-columns: 1fr; }
+      section { border-right: none; border-bottom: 1px solid #253252; }
+      section:last-child { border-bottom: none; }
+    }
+  </style>
+</head>
+<body>
+  <h1>Wordle eval comparison</h1>
+  <div class="status" id="status">Loading results...</div>
+  <div class="meta" id="meta">No data loaded yet.</div>
+  <div id="cards"></div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const metaEl = document.getElementById("meta");
+    const cardsEl = document.getElementById("cards");
+
+    function esc(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function promptFromMessages(messages) {
+      const userMsg = (messages || []).find((m) => m && m.role === "user");
+      return userMsg ? userMsg.content : "";
+    }
+
+    async function loadJson(path) {
+      const bust = `${path}?v=${Date.now()}`;
+      const resp = await fetch(bust, { cache: "no-store" });
+      if (!resp.ok) throw new Error(`${path} -> HTTP ${resp.status}`);
+      return resp.json();
+    }
+
+    function buildMeta(model4b, model06b) {
+      metaEl.innerHTML = [
+        `<div><b>4B:</b> repo=<code>${esc(model4b.adapter_repo)}</code> | rev=<code>${esc(model4b.adapter_revision_used)}</code> | generated=<code>${esc(model4b.generated_at_utc)}</code></div>`,
+        `<div><b>0.6B:</b> repo=<code>${esc(model06b.adapter_repo)}</code> | rev=<code>${esc(model06b.adapter_revision_used)}</code> | generated=<code>${esc(model06b.generated_at_utc)}</code></div>`,
+        `<div><b>Cases:</b> 4B=<code>${esc(model4b.num_cases)}</code>, 0.6B=<code>${esc(model06b.num_cases)}</code></div>`
+      ].join("");
+    }
+
+    function renderCards(model4b, model06b) {
+      const byCase4b = new Map((model4b.results || []).map((r) => [r.case_id, r]));
+      const byCase06b = new Map((model06b.results || []).map((r) => [r.case_id, r]));
+      const caseOrder = (model4b.results || []).map((r) => r.case_id);
+
+      const html = caseOrder.map((caseId) => {
+        const r4 = byCase4b.get(caseId) || {};
+        const r6 = byCase06b.get(caseId) || {};
+        const prompt = promptFromMessages(r4.messages || r6.messages || []);
+        return `
+          <div class="card">
+            <div class="head">
+              <span class="cid">${esc(caseId)}</span>
+              <span>4B guess: <code>${esc(r4.parsed_guess || "")}</code> | 0.6B guess: <code>${esc(r6.parsed_guess || "")}</code></span>
+            </div>
+            <div class="cols">
+              <section>
+                <h3>Prompt</h3>
+                <pre>${esc(prompt)}</pre>
+              </section>
+              <section>
+                <h3>4B response</h3>
+                <div class="guess">guess: ${esc(r4.parsed_guess || "")}</div>
+                <pre>${esc(r4.response_text || "")}</pre>
+              </section>
+              <section>
+                <h3>0.6B response</h3>
+                <div class="guess">guess: ${esc(r6.parsed_guess || "")}</div>
+                <pre>${esc(r6.response_text || "")}</pre>
+              </section>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      cardsEl.innerHTML = html || "<div class='status'>No cases to render.</div>";
+    }
+
+    async function main() {
+      try {
+        const [model4b, model06b] = await Promise.all([
+          loadJson("./results_qwen3_4b_latest_remote.json"),
+          loadJson("./results_qwen3_06b_step1720.json")
+        ]);
+        buildMeta(model4b, model06b);
+        renderCards(model4b, model06b);
+        statusEl.textContent = "Loaded 4B + 0.6B comparison.";
+      } catch (err) {
+        statusEl.textContent = `Failed to load JSON files: ${err.message}`;
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>

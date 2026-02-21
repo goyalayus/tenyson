@@ -19,15 +19,17 @@ Environment variables (loaded from .env):
 
 import argparse
 import os
+import re
 import sys
 from typing import Any, Optional
 
 from unsloth import FastLanguageModel, FastModel
 from datasets import load_dataset
 from huggingface_hub import HfApi
+import torch
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from transformers import TrainingArguments
-from trl import SFTConfig, SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTConfig, SFTTrainer
 
 # Load .env file if exists
 try:
@@ -38,10 +40,10 @@ except ImportError:
     pass
 
 # ============ Configuration ============
-DATASET_NAME = "willcb/V3-wordle"
+DATASET_NAME = "goyalayus/wordle-reasoning-sft-prefix-keep-think"
 MODEL_ID = "Qwen/Qwen3-4B"
-MAX_SEQ_LENGTH = 1024
-MAX_STEPS = 10000  # Large number, will early stop
+MAX_SEQ_LENGTH = 2048
+MAX_STEPS = 3000
 GLOBAL_BATCH_SIZE = 64
 PER_DEVICE_BATCH_SIZE = 16
 LEARNING_RATE = 1e-5
@@ -55,6 +57,12 @@ PATIENCE_INCREASE = 2  # Stop after 2 evals with increasing loss
 
 def parse_args():
     p = argparse.ArgumentParser(description="LoRA SFT on Qwen3-4B with early stopping")
+    p.add_argument(
+        "--preset",
+        choices=["qwen4b", "qwen06b"],
+        default=None,
+        help="Optional training preset that sets model + batch defaults",
+    )
     p.add_argument("--model", default=MODEL_ID, help="Base model to fine-tune")
     p.add_argument("--dataset", default=DATASET_NAME, help="Dataset name")
     p.add_argument(
@@ -67,6 +75,12 @@ def parse_args():
     )
     p.add_argument("--global-batch-size", type=int, default=GLOBAL_BATCH_SIZE)
     p.add_argument("--per-device-batch-size", type=int, default=PER_DEVICE_BATCH_SIZE)
+    p.add_argument(
+        "--per-device-eval-batch-size",
+        type=int,
+        default=None,
+        help="Eval batch size. Default: half of train batch, min 1",
+    )
     p.add_argument("--push-every-steps", type=int, default=PUSH_EVERY_STEPS)
     p.add_argument("--eval-every-steps", type=int, default=EVAL_EVERY_STEPS)
     p.add_argument("--seq-len", type=int, default=MAX_SEQ_LENGTH)
@@ -81,7 +95,19 @@ def parse_args():
         default=os.environ.get("WANDB_PROJECT", "wordle-lora-qwen3-4b"),
     )
     p.add_argument("--wandb-name", default=None, help="Wandb run name")
+    p.add_argument(
+        "--output-root",
+        default=None,
+        help="Root folder for run outputs (default: <project>/outputs)",
+    )
     return p.parse_args()
+
+
+def model_to_slug(model_id: str) -> str:
+    """Convert model id to filesystem-safe slug."""
+    slug = model_id.lower().strip()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    return slug.strip("-")
 
 
 class PushToHubCallback(TrainerCallback):
@@ -195,8 +221,93 @@ class EarlyStoppingCallback(TrainerCallback):
         return control
 
 
+class BoolAttentionMaskCollator:
+    """Drop incompatible attention masks on this stack."""
+
+    def __init__(self, base_collator):
+        self.base_collator = base_collator
+
+    def __call__(self, examples):
+        batch = self.base_collator(examples)
+        batch.pop("attention_mask", None)
+        return batch
+
+
+class AssistantOnlyMaskCollator:
+    """Mask labels outside assistant message bodies."""
+
+    def __init__(self, base_collator, assistant_header_ids, im_end_id):
+        self.base_collator = base_collator
+        self.assistant_header_ids = assistant_header_ids
+        self.im_end_id = im_end_id
+
+    def _find_subsequence(self, sequence, pattern, start_index):
+        stop = len(sequence) - len(pattern) + 1
+        for idx in range(start_index, max(start_index, stop)):
+            if sequence[idx : idx + len(pattern)] == pattern:
+                return idx
+        return -1
+
+    def _assistant_token_mask(self, token_ids):
+        mask = [False] * len(token_ids)
+        cursor = 0
+
+        while cursor < len(token_ids):
+            header_start = self._find_subsequence(
+                token_ids, self.assistant_header_ids, cursor
+            )
+            if header_start < 0:
+                break
+
+            content_start = header_start + len(self.assistant_header_ids)
+            end_index = content_start
+            while end_index < len(token_ids) and token_ids[end_index] != self.im_end_id:
+                end_index += 1
+
+            for pos in range(content_start, min(end_index, len(mask))):
+                mask[pos] = True
+            if end_index < len(mask) and token_ids[end_index] == self.im_end_id:
+                mask[end_index] = True
+
+            cursor = end_index + 1
+
+        return mask
+
+    def __call__(self, examples):
+        batch = self.base_collator(examples)
+        labels = batch["labels"]
+        input_ids = batch["input_ids"]
+
+        for row_idx in range(input_ids.size(0)):
+            row_ids = input_ids[row_idx].tolist()
+            assistant_mask = self._assistant_token_mask(row_ids)
+            for token_idx, is_assistant in enumerate(assistant_mask):
+                if not is_assistant:
+                    labels[row_idx, token_idx] = -100
+
+        batch.pop("attention_mask", None)
+        return batch
+
+
 def main():
     args = parse_args()
+
+    # Optional model presets for safer defaults
+    if args.preset == "qwen4b":
+        args.model = "Qwen/Qwen3-4B"
+        args.per_device_batch_size = 4
+        args.global_batch_size = 32
+    elif args.preset == "qwen06b":
+        args.model = "Qwen/Qwen3-0.6B"
+        args.per_device_batch_size = 48
+        args.global_batch_size = 48
+
+    if args.per_device_eval_batch_size is None:
+        args.per_device_eval_batch_size = max(1, args.per_device_batch_size // 2)
+
+    model_slug = model_to_slug(args.model)
+    output_root = args.output_root or os.path.join(os.path.dirname(__file__), "outputs")
+    run_output_dir = os.path.join(output_root, f"lora_sft_{model_slug}")
 
     # Validate HF repo
     if not args.hf_repo_id:
@@ -220,8 +331,10 @@ def main():
     print(f"HF Repo: {args.hf_repo_id}")
     print(f"Global Batch Size: {args.global_batch_size}")
     print(f"Per-Device Batch Size: {args.per_device_batch_size}")
+    print(f"Per-Device Eval Batch Size: {args.per_device_eval_batch_size}")
     print(f"Max Seq Length: {args.seq_len}")
     print(f"Learning Rate: {args.lr}")
+    print(f"Output Dir: {run_output_dir}")
     print(
         f"Early Stopping: {args.patience_no_improve} evals no improvement OR {args.patience_increase} evals increasing"
     )
@@ -245,6 +358,8 @@ def main():
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.eos_token is None:
+        raise ValueError("Tokenizer must expose eos_token for assistant span masking.")
 
     # Apply LoRA
     print("[2/6] Applying LoRA...")
@@ -265,15 +380,8 @@ def main():
     print("[3/6] Loading dataset...")
     dataset = load_dataset(args.dataset, split="train")
 
-    def format_conversation(example):
-        """Format conversation with chat template."""
-        messages = example["prompt"] + example["completion"]
-        text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-        return {"text": text}
-
-    dataset = dataset.map(format_conversation, remove_columns=dataset.column_names)
+    if "messages" not in dataset.column_names:
+        raise ValueError("Dataset must contain a 'messages' column for conversational SFT.")
     print(f"Dataset size: {len(dataset)}")
 
     # Train/val split
@@ -290,14 +398,23 @@ def main():
         eval_dataset = None
         print("Warning: No validation set. Early stopping will not work.")
 
-    # Setup data collator for completion-only loss
-    print("[4/6] Setting up completion-only loss...")
-    # Qwen3 uses this pattern for assistant messages
-    response_template = "<|im_start|>assistant\n"
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template, tokenizer=tokenizer, mlm=False
-    )
-    print(f"Response template: {repr(response_template)}")
+    # Build training text from conversational rows.
+    print("[4/6] Preparing chat-template formatting...")
+
+    def format_conversation(example):
+        messages = example["messages"]
+        if messages and isinstance(messages[0], list):
+            return [
+                tokenizer.apply_chat_template(
+                    m, tokenize=False, add_generation_prompt=False
+                )
+                for m in messages
+            ]
+        return [
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
+        ]
 
     # Calculate gradient accumulation
     grad_accum = args.global_batch_size // args.per_device_batch_size
@@ -315,12 +432,17 @@ def main():
     print(f"  - Eval every: {args.eval_every_steps} steps")
     print(f"  - Push every: {args.push_every_steps} steps")
 
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    use_fp16 = not use_bf16
+    print(f"  - Precision: {'bf16' if use_bf16 else 'fp16'}")
+
     # Training arguments
     training_kwargs = dict(
-        output_dir="outputs/lora_sft_qwen4b",
+        output_dir=run_output_dir,
         max_length=args.seq_len,
         max_steps=args.max_steps,
         per_device_train_batch_size=args.per_device_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
@@ -328,13 +450,13 @@ def main():
         logging_steps=1,
         save_steps=args.push_every_steps,
         save_total_limit=1,
-        fp16=True,
+        fp16=use_fp16,
+        bf16=use_bf16,
         optim="adamw_8bit",
         report_to="wandb" if args.wandb else "none",
         run_name=args.wandb_name,
-        dataset_text_field="text",
         seed=args.seed,
-        remove_unused_columns=False,  # Important for DataCollatorForCompletionOnlyLM
+        remove_unused_columns=False,
     )
 
     if eval_dataset is not None:
@@ -344,6 +466,7 @@ def main():
             False  # We handle early stopping manually
         )
 
+    training_kwargs["packing"] = False
     training_args = SFTConfig(**training_kwargs)
 
     # Setup callbacks
@@ -361,15 +484,37 @@ def main():
 
     # Create trainer
     print("[6/6] Creating trainer...")
-    trainer = SFTTrainer(
+
+    trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
-        data_collator=collator,
+        formatting_func=format_conversation,
         callbacks=callbacks,
     )
+
+    if not training_kwargs.get("packing"):
+        from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
+
+        base_collator = DataCollatorForLanguageModeling(
+            pad_token_id=tokenizer.pad_token_id,
+            completion_only_loss=False,
+        )
+        assistant_header_ids = tokenizer.encode(
+            "<|im_start|>assistant\n", add_special_tokens=False
+        )
+        if not assistant_header_ids:
+            raise ValueError("Could not tokenize assistant header for loss masking.")
+        im_end_id = tokenizer.encode("<|im_end|>", add_special_tokens=False)[0]
+        trainer_kwargs["data_collator"] = AssistantOnlyMaskCollator(
+            base_collator=base_collator,
+            assistant_header_ids=assistant_header_ids,
+            im_end_id=im_end_id,
+        )
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     # Train
     print("\n" + "=" * 60)

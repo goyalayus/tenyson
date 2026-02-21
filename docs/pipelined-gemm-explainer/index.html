@@ -1,0 +1,1907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CuTE GEMM Course; from tiled to pipelined</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #0b1020;
+      --card: #131a2f;
+      --card-2: #18213a;
+      --line: #2b3357;
+      --text: #e7ecff;
+      --muted: #a2aed3;
+      --blue: #63b3ff;
+      --green: #5fe09b;
+      --yellow: #ffd166;
+      --red: #ff6b6b;
+      --purple: #b084ff;
+      --mono: "JetBrains Mono", monospace;
+      --sans: "Inter", system-ui, sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #0b1020 0%, #0f1428 100%);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.6;
+    }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(10px);
+      background: rgba(11, 16, 32, 0.82);
+      border-bottom: 1px solid var(--line);
+    }
+    .nav-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 10px 16px;
+      display: flex;
+      gap: 14px;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .nav-inner a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .nav-inner a:hover { color: var(--blue); }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 16px 80px;
+    }
+    h1 {
+      font-size: clamp(2rem, 4.2vw, 3.3rem);
+      line-height: 1.15;
+      margin: 12px 0 8px;
+    }
+    h2 {
+      font-size: clamp(1.45rem, 2.2vw, 2rem);
+      margin: 8px 0 10px;
+    }
+    h3 { margin: 18px 0 8px; }
+    p { color: var(--muted); margin: 8px 0 12px; }
+    section { margin-top: 42px; }
+    .hero {
+      border: 1px solid var(--line);
+      background: radial-gradient(circle at 20% 0%, #21305f 0%, #131a2f 45%, #11182e 100%);
+      border-radius: 14px;
+      padding: 22px;
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .chip {
+      font: 600 12px var(--mono);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 10px;
+      color: var(--blue);
+      background: rgba(99, 179, 255, 0.1);
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      background: var(--card);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .card h3 { margin-top: 0; }
+    .callout {
+      border-left: 4px solid var(--blue);
+      background: rgba(99, 179, 255, 0.08);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+    }
+    .mono { font-family: var(--mono); }
+    pre[class*="language-"] {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      margin: 10px 0 !important;
+      padding: 14px !important;
+      font-size: 13px !important;
+      background: #111728 !important;
+    }
+    code { font-family: var(--mono); }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .flow .node {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      text-align: center;
+      font: 600 12px var(--mono);
+      background: var(--card-2);
+    }
+    .node.g { color: var(--red); }
+    .node.s { color: var(--yellow); }
+    .node.r { color: var(--green); }
+    .node.m { color: var(--purple); }
+
+    /* Robust animation blocks */
+    .anim {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #10172a;
+      padding: 12px;
+      margin-top: 10px;
+    }
+    .anim-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+    .anim-title {
+      font-weight: 700;
+      color: var(--text);
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .btn {
+      border: 1px solid var(--line);
+      background: #1a2442;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: var(--blue); }
+    .step-label {
+      font: 600 12px var(--mono);
+      color: var(--muted);
+    }
+    .timeline {
+      display: grid;
+      gap: 8px;
+    }
+    .lane {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 8px;
+      align-items: center;
+    }
+    .lane-name {
+      font: 600 11px var(--mono);
+      color: var(--muted);
+      text-align: right;
+      padding-right: 4px;
+    }
+    .lane-track {
+      display: flex;
+      gap: 6px;
+      min-height: 32px;
+      align-items: center;
+      overflow-x: auto;
+    }
+    .blk {
+      min-width: 58px;
+      text-align: center;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      font: 600 11px var(--mono);
+      opacity: 0.2;
+      transition: 180ms ease;
+    }
+    .blk.active { opacity: 1; transform: translateY(-1px); }
+    .blk.g { background: rgba(255, 107, 107, 0.18); color: var(--red); }
+    .blk.s { background: rgba(255, 209, 102, 0.18); color: var(--yellow); }
+    .blk.r { background: rgba(95, 224, 155, 0.18); color: var(--green); }
+    .blk.m { background: rgba(176, 132, 255, 0.18); color: var(--purple); }
+
+    .matrix-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .cell {
+      border: 1px solid #34406a;
+      border-radius: 6px;
+      aspect-ratio: 1 / 1;
+      font: 600 10px var(--mono);
+      display: grid;
+      place-items: center;
+      color: #dbe3ff;
+      background: #17213f;
+      transition: 160ms ease;
+    }
+    .cell.hit { background: rgba(99, 179, 255, 0.35); border-color: var(--blue); }
+    .cell.hit2 { background: rgba(95, 224, 155, 0.35); border-color: var(--green); }
+    .tensor-boxes {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+    }
+    .tensor {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #111a31;
+    }
+    .tensor .name { font: 700 12px var(--mono); margin-bottom: 6px; color: var(--blue); }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .table th, .table td {
+      border: 1px solid var(--line);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .table th { color: var(--text); background: #17213f; }
+    .table td { color: var(--muted); }
+    .sticky-summary {
+      position: sticky;
+      bottom: 10px;
+      margin-top: 20px;
+      border: 1px solid #355090;
+      background: rgba(18, 28, 54, 0.92);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: #dce8ff;
+      font-size: 13px;
+    }
+    .hidden { display: none; }
+    @media (max-width: 900px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .tensor-boxes { grid-template-columns: 1fr; }
+      .lane { grid-template-columns: 1fr; }
+      .lane-name { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="#intro">Intro</a>
+      <a href="#cute-core">CuTE core</a>
+      <a href="#shape">Shape algebra</a>
+      <a href="#tile">local_tile + Step</a>
+      <a href="#partition">partition_*</a>
+      <a href="#copy">tiled copy</a>
+      <a href="#fragments">fragments + retile</a>
+      <a href="#pipeline">pipeline objects</a>
+      <a href="#kernel">annotated kernel</a>
+      <a href="#practice">practice</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="intro" class="hero">
+      <div class="mono" style="color:var(--blue);font-weight:700;">CuTE-first course</div>
+      <h1>Understand this pipelined GEMM by understanding CuTE itself</h1>
+      <p>
+        This redesign is focused on CuTE concepts first: shapes, strides, layouts, tiling,
+        partitioning, copy atoms, fragment retile, and pipeline tensors. GPU details are included,
+        but only to support the CuTE model.
+      </p>
+      <div class="chip-row">
+        <span class="chip">Shape</span>
+        <span class="chip">Stride</span>
+        <span class="chip">Layout</span>
+        <span class="chip">local_tile</span>
+        <span class="chip">partition_S / partition_D</span>
+        <span class="chip">make_tiled_copy</span>
+        <span class="chip">partition_fragment_*</span>
+        <span class="chip">retile_D</span>
+      </div>
+    </section>
+
+    <section id="cute-core">
+      <h2>1) CuTE mental model</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Three things every tensor has</h3>
+          <ul>
+            <li><span class="mono">shape</span>; logical extents like <span class="mono">(M, K)</span></li>
+            <li><span class="mono">stride</span>; how logical indices map to addresses</li>
+            <li><span class="mono">layout</span>; compile-time composition of shape + stride</li>
+          </ul>
+          <pre><code class="language-cpp">Tensor mA = make_tensor(
+  make_gmem_ptr(A),
+  select&lt;0,2&gt;(shape_MNK),   // (M,K)
+  dA                         // stride
+);</code></pre>
+        </div>
+        <div class="card">
+          <h3>Read this kernel in CuTE objects</h3>
+          <table class="table">
+            <thead><tr><th>Object</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">mA,mB,mC</td><td>global tensors</td></tr>
+              <tr><td class="mono">gA,gB,gC</td><td>CTA-local tiles from global tensors</td></tr>
+              <tr><td class="mono">sA,sB</td><td>shared-memory tensors with PIPE mode</td></tr>
+              <tr><td class="mono">tAgA,tAsA</td><td>thread copy partitions gmem→smem</td></tr>
+              <tr><td class="mono">tXsA,tXrA</td><td>thread copy partitions smem→reg</td></tr>
+              <tr><td class="mono">tCrA,tCrB,tCrC</td><td>MMA operand fragments and accumulators</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="callout">
+        Core idea: every performance trick in this kernel is encoded as a transformation between CuTE tensors.
+      </div>
+    </section>
+
+    <section id="shape">
+      <h2>2) Shape algebra playground</h2>
+      <p>Change M/N/K and tile sizes, then see the derived tile counts and tensor modes.</p>
+      <div class="card">
+        <div class="grid-2">
+          <div>
+            <label>M <input id="inM" type="number" value="5120" style="width:100%"></label>
+            <label>N <input id="inN" type="number" value="5120" style="width:100%;margin-top:8px"></label>
+            <label>K <input id="inK" type="number" value="4096" style="width:100%;margin-top:8px"></label>
+          </div>
+          <div>
+            <label>bM <input id="inbM" type="number" value="128" style="width:100%"></label>
+            <label>bN <input id="inbN" type="number" value="128" style="width:100%;margin-top:8px"></label>
+            <label>bK <input id="inbK" type="number" value="32" style="width:100%;margin-top:8px"></label>
+            <label>PIPE <input id="inbP" type="number" value="3" style="width:100%;margin-top:8px"></label>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="btn" id="recompute">Recompute</button>
+        </div>
+        <table class="table" style="margin-top:10px">
+          <thead><tr><th>Derived</th><th>Value</th></tr></thead>
+          <tbody id="shapeOut"></tbody>
+        </table>
+      </div>
+      <pre><code class="language-cpp">auto shape_MNK = make_shape(M, N, K);
+auto cta_tiler = make_shape(bM, bN, bK);
+Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step&lt;_1, X, _1&gt;{}); // (bM,bK,k)
+Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step&lt;X, _1, _1&gt;{}); // (bN,bK,k)
+Tensor sA = make_tensor(make_smem_ptr(...), sA_layout);               // (bM,bK,PIPE)</code></pre>
+    </section>
+
+    <section id="tile">
+      <h2>3) <span class="mono">local_tile</span> and <span class="mono">Step&lt;&gt;</span> visualized</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>What Step means</h3>
+          <ul>
+            <li><span class="mono">_1</span>; tile along this mode</li>
+            <li><span class="mono">X</span>; keep mode as residual/iteration mode</li>
+          </ul>
+          <pre><code class="language-cpp">// A is (M,K), keep K-tiles as residual mode k
+Step&lt;_1, X, _1&gt;{}  // tile M and BLK_K, keep k
+
+// B is (N,K), tile N and BLK_K
+Step&lt;X, _1, _1&gt;{}</code></pre>
+        </div>
+        <div class="card">
+          <h3>Tile selection animation</h3>
+          <div class="anim" id="tileAnim">
+            <div class="anim-header">
+              <div class="anim-title">CTA walks across tiles</div>
+              <div class="step-label" id="tileStep">cta=(0,0)</div>
+            </div>
+            <div class="matrix-grid" id="tileGrid"></div>
+            <div class="controls">
+              <button class="btn" data-act="prev">Prev</button>
+              <button class="btn" data-act="next">Next</button>
+              <button class="btn" data-act="auto">Auto</button>
+              <button class="btn" data-act="stop">Stop</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="partition">
+      <h2>4) <span class="mono">partition_S / partition_D</span>; thread slices</h2>
+      <p>
+        CuTE computes what each thread owns for source and destination tensors.
+        You do not manually index all lanes; you define a tiled copy and let CuTE partition.
+      </p>
+      <pre><code class="language-cpp">ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
+Tensor tAgA = thr_copy_a.partition_S(gA); // source partition
+Tensor tAsA = thr_copy_a.partition_D(sA); // destination partition</code></pre>
+      <div class="anim">
+        <div class="anim-header">
+          <div class="anim-title">Thread ownership map (simplified)</div>
+          <div class="step-label" id="partStep">thread 0</div>
+        </div>
+        <div class="matrix-grid" id="partGrid"></div>
+        <div class="controls">
+          <button class="btn" id="partPrev">Prev</button>
+          <button class="btn" id="partNext">Next</button>
+          <button class="btn" id="partAuto">Auto</button>
+          <button class="btn" id="partStop">Stop</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="copy">
+      <h2>5) <span class="mono">make_tiled_copy</span> and copy groups</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>CuTE copy object</h3>
+          <pre><code class="language-cpp">using CopyOp = SM80_CP_ASYNC_CACHEALWAYS&lt;uint128_t&gt;;
+TiledCopy copyA = make_tiled_copy(
+  Copy_Atom&lt;CopyOp, T&gt;{},
+  Layout&lt;Shape&lt;_32,_4&gt;, Stride&lt;_4,_1&gt;&gt;{},
+  Layout&lt;Shape&lt;_1,_8&gt;&gt;{}
+);</code></pre>
+          <p>
+            Read this as: "build a thread mapping and vector shape for copy atoms."
+            Then <span class="mono">partition_S/D</span> projects that mapping onto actual tensors.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Group timeline (stable DOM animation)</h3>
+          <div class="anim" id="groupAnim">
+            <div class="anim-header">
+              <div class="anim-title">Issue -> fence -> wait</div>
+              <div class="step-label" id="groupStep">step 0</div>
+            </div>
+            <div class="timeline">
+              <div class="lane">
+                <div class="lane-name">Group 0</div>
+                <div class="lane-track" id="g0"></div>
+              </div>
+              <div class="lane">
+                <div class="lane-name">Group 1</div>
+                <div class="lane-track" id="g1"></div>
+              </div>
+              <div class="lane">
+                <div class="lane-name">Compute</div>
+                <div class="lane-track" id="gc"></div>
+              </div>
+            </div>
+            <div class="controls">
+              <button class="btn" data-g="prev">Prev</button>
+              <button class="btn" data-g="next">Next</button>
+              <button class="btn" data-g="auto">Auto</button>
+              <button class="btn" data-g="stop">Stop</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="fragments">
+      <h2>6) Fragments and <span class="mono">retile_D</span></h2>
+      <p>
+        This is the most important CuTE concept in the kernel. You generate MMA fragments,
+        then retile a copy destination so loads land exactly into fragment layout.
+      </p>
+      <pre><code class="language-cpp">Tensor tCrA = thr_mma.partition_fragment_A(sA(_,_,0));
+auto s2r_copy_a = make_tiled_copy_A(s2r_atom_a, mma);
+auto s2r_thr_copy_a = s2r_copy_a.get_slice(threadIdx.x);
+Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);</code></pre>
+      <div class="anim">
+        <div class="anim-header">
+          <div class="anim-title">Shared -> Register fragment flow</div>
+          <div class="step-label" id="fragStep">k_block 0</div>
+        </div>
+        <div class="tensor-boxes">
+          <div class="tensor">
+            <div class="name">tXsA (source in SMEM)</div>
+            <div class="flow">
+              <div class="node s">CPY</div>
+              <div class="node s">MMA_M</div>
+              <div class="node s">MMA_K</div>
+              <div class="node s">PIPE</div>
+              <div class="node s">slice</div>
+            </div>
+          </div>
+          <div class="tensor">
+            <div class="name">retile_D bridge</div>
+            <p>Retiling maps copy lanes onto MMA fragment coordinates.</p>
+          </div>
+          <div class="tensor">
+            <div class="name">tXrA (dest in regs)</div>
+            <div class="flow">
+              <div class="node r">CPY</div>
+              <div class="node r">MMA_M</div>
+              <div class="node r">MMA_K</div>
+              <div class="node r">frag</div>
+              <div class="node r">slot</div>
+            </div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="btn" id="fragPrev">Prev</button>
+          <button class="btn" id="fragNext">Next</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <h2>7) Pipeline in CuTE objects, not generic GPU terms</h2>
+      <p>
+        Read each phase using concrete tensor names from your code.
+      </p>
+      <div class="card">
+        <table class="table">
+          <thead><tr><th>Phase</th><th>CuTE object transition</th><th>Kernel snippet</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Prologue</td>
+              <td><span class="mono">tAgA/tBgB -> tAsA/tBsB</span> for first <span class="mono">PIPE-1</span> tiles</td>
+              <td><span class="mono">copy(copy_a,...); cp_async_fence();</span></td>
+            </tr>
+            <tr>
+              <td>Warm register</td>
+              <td><span class="mono">tXsA -> tXrA</span> at first read stage</td>
+              <td><span class="mono">copy(s2r_atom_a,...)</span></td>
+            </tr>
+            <tr>
+              <td>Steady state</td>
+              <td><span class="mono">gmem->smem</span>, <span class="mono">smem->reg</span>, <span class="mono">mma</span> overlap</td>
+              <td><span class="mono">if(k_block==0){...} gemm(...)</span></td>
+            </tr>
+            <tr>
+              <td>Drain</td>
+              <td>No new <span class="mono">tAgA->tAsA</span>; only fragment consume</td>
+              <td><span class="mono">while (k_tile_count > -(PIPE-1))</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="anim" id="pipeObjAnim">
+        <div class="anim-header">
+          <div class="anim-title">Object-level timeline</div>
+          <div class="step-label" id="pipeObjStep">step 0</div>
+        </div>
+        <div class="timeline">
+          <div class="lane"><div class="lane-name mono">tAgA->tAsA</div><div class="lane-track" id="po1"></div></div>
+          <div class="lane"><div class="lane-name mono">tXsA->tXrA</div><div class="lane-track" id="po2"></div></div>
+          <div class="lane"><div class="lane-name mono">gemm(mma,...)</div><div class="lane-track" id="po3"></div></div>
+        </div>
+        <div class="controls">
+          <button class="btn" data-po="prev">Prev</button>
+          <button class="btn" data-po="next">Next</button>
+          <button class="btn" data-po="auto">Auto</button>
+          <button class="btn" data-po="stop">Stop</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="kernel">
+      <h2>8) Annotated kernel, CUTE-focused</h2>
+      <pre><code class="language-cpp">// 1) Logical tensors
+Tensor mA = make_tensor(make_gmem_ptr(A), select&lt;0,2&gt;(shape_MNK), dA);
+Tensor mB = make_tensor(make_gmem_ptr(B), select&lt;1,2&gt;(shape_MNK), dB);
+Tensor mC = make_tensor(make_gmem_ptr(C), select&lt;0,1&gt;(shape_MNK), dC);
+
+// 2) CTA tiling views
+Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step&lt;_1, X,_1&gt;{});
+Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step&lt; X,_1,_1&gt;{});
+Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step&lt;_1,_1, X&gt;{});
+
+// 3) Thread copy partitions
+Tensor tAgA = thr_copy_a.partition_S(gA);
+Tensor tAsA = thr_copy_a.partition_D(sA);
+
+// 4) MMA fragments
+Tensor tCrA = thr_mma.partition_fragment_A(sA(_,_,0));
+Tensor tCrB = thr_mma.partition_fragment_B(sB(_,_,0));
+Tensor tCrC = thr_mma.make_fragment_C(tCgC);
+
+// 5) Retiled smem->reg mapping
+Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+
+// 6) Pipeline; expressed as object transitions
+copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+copy(s2r_atom_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
+gemm(mma, tCrA(_,_,k_block), tCrB(_,_,k_block), tCrC);</code></pre>
+      <div class="callout">
+        If you can narrate every line as "which CuTE tensor view moves to which other view",
+        you have mastered this kernel.
+      </div>
+    </section>
+
+    <section id="practice">
+      <h2>9) Practice checks to become fluent in CuTE</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Checklist</h3>
+          <ul>
+            <li>Can you derive rank and mode meaning of <span class="mono">tAgA</span> from copy layout?</li>
+            <li>Can you explain why <span class="mono">retile_D(tCrA)</span> is needed?</li>
+            <li>Can you map each <span class="mono">if (k_block ...)</span> to buffer movement?</li>
+            <li>Can you change <span class="mono">PIPE</span> from 3 to 2 and predict stalls?</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Debug strategy (CuTE-first)</h3>
+          <ul>
+            <li>Print shapes and strides at compile time where possible.</li>
+            <li>Validate one path; <span class="mono">gmem->smem</span> before adding <span class="mono">smem->reg</span>.</li>
+            <li>Freeze <span class="mono">k_block</span> loop to test fragment mapping.</li>
+            <li>Then add async grouping and final overlap.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="sticky-summary">
+        Mastery formula; <span class="mono">shape + layout + partition + retile + schedule</span>.
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+  <script>
+    function ceilDiv(a, b) { return Math.floor((a + b - 1) / b); }
+    function byId(id) { return document.getElementById(id); }
+
+    // -------- shape playground --------
+    function recomputeShape() {
+      const M = Number(byId("inM").value) || 0;
+      const N = Number(byId("inN").value) || 0;
+      const K = Number(byId("inK").value) || 0;
+      const bM = Number(byId("inbM").value) || 1;
+      const bN = Number(byId("inbN").value) || 1;
+      const bK = Number(byId("inbK").value) || 1;
+      const bP = Number(byId("inbP").value) || 1;
+
+      const out = [
+        ["Grid x (M/bM)", ceilDiv(M, bM)],
+        ["Grid y (N/bN)", ceilDiv(N, bN)],
+        ["K tiles (K/bK)", ceilDiv(K, bK)],
+        ["sA logical shape", "(" + bM + ", " + bK + ", " + bP + ")"],
+        ["sB logical shape", "(" + bN + ", " + bK + ", " + bP + ")"],
+        ["sA elements", bM * bK * bP],
+        ["sB elements", bN * bK * bP],
+        ["Approx smem bytes (half)", (bM*bK*bP + bN*bK*bP) * 2]
+      ];
+      byId("shapeOut").innerHTML = out.map(function (r) {
+        return "<tr><td class='mono'>" + r[0] + "</td><td class='mono'>" + r[1] + "</td></tr>";
+      }).join("");
+    }
+    byId("recompute").addEventListener("click", recomputeShape);
+    recomputeShape();
+
+    // -------- helper for step animations --------
+    function setupStepper(opts) {
+      var step = 0;
+      var timer = null;
+      function render() { opts.render(step); }
+      function next() { step = Math.min(opts.max - 1, step + 1); render(); }
+      function prev() { step = Math.max(0, step - 1); render(); }
+      function stop() { if (timer) { clearInterval(timer); timer = null; } }
+      function auto() {
+        stop();
+        timer = setInterval(function () {
+          if (step >= opts.max - 1) { step = 0; }
+          else { step++; }
+          render();
+        }, opts.ms || 900);
+      }
+      render();
+      return { next: next, prev: prev, auto: auto, stop: stop };
+    }
+
+    // -------- tile animation --------
+    (function () {
+      var grid = byId("tileGrid");
+      for (var i = 0; i < 64; i++) {
+        var d = document.createElement("div");
+        d.className = "cell";
+        d.textContent = i;
+        grid.appendChild(d);
+      }
+      var cells = Array.prototype.slice.call(grid.children);
+      var coords = [
+        [0,0], [0,1], [0,2], [0,3],
+        [1,0], [1,1], [1,2], [1,3],
+        [2,0], [2,1], [2,2], [2,3]
+      ];
+      var s = setupStepper({
+        max: coords.length,
+        ms: 700,
+        render: function (step) {
+          cells.forEach(function (c) { c.classList.remove("hit"); });
+          var xy = coords[step];
+          byId("tileStep").textContent = "cta=(" + xy[0] + "," + xy[1] + ")";
+          var r0 = xy[0] * 2, c0 = xy[1] * 2;
+          for (var r = r0; r < r0 + 2; r++) {
+            for (var c = c0; c < c0 + 2; c++) {
+              var idx = r * 8 + c;
+              if (cells[idx]) cells[idx].classList.add("hit");
+            }
+          }
+        }
+      });
+      var host = byId("tileAnim");
+      host.querySelector("[data-act='prev']").onclick = s.prev;
+      host.querySelector("[data-act='next']").onclick = s.next;
+      host.querySelector("[data-act='auto']").onclick = s.auto;
+      host.querySelector("[data-act='stop']").onclick = s.stop;
+    })();
+
+    // -------- partition animation --------
+    (function () {
+      var grid = byId("partGrid");
+      for (var i = 0; i < 64; i++) {
+        var d = document.createElement("div");
+        d.className = "cell";
+        d.textContent = i;
+        grid.appendChild(d);
+      }
+      var cells = Array.prototype.slice.call(grid.children);
+      var lane = 0;
+      function showLane(v) {
+        lane = v;
+        byId("partStep").textContent = "thread " + lane;
+        cells.forEach(function (c) { c.classList.remove("hit", "hit2"); });
+        var base = (lane % 8);
+        for (var i = 0; i < 8; i++) {
+          var idx = (i * 8 + ((base + i) % 8));
+          if (cells[idx]) cells[idx].classList.add("hit");
+        }
+      }
+      var timer = null;
+      byId("partPrev").onclick = function () { showLane((lane + 31) % 32); };
+      byId("partNext").onclick = function () { showLane((lane + 1) % 32); };
+      byId("partAuto").onclick = function () {
+        if (timer) clearInterval(timer);
+        timer = setInterval(function () { showLane((lane + 1) % 32); }, 500);
+      };
+      byId("partStop").onclick = function () { if (timer) clearInterval(timer); };
+      showLane(0);
+    })();
+
+    // -------- simple lane renderer --------
+    function renderLane(el, arr, step) {
+      el.innerHTML = "";
+      for (var i = 0; i < arr.length; i++) {
+        var b = document.createElement("div");
+        b.className = "blk " + arr[i].k + (i <= step ? " active" : "");
+        b.textContent = arr[i].t;
+        el.appendChild(b);
+      }
+    }
+
+    // -------- group animation --------
+    (function () {
+      var g0 = byId("g0"), g1 = byId("g1"), gc = byId("gc");
+      var seq0 = [{k:"g",t:"copy A0"}, {k:"g",t:"copy B0"}, {k:"s",t:"fence0"}, {k:"s",t:"ready0"}];
+      var seq1 = [{k:"g",t:"copy A1"}, {k:"g",t:"copy B1"}, {k:"s",t:"fence1"}, {k:"s",t:"in-flight"}];
+      var seqC = [{k:"m",t:"wait<1>"}, {k:"r",t:"load reg"}, {k:"m",t:"mma 0"}, {k:"m",t:"mma 1"}];
+      var s = setupStepper({
+        max: 4,
+        ms: 900,
+        render: function (step) {
+          byId("groupStep").textContent = "step " + step;
+          renderLane(g0, seq0, step);
+          renderLane(g1, seq1, Math.max(0, step - 1));
+          renderLane(gc, seqC, step);
+        }
+      });
+      var root = byId("groupAnim");
+      root.querySelector("[data-g='prev']").onclick = s.prev;
+      root.querySelector("[data-g='next']").onclick = s.next;
+      root.querySelector("[data-g='auto']").onclick = s.auto;
+      root.querySelector("[data-g='stop']").onclick = s.stop;
+    })();
+
+    // -------- fragment tiny step --------
+    (function () {
+      var step = 0;
+      function draw() {
+        byId("fragStep").textContent = "k_block " + step;
+      }
+      byId("fragPrev").onclick = function () { step = (step + 1) % 2; draw(); };
+      byId("fragNext").onclick = function () { step = (step + 1) % 2; draw(); };
+      draw();
+    })();
+
+    // -------- pipeline object animation --------
+    (function () {
+      var po1 = byId("po1"), po2 = byId("po2"), po3 = byId("po3");
+      var a1 = [
+        {k:"g",t:"tile0"}, {k:"g",t:"tile1"}, {k:"g",t:"tile2"}, {k:"g",t:"tile3"},
+        {k:"g",t:"tile4"}, {k:"g",t:"drain"}, {k:"g",t:"drain"}
+      ];
+      var a2 = [
+        {k:"r",t:"k0"}, {k:"r",t:"k1"}, {k:"r",t:"k0"}, {k:"r",t:"k1"},
+        {k:"r",t:"k0"}, {k:"r",t:"k1"}, {k:"r",t:"done"}
+      ];
+      var a3 = [
+        {k:"m",t:"mma0"}, {k:"m",t:"mma1"}, {k:"m",t:"mma2"}, {k:"m",t:"mma3"},
+        {k:"m",t:"mma4"}, {k:"m",t:"mma5"}, {k:"m",t:"storeC"}
+      ];
+      var s = setupStepper({
+        max: 7,
+        ms: 800,
+        render: function (step) {
+          byId("pipeObjStep").textContent = "step " + step;
+          renderLane(po1, a1, step);
+          renderLane(po2, a2, step);
+          renderLane(po3, a3, step);
+        }
+      });
+      var root = byId("pipeObjAnim");
+      root.querySelector("[data-po='prev']").onclick = s.prev;
+      root.querySelector("[data-po='next']").onclick = s.next;
+      root.querySelector("[data-po='auto']").onclick = s.auto;
+      root.querySelector("[data-po='stop']").onclick = s.stop;
+    })();
+  </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CuTE GEMM Course: From Tiled Matmul to Pipelined Kernel</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0b0d12;
+      --card: #141925;
+      --card-2: #0f1420;
+      --line: #283049;
+      --text: #e9eeff;
+      --muted: #a3aecf;
+      --accent: #7c8bff;
+      --good: #4ade80;
+      --warn: #fbbf24;
+      --hot: #f87171;
+      --cyan: #22d3ee;
+    }
+    body {
+      font-family: Inter, sans-serif;
+      background: radial-gradient(1200px 900px at 80% -20%, #1d2750 0%, var(--bg) 40%);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      background: rgba(11, 13, 18, 0.9);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+    }
+    .nav-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      padding: 12px 20px;
+      overflow-x: auto;
+    }
+    .nav-title {
+      font-weight: 800;
+      color: white;
+      white-space: nowrap;
+      margin-right: 10px;
+    }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    nav a:hover { color: var(--accent); }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 26px 20px 90px;
+    }
+    section { margin-top: 42px; }
+    h1 {
+      font-size: clamp(2rem, 4vw, 3.3rem);
+      font-weight: 800;
+      line-height: 1.1;
+      margin-bottom: 12px;
+    }
+    h2 {
+      margin-bottom: 14px;
+      font-size: clamp(1.35rem, 2.6vw, 2rem);
+    }
+    h3 {
+      margin: 20px 0 10px;
+      font-size: 1.1rem;
+    }
+    p { margin-bottom: 12px; color: var(--text); }
+    .muted { color: var(--muted); }
+    .lead { max-width: 900px; font-size: 1.05rem; }
+    .grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(12, 1fr);
+    }
+    .card {
+      background: linear-gradient(180deg, var(--card), var(--card-2));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+    }
+    .col-6 { grid-column: span 6; }
+    .col-7 { grid-column: span 7; }
+    .col-5 { grid-column: span 5; }
+    .col-8 { grid-column: span 8; }
+    .col-4 { grid-column: span 4; }
+    .col-12 { grid-column: span 12; }
+    @media (max-width: 900px) {
+      .col-6, .col-7, .col-5, .col-8, .col-4 { grid-column: span 12; }
+    }
+    .pill {
+      display: inline-block;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      margin-right: 6px;
+      margin-bottom: 8px;
+    }
+    .accent { color: var(--accent); }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .hot { color: var(--hot); }
+    .mono { font-family: "JetBrains Mono", monospace; }
+    .course-map {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+    }
+    .course-map a {
+      text-decoration: none;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #0f1421;
+      font-size: 14px;
+    }
+    .course-map a:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Matrix visuals */
+    .matrix-wrap {
+      display: inline-grid;
+      gap: 2px;
+      border: 1px solid var(--line);
+      background: #0b1020;
+      padding: 10px;
+      border-radius: 10px;
+      margin-top: 8px;
+    }
+    .cell {
+      width: 18px;
+      height: 18px;
+      border-radius: 3px;
+      background: #1a2340;
+      transition: transform 160ms ease, background 160ms ease, opacity 160ms ease;
+    }
+    .cell.on-a { background: #3b82f6; }
+    .cell.on-b { background: #22d3ee; }
+    .cell.on-c { background: #7c8bff; }
+    .cell.on-tile { background: #fbbf24; }
+    .cell.on-thread { background: #4ade80; }
+    .cell.dim { opacity: 0.25; }
+
+    .matrix-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    /* Stepper */
+    .stepper-controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0f1528;
+      color: var(--text);
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary {
+      background: #24317a;
+      border-color: #3f55d5;
+      color: white;
+    }
+    button.primary:hover { color: white; filter: brightness(1.1); }
+
+    .range-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    input[type="range"] { width: 220px; }
+    input[type="number"] {
+      background: #0f1528;
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 6px 8px;
+      width: 95px;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 170px 1fr;
+      gap: 8px;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .kv div:nth-child(odd) {
+      color: var(--muted);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 12px;
+    }
+
+    .code-note {
+      border-left: 3px solid var(--accent);
+      padding: 10px 12px;
+      background: rgba(124, 139, 255, 0.08);
+      border-radius: 8px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    pre[class*="language-"] {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      margin-top: 12px !important;
+      font-size: 13px !important;
+    }
+
+    /* Pipeline wheel */
+    .stage-wheel {
+      width: 280px;
+      height: 280px;
+      margin: 14px auto;
+      position: relative;
+    }
+    .stage {
+      width: 96px;
+      height: 66px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      position: absolute;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      font-size: 12px;
+      font-family: "JetBrains Mono", monospace;
+      background: #11192f;
+      color: var(--muted);
+      transition: 220ms;
+    }
+    .stage.s0 { left: 92px; top: 8px; }
+    .stage.s1 { right: 4px; top: 108px; }
+    .stage.s2 { left: 4px; top: 108px; }
+    .stage.active-load { border-color: var(--warn); color: var(--warn); background: rgba(251, 191, 36, 0.12); }
+    .stage.active-read { border-color: var(--good); color: var(--good); background: rgba(74, 222, 128, 0.12); }
+    .stage.ready { border-color: var(--cyan); color: var(--cyan); background: rgba(34, 211, 238, 0.12); }
+    .wheel-center {
+      position: absolute;
+      left: 98px;
+      top: 106px;
+      width: 84px;
+      height: 84px;
+      border-radius: 999px;
+      border: 1px dashed var(--line);
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 12px;
+    }
+    .wheel-arrow {
+      position: absolute;
+      left: 137px;
+      top: 140px;
+      width: 2px;
+      height: 70px;
+      transform-origin: top center;
+      background: linear-gradient(var(--accent), transparent);
+      transition: transform 260ms ease;
+    }
+    .wheel-tip {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      right: -4px;
+      top: 64px;
+      border-radius: 99px;
+      background: var(--accent);
+    }
+
+    .symbol-flow {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .symbol {
+      border: 1px solid var(--line);
+      background: #0f1528;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 12px;
+      color: var(--muted);
+      transition: 180ms;
+    }
+    .symbol.active {
+      border-color: var(--accent);
+      color: white;
+      background: rgba(124, 139, 255, 0.22);
+      transform: translateY(-2px);
+    }
+
+    .checkpoint {
+      border: 1px solid #30445f;
+      background: rgba(34, 211, 238, 0.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-top: 10px;
+      color: #b8ddff;
+      font-size: 14px;
+    }
+
+    .footer-space { height: 60px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <div class="nav-title">CuTE Course</div>
+      <a href="#intro">Intro</a>
+      <a href="#syntax">CuTE syntax</a>
+      <a href="#shapes">Shape algebra</a>
+      <a href="#tile">local_tile</a>
+      <a href="#partition">partition</a>
+      <a href="#copy">tiled_copy</a>
+      <a href="#fragments">fragments</a>
+      <a href="#pipeline">pipeline in CuTE</a>
+      <a href="#walkthrough">full walkthrough</a>
+      <a href="#practice">practice</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="intro">
+      <h1>Learn this kernel as <span class="accent">CuTE language</span>, not only as GPU plumbing.</h1>
+      <p class="lead muted">
+        This course rebuilds your understanding from CuTE primitives: shape, stride, layout, tiling, partitioning,
+        copy atoms, fragment mapping, and pipeline tensors. GPU ideas are included, but CuTE stays the main lens.
+      </p>
+
+      <div class="card" style="margin-top:14px;">
+        <span class="pill">Your input level: tiled CuTE matmul basics</span>
+        <span class="pill">Goal: expert-level CuTE reasoning</span>
+        <span class="pill">Format: interactive + animated</span>
+        <p class="muted" style="margin-top:8px;">
+          Every animation below is DOM/CSS based with light JS state. This avoids canvas edge failures and keeps behavior stable.
+        </p>
+      </div>
+
+      <h3 style="margin-top:16px;">Course map</h3>
+      <div class="course-map">
+        <a href="#syntax">1. Kernel mapped to CuTE symbols</a>
+        <a href="#shapes">2. Shape algebra playground</a>
+        <a href="#tile">3. local_tile + Step visualization</a>
+        <a href="#partition">4. partition_S / partition_D by thread</a>
+        <a href="#copy">5. tiled_copy + cp_async groups</a>
+        <a href="#fragments">6. partition_fragment + retile_D</a>
+        <a href="#pipeline">7. Pipeline with CuTE tensors</a>
+        <a href="#walkthrough">8. Full code walkthrough in CuTE terms</a>
+      </div>
+    </section>
+
+    <section id="syntax">
+      <h2>1) Read the kernel as CuTE syntax graph</h2>
+      <div class="grid">
+        <div class="card col-7">
+          <h3>CuTE primitive map</h3>
+          <div class="symbol-flow" id="symbol-flow">
+            <div class="symbol" data-step="0">make_tensor(mA,mB,mC)</div>
+            <div class="symbol" data-step="1">local_tile(gA,gB,gC)</div>
+            <div class="symbol" data-step="2">partition_S / partition_D</div>
+            <div class="symbol" data-step="3">partition_fragment_A/B/C</div>
+            <div class="symbol" data-step="4">make_tiled_copy_A/B</div>
+            <div class="symbol" data-step="5">retile_D(tCrA,tCrB)</div>
+            <div class="symbol" data-step="6">copy + cp_async_fence/wait</div>
+            <div class="symbol" data-step="7">gemm(mma, ...)</div>
+          </div>
+          <div class="stepper-controls">
+            <button id="flow-prev">Prev</button>
+            <button class="primary" id="flow-next">Next</button>
+            <span class="mono muted" id="flow-label">Step 1/8</span>
+          </div>
+          <div class="code-note" id="flow-note"></div>
+        </div>
+        <div class="card col-5">
+          <h3>Mental model</h3>
+          <p><span class="mono accent">CuTE tensors are views</span>; they encode shape + layout + stride semantics.</p>
+          <p><span class="mono accent">local_tile</span> changes the view to CTA-local coordinates.</p>
+          <p><span class="mono accent">partition_*</span> changes the view to thread-local coordinates.</p>
+          <p><span class="mono accent">fragment tensors</span> map view semantics into registers expected by MMA.</p>
+          <p><span class="mono accent">pipeline</span> is just one more dimension in the tensor view: <span class="mono">PIPE</span>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="shapes">
+      <h2>2) Shape algebra playground (core CuTE skill)</h2>
+      <div class="grid">
+        <div class="card col-6">
+          <h3>Input problem + tile sizes</h3>
+          <div class="range-row">
+            <label class="mono muted">M</label><input type="number" id="M" value="5120">
+            <label class="mono muted">N</label><input type="number" id="N" value="5120">
+            <label class="mono muted">K</label><input type="number" id="K" value="4096">
+          </div>
+          <div class="range-row">
+            <label class="mono muted">bM</label><input type="number" id="bM" value="128">
+            <label class="mono muted">bN</label><input type="number" id="bN" value="128">
+            <label class="mono muted">bK</label><input type="number" id="bK" value="32">
+            <label class="mono muted">PIPE</label><input type="number" id="PIPE" value="3">
+          </div>
+          <div class="stepper-controls">
+            <button class="primary" id="recompute">Recompute tensor shapes</button>
+          </div>
+          <div class="checkpoint">
+            Rule of thumb: if you can derive all ranks and modes of <span class="mono">gA, tAgA, tAsA, tXsA, tXrA</span> by hand,
+            you can debug most CuTE kernels.
+          </div>
+        </div>
+        <div class="card col-6">
+          <h3>Derived values</h3>
+          <div class="kv" id="shape-kv"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tile">
+      <h2>3) <span class="mono">local_tile</span> and <span class="mono">Step&lt;&gt;</span> animation</h2>
+      <div class="grid">
+        <div class="card col-8">
+          <div class="matrix-label">Global A matrix view (16x16 demo). Highlight shows CTA tile selected by <span class="mono">local_tile(... Step&lt;_1, X, _1&gt;)</span>.</div>
+          <div id="tile-matrix" class="matrix-wrap"></div>
+          <div class="stepper-controls">
+            <button id="tile-prev">Prev tile</button>
+            <button class="primary" id="tile-next">Next tile</button>
+            <button id="tile-play">Auto-play</button>
+            <span class="mono muted" id="tile-label"></span>
+          </div>
+        </div>
+        <div class="card col-4">
+          <h3>How to read Step</h3>
+          <p class="mono muted">Step&lt;_1, X, _1&gt;</p>
+          <p><span class="good">_1</span> means tile this mode.</p>
+          <p><span class="hot">X</span> means hold this mode fixed for this local view.</p>
+          <p>For A: move on M and K-tile index, keep CTA-N axis out.</p>
+          <div class="code-note">
+            This is a CuTE coordinate transform, not a data movement instruction.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="partition">
+      <h2>4) <span class="mono">partition_S</span> / <span class="mono">partition_D</span> by thread</h2>
+      <div class="grid">
+        <div class="card col-7">
+          <div class="matrix-label">Thread slice demo. Move thread id to see which elements one thread owns in <span class="mono">tAgA</span> and <span class="mono">tAsA</span>.</div>
+          <div style="display:flex; gap:14px; flex-wrap:wrap;">
+            <div>
+              <div class="matrix-label">Source (gA/tAgA)</div>
+              <div id="part-src" class="matrix-wrap"></div>
+            </div>
+            <div>
+              <div class="matrix-label">Destination (sA/tAsA)</div>
+              <div id="part-dst" class="matrix-wrap"></div>
+            </div>
+          </div>
+          <div class="range-row">
+            <label class="mono muted">threadIdx.x</label>
+            <input id="thread-slider" type="range" min="0" max="127" value="0">
+            <span class="mono" id="thread-label">0</span>
+          </div>
+        </div>
+        <div class="card col-5">
+          <h3>Key CuTE concept</h3>
+          <p><span class="mono">partition_S</span> computes a thread-local <span class="mono">source view</span>.</p>
+          <p><span class="mono">partition_D</span> computes a thread-local <span class="mono">destination view</span>.</p>
+          <p>Then <span class="mono">copy(atom, src, dst)</span> is shape-safe because both views are congruent in modes.</p>
+          <div class="checkpoint">
+            Debug trick: print one thread's logical coordinates from these partitioned tensors.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="copy">
+      <h2>5) <span class="mono">make_tiled_copy</span>, copy groups, and fences</h2>
+      <div class="grid">
+        <div class="card col-5">
+          <h3>Copy atom chain</h3>
+          <pre><code class="language-cpp">using CopyOp = SM80_CP_ASYNC_CACHEALWAYS&lt;uint128_t&gt;;
+TiledCopy copyA = make_tiled_copy(
+    Copy_Atom&lt;CopyOp, T&gt;{},
+    Layout&lt;Shape&lt;_32,_4&gt;, Stride&lt;_4,_1&gt;&gt;{},
+    Layout&lt;Shape&lt;_1,_8&gt;&gt;{}
+);</code></pre>
+          <p class="muted">Think in CuTE terms: atom + thread layout + value layout define a legal transformation between source and destination views.</p>
+        </div>
+        <div class="card col-7">
+          <h3>PIPE stage ring (CUTE dimension view)</h3>
+          <div class="stage-wheel">
+            <div class="stage s0" id="stage-0">PIPE 0<br>read</div>
+            <div class="stage s1" id="stage-1">PIPE 1<br>ready</div>
+            <div class="stage s2" id="stage-2">PIPE 2<br>write</div>
+            <div class="wheel-center mono" id="wheel-center">k=0</div>
+            <div class="wheel-arrow" id="wheel-arrow"><div class="wheel-tip"></div></div>
+          </div>
+          <div class="stepper-controls">
+            <button id="pipe-prev">Prev</button>
+            <button class="primary" id="pipe-next">Next</button>
+            <button id="pipe-play">Auto-play</button>
+            <span class="mono muted" id="pipe-label"></span>
+          </div>
+          <div class="code-note" id="pipe-note"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="fragments">
+      <h2>6) Fragments: <span class="mono">partition_fragment_*</span> + <span class="mono">retile_D</span></h2>
+      <div class="grid">
+        <div class="card col-8">
+          <div class="matrix-label">Registers are shown as 2 slots (double buffer). Left slot computes while right slot preloads.</div>
+          <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px;">
+            <div class="card" style="min-width:210px; flex:1;">
+              <div class="mono muted">tCrA slot 0</div>
+              <div id="frag-a0" class="matrix-wrap"></div>
+            </div>
+            <div class="card" style="min-width:210px; flex:1;">
+              <div class="mono muted">tCrA slot 1</div>
+              <div id="frag-a1" class="matrix-wrap"></div>
+            </div>
+            <div class="card" style="min-width:210px; flex:1;">
+              <div class="mono muted">Accumulator tCrC</div>
+              <div id="frag-c" class="matrix-wrap"></div>
+            </div>
+          </div>
+          <div class="stepper-controls">
+            <button id="frag-prev">Prev</button>
+            <button class="primary" id="frag-next">Next</button>
+            <button id="frag-play">Auto-play</button>
+            <span class="mono muted" id="frag-label"></span>
+          </div>
+          <div class="code-note" id="frag-note"></div>
+        </div>
+        <div class="card col-4">
+          <h3>What <span class="mono">retile_D</span> gives you</h3>
+          <p>It reshapes destination register views to match the copy atom mapping.</p>
+          <p>So LDSM writes directly into the MMA-ready register layout.</p>
+          <pre><code class="language-cpp">Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB);</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <h2>7) Full pipeline explained with CuTE tensor symbols</h2>
+      <div class="grid">
+        <div class="card col-12">
+          <div class="symbol-flow" id="pipeline-symbols">
+            <div class="symbol" data-p="0">tAgA (_,_,_,k_tile_next)</div>
+            <div class="symbol" data-p="1">tAsA (_,_,_,smem_pipe_write)</div>
+            <div class="symbol" data-p="2">tXsA (_,_,_,smem_pipe_read)</div>
+            <div class="symbol" data-p="3">tXrA (_,_,k_block_next)</div>
+            <div class="symbol" data-p="4">tCrA (_,_,k_block)</div>
+            <div class="symbol" data-p="5">tCrC (accum)</div>
+          </div>
+          <div class="stepper-controls">
+            <button id="sym-prev">Prev</button>
+            <button class="primary" id="sym-next">Next</button>
+            <button id="sym-play">Auto-play</button>
+            <span class="mono muted" id="sym-label"></span>
+          </div>
+          <div class="code-note" id="sym-note"></div>
+          <pre><code class="language-cpp">// CuTE tensor flow in one inner-loop cycle
+copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
+cp_async_fence();
+copy(s2r_atom_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
+gemm(mma, tCrA(_,_,k_block), tCrB(_,_,k_block), tCrC);</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="walkthrough">
+      <h2>8) Full kernel walkthrough in CuTE-first language</h2>
+      <div class="card">
+        <h3>A) Build global tensor views</h3>
+        <pre><code class="language-cpp">Tensor mA = make_tensor(make_gmem_ptr(A), select&lt;0,2&gt;(shape_MNK), dA);
+Tensor mB = make_tensor(make_gmem_ptr(B), select&lt;1,2&gt;(shape_MNK), dB);
+Tensor mC = make_tensor(make_gmem_ptr(C), select&lt;0,1&gt;(shape_MNK), dC);</code></pre>
+        <p class="muted">You define semantics first. No movement yet.</p>
+
+        <h3>B) Re-index to CTA-local coordinates</h3>
+        <pre><code class="language-cpp">Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step&lt;_1, X, _1&gt;{});
+Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step&lt; X,_1, _1&gt;{});
+Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step&lt;_1,_1, X&gt;{});</code></pre>
+        <p class="muted">This produces CTA-local tensor views in CuTE space.</p>
+
+        <h3>C) Partition for copy and MMA</h3>
+        <pre><code class="language-cpp">ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
+Tensor tAgA = thr_copy_a.partition_S(gA);
+Tensor tAsA = thr_copy_a.partition_D(sA);
+
+ThrMMA thr_mma = mma.get_slice(threadIdx.x);
+Tensor tCrA = thr_mma.partition_fragment_A(sA(_,_,0));
+Tensor tCrB = thr_mma.partition_fragment_B(sB(_,_,0));</code></pre>
+        <p class="muted">Every thread receives legal sub-views for both copy and compute pipelines.</p>
+
+        <h3>D) Retile and pipeline</h3>
+        <pre><code class="language-cpp">Tensor tXsA = s2r_thr_copy_a.partition_S(sA);
+Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA);
+// ...
+copy(s2r_atom_a, tXsA_p(_,_,k_block_next), tXrA(_,_,k_block_next));
+gemm(mma, tCrA(_,_,k_block), tCrB(_,_,k_block), tCrC);</code></pre>
+        <p class="muted">You are composing compatible views. CuTE guarantees the shape logic if your atom/layout contracts are valid.</p>
+      </div>
+    </section>
+
+    <section id="practice">
+      <h2>9) Practice checklist: become strong at CuTE kernel debugging</h2>
+      <div class="grid">
+        <div class="card col-6">
+          <h3>Shape checks you should run</h3>
+          <ul style="padding-left: 18px;">
+            <li>Confirm rank and mode order of every intermediate tensor view.</li>
+            <li>Confirm <span class="mono">partition_S</span> and <span class="mono">partition_D</span> produce congruent shapes.</li>
+            <li>Confirm <span class="mono">retile_D</span> destination layout matches MMA fragment layout.</li>
+            <li>Confirm <span class="mono">PIPE</span> dimension size and wrap logic for read/write pointers.</li>
+          </ul>
+        </div>
+        <div class="card col-6">
+          <h3>Common CuTE mistakes</h3>
+          <ul style="padding-left: 18px;">
+            <li>Mixing logical tensor shape with physical memory layout assumptions.</li>
+            <li>Using wrong <span class="mono">Step&lt;&gt;</span> mode and tiling the wrong axis.</li>
+            <li>Skipping congruence checks between source and destination copy views.</li>
+            <li>Treating MMA fragment tensors as simple contiguous arrays.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="muted" style="margin-top: 12px;">
+        If you want, I can add a second page with mini exercises where you predict each tensor's shape and then reveal answers.
+      </p>
+    </section>
+
+    <div class="footer-space"></div>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+  <script>
+    // ---------- Shared utility ----------
+    function makeMatrix(containerId, rows, cols) {
+      const el = document.getElementById(containerId);
+      el.innerHTML = "";
+      el.style.gridTemplateColumns = `repeat(${cols}, 18px)`;
+      const out = [];
+      for (let r = 0; r < rows; r++) {
+        const row = [];
+        for (let c = 0; c < cols; c++) {
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          el.appendChild(cell);
+          row.push(cell);
+        }
+        out.push(row);
+      }
+      return out;
+    }
+
+    function clearMatrix(mx) {
+      for (const row of mx) {
+        for (const cell of row) {
+          cell.className = "cell";
+        }
+      }
+    }
+
+    // ---------- Section 1: symbol flow ----------
+    (function initSymbolFlow() {
+      const notes = [
+        "Step 1: make_tensor creates semantic views over raw pointers using shape + stride.",
+        "Step 2: local_tile re-indexes those views to CTA-local coordinates.",
+        "Step 3: partition_S/D maps CTA views into per-thread copy views.",
+        "Step 4: partition_fragment_* allocates/register-maps MMA fragments.",
+        "Step 5: make_tiled_copy_* picks valid atom+layout contracts.",
+        "Step 6: retile_D aligns destination registers to the copy atom mapping.",
+        "Step 7: copy + fence/wait drives pipeline groups through PIPE stages.",
+        "Step 8: gemm consumes fragment views and accumulates into tCrC."
+      ];
+      const nodes = [...document.querySelectorAll("#symbol-flow .symbol")];
+      const note = document.getElementById("flow-note");
+      const label = document.getElementById("flow-label");
+      let step = 0;
+
+      function render() {
+        nodes.forEach((n, i) => n.classList.toggle("active", i === step));
+        note.textContent = notes[step];
+        label.textContent = `Step ${step + 1}/${nodes.length}`;
+      }
+      document.getElementById("flow-prev").onclick = () => { step = (step - 1 + nodes.length) % nodes.length; render(); };
+      document.getElementById("flow-next").onclick = () => { step = (step + 1) % nodes.length; render(); };
+      render();
+    })();
+
+    // ---------- Section 2: shape algebra ----------
+    (function initShapePlayground() {
+      const kv = document.getElementById("shape-kv");
+
+      function ceilDiv(a, b) { return Math.floor((a + b - 1) / b); }
+
+      function update() {
+        const M = Number(document.getElementById("M").value || 1);
+        const N = Number(document.getElementById("N").value || 1);
+        const K = Number(document.getElementById("K").value || 1);
+        const bM = Number(document.getElementById("bM").value || 1);
+        const bN = Number(document.getElementById("bN").value || 1);
+        const bK = Number(document.getElementById("bK").value || 1);
+        const P = Number(document.getElementById("PIPE").value || 1);
+
+        const gridM = ceilDiv(M, bM);
+        const gridN = ceilDiv(N, bN);
+        const kTiles = ceilDiv(K, bK);
+        const smemA = bM * bK * P;
+        const smemB = bN * bK * P;
+
+        const rows = [
+          ["shape_MNK", `(${M}, ${N}, ${K})`],
+          ["cta_tiler", `(${bM}, ${bN}, ${bK})`],
+          ["grid", `(${gridM}, ${gridN}) CTAs`],
+          ["gA logical shape", `(${bM}, ${bK}, ${kTiles})`],
+          ["gB logical shape", `(${bN}, ${bK}, ${kTiles})`],
+          ["sA shape", `(${bM}, ${bK}, ${P})`],
+          ["sB shape", `(${bN}, ${bK}, ${P})`],
+          ["PIPE slots", `${P}`],
+          ["k_tile_count init", `${kTiles}`],
+          ["smem A elements", `${smemA}`],
+          ["smem B elements", `${smemB}`],
+          ["smem total (half_t)", `${smemA + smemB} elements`]
+        ];
+
+        kv.innerHTML = "";
+        for (const [k, v] of rows) {
+          const a = document.createElement("div");
+          a.textContent = k;
+          const b = document.createElement("div");
+          b.textContent = v;
+          kv.appendChild(a);
+          kv.appendChild(b);
+        }
+      }
+
+      document.getElementById("recompute").onclick = update;
+      ["M", "N", "K", "bM", "bN", "bK", "PIPE"].forEach(id => {
+        document.getElementById(id).addEventListener("change", update);
+      });
+      update();
+    })();
+
+    // ---------- Section 3: local_tile animation ----------
+    (function initTileAnimation() {
+      const mx = makeMatrix("tile-matrix", 16, 16);
+      const label = document.getElementById("tile-label");
+      let tileR = 0;
+      let tileC = 0;
+      let timer = null;
+      const tileSize = 4;
+
+      function render() {
+        clearMatrix(mx);
+        for (let r = 0; r < 16; r++) {
+          for (let c = 0; c < 16; c++) {
+            if (r >= tileR && r < tileR + tileSize && c >= tileC && c < tileC + tileSize) {
+              mx[r][c].classList.add("on-tile");
+            } else {
+              mx[r][c].classList.add("dim");
+            }
+          }
+        }
+        label.textContent = `tile origin = (${tileR}, ${tileC})`;
+      }
+
+      function next() {
+        tileC += tileSize;
+        if (tileC >= 16) {
+          tileC = 0;
+          tileR += tileSize;
+          if (tileR >= 16) tileR = 0;
+        }
+        render();
+      }
+      function prev() {
+        tileC -= tileSize;
+        if (tileC < 0) {
+          tileC = 12;
+          tileR -= tileSize;
+          if (tileR < 0) tileR = 12;
+        }
+        render();
+      }
+      function togglePlay() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+          document.getElementById("tile-play").textContent = "Auto-play";
+        } else {
+          timer = setInterval(next, 700);
+          document.getElementById("tile-play").textContent = "Stop";
+        }
+      }
+      document.getElementById("tile-next").onclick = next;
+      document.getElementById("tile-prev").onclick = prev;
+      document.getElementById("tile-play").onclick = togglePlay;
+      render();
+    })();
+
+    // ---------- Section 4: partition by thread ----------
+    (function initPartition() {
+      const src = makeMatrix("part-src", 8, 16);
+      const dst = makeMatrix("part-dst", 8, 16);
+      const slider = document.getElementById("thread-slider");
+      const label = document.getElementById("thread-label");
+
+      function render(thread) {
+        clearMatrix(src);
+        clearMatrix(dst);
+
+        const lane = thread % 32;
+        const group = Math.floor(thread / 32);
+        const rowBase = group * 2;
+        const colBase = (lane % 8) * 2;
+
+        for (let r = 0; r < 8; r++) {
+          for (let c = 0; c < 16; c++) {
+            src[r][c].classList.add("dim");
+            dst[r][c].classList.add("dim");
+          }
+        }
+        for (let rr = 0; rr < 2; rr++) {
+          for (let cc = 0; cc < 2; cc++) {
+            const r = rowBase + rr;
+            const c = colBase + cc;
+            if (r < 8 && c < 16) {
+              src[r][c].classList.remove("dim");
+              dst[r][c].classList.remove("dim");
+              src[r][c].classList.add("on-thread");
+              dst[r][c].classList.add("on-thread");
+            }
+          }
+        }
+        label.textContent = String(thread);
+      }
+
+      slider.addEventListener("input", () => render(Number(slider.value)));
+      render(0);
+    })();
+
+    // ---------- Section 5: stage ring ----------
+    (function initStageRing() {
+      const stages = [
+        document.getElementById("stage-0"),
+        document.getElementById("stage-1"),
+        document.getElementById("stage-2")
+      ];
+      const center = document.getElementById("wheel-center");
+      const arrow = document.getElementById("wheel-arrow");
+      const note = document.getElementById("pipe-note");
+      const label = document.getElementById("pipe-label");
+
+      const seq = [
+        { read: 0, write: 2, ready: 1, k: 0, msg: "Prologue: two groups are in flight; stage 0 becomes readable." },
+        { read: 0, write: 2, ready: 1, k: 1, msg: "Compute from stage 0 while issuing copy into stage 2." },
+        { read: 1, write: 0, ready: 2, k: 2, msg: "Advance read pointer to stage 1 after wait barrier." },
+        { read: 2, write: 1, ready: 0, k: 3, msg: "Advance again; pipeline is now in steady CuTE rotation." }
+      ];
+      let i = 0;
+      let timer = null;
+
+      function render() {
+        stages.forEach((s) => {
+          s.classList.remove("active-read", "active-load", "ready");
+          s.innerHTML = s.id.replace("stage-", "PIPE ") + "<br>idle";
+        });
+        const st = seq[i];
+        stages[st.read].classList.add("active-read");
+        stages[st.read].innerHTML = `PIPE ${st.read}<br>read`;
+        stages[st.write].classList.add("active-load");
+        stages[st.write].innerHTML = `PIPE ${st.write}<br>write`;
+        stages[st.ready].classList.add("ready");
+        stages[st.ready].innerHTML = `PIPE ${st.ready}<br>ready`;
+        center.textContent = `k=${st.k}`;
+        note.textContent = st.msg;
+        label.textContent = `state ${i + 1}/${seq.length}`;
+        arrow.style.transform = `rotate(${i * 120}deg)`;
+      }
+
+      function next() { i = (i + 1) % seq.length; render(); }
+      function prev() { i = (i - 1 + seq.length) % seq.length; render(); }
+      function toggle() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+          document.getElementById("pipe-play").textContent = "Auto-play";
+        } else {
+          timer = setInterval(next, 900);
+          document.getElementById("pipe-play").textContent = "Stop";
+        }
+      }
+
+      document.getElementById("pipe-next").onclick = next;
+      document.getElementById("pipe-prev").onclick = prev;
+      document.getElementById("pipe-play").onclick = toggle;
+      render();
+    })();
+
+    // ---------- Section 6: fragments ----------
+    (function initFragments() {
+      const a0 = makeMatrix("frag-a0", 4, 8);
+      const a1 = makeMatrix("frag-a1", 4, 8);
+      const c = makeMatrix("frag-c", 4, 8);
+      const label = document.getElementById("frag-label");
+      const note = document.getElementById("frag-note");
+
+      const states = [
+        "Load slot0 from tXsA(...,k0) -> tXrA(...,k0).",
+        "MMA reads slot0 while slot1 preloads from k1.",
+        "MMA reads slot1 while slot0 preloads next tile k0.",
+        "Accumulate continues in tCrC; slots keep flipping."
+      ];
+      let i = 0;
+      let timer = null;
+
+      function paint(base, cls) {
+        for (let r = 0; r < base.length; r++) {
+          for (let c2 = 0; c2 < base[0].length; c2++) base[r][c2].className = "cell";
+        }
+        for (let r = 0; r < base.length; r++) {
+          for (let c2 = 0; c2 < base[0].length; c2++) base[r][c2].classList.add(cls);
+        }
+      }
+
+      function render() {
+        clearMatrix(a0); clearMatrix(a1); clearMatrix(c);
+        if (i === 0) {
+          paint(a0, "on-a");
+          paint(c, "dim");
+        } else if (i === 1) {
+          paint(a0, "on-a");
+          paint(a1, "on-b");
+          paint(c, "on-c");
+        } else if (i === 2) {
+          paint(a1, "on-a");
+          paint(a0, "on-b");
+          paint(c, "on-c");
+        } else {
+          paint(a0, "on-b");
+          paint(a1, "on-a");
+          paint(c, "on-c");
+        }
+        label.textContent = `phase ${i + 1}/4`;
+        note.textContent = states[i];
+      }
+
+      function next() { i = (i + 1) % states.length; render(); }
+      function prev() { i = (i - 1 + states.length) % states.length; render(); }
+      function toggle() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+          document.getElementById("frag-play").textContent = "Auto-play";
+        } else {
+          timer = setInterval(next, 900);
+          document.getElementById("frag-play").textContent = "Stop";
+        }
+      }
+
+      document.getElementById("frag-next").onclick = next;
+      document.getElementById("frag-prev").onclick = prev;
+      document.getElementById("frag-play").onclick = toggle;
+      render();
+    })();
+
+    // ---------- Section 7: symbol pipeline ----------
+    (function initPipelineSymbols() {
+      const items = [...document.querySelectorAll("#pipeline-symbols .symbol")];
+      const label = document.getElementById("sym-label");
+      const note = document.getElementById("sym-note");
+      const notes = [
+        "Read global view tile index k_tile_next from tAgA.",
+        "Write to stage-smem destination view tAsA(...,smem_pipe_write).",
+        "Read stage-selected smem view tXsA(...,smem_pipe_read).",
+        "Load next register slot via tXrA(...,k_block_next).",
+        "Compute on current register slot tCrA(...,k_block).",
+        "Accumulate result into tCrC and continue."
+      ];
+      let i = 0;
+      let timer = null;
+
+      function render() {
+        items.forEach((x, idx) => x.classList.toggle("active", idx === i));
+        label.textContent = `symbol ${i + 1}/${items.length}`;
+        note.textContent = notes[i];
+      }
+      function next() { i = (i + 1) % items.length; render(); }
+      function prev() { i = (i - 1 + items.length) % items.length; render(); }
+      function toggle() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+          document.getElementById("sym-play").textContent = "Auto-play";
+        } else {
+          timer = setInterval(next, 900);
+          document.getElementById("sym-play").textContent = "Stop";
+        }
+      }
+
+      document.getElementById("sym-next").onclick = next;
+      document.getElementById("sym-prev").onclick = prev;
+      document.getElementById("sym-play").onclick = toggle;
+      render();
+    })();
+  </script>
+</body>
+</html>
