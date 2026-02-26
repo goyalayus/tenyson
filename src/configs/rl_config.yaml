@@ -43,8 +43,8 @@ task:
   min_history_turns: 1
   max_history_turns: 4
   wordlists:
-    solutions: "qwen4b-lora-wordle/RL/wordlists/wordle_solutions.txt"
-    allowed: "qwen4b-lora-wordle/RL/wordlists/wordle_allowed_guesses.txt"
+    solutions: "src/tasks/wordlists/wordle_solutions.txt"
+    allowed: "src/tasks/wordlists/wordle_allowed_guesses.txt"
   rewards:
     format: 0.2
     dict: 0.2
