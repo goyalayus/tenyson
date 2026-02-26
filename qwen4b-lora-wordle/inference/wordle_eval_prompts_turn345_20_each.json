@@ -1,0 +1,787 @@
+{
+  "name": "wordle_eval_prompts_turn345_20_each",
+  "version": "v1",
+  "notes": "Auto-generated eval prompts with 20 cases each for turns 3, 4, and 5.",
+  "cases": [
+    {
+      "case_id": "t3_01",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [thymi] -> Y X X X X\nTurn 2: [acers] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_02",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [agama] -> X X X X X\nTurn 2: [bungs] -> X X Y X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_03",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [roved] -> X X X Y Y\nTurn 2: [emery] -> Y X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_04",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [fused] -> X X X Y X\nTurn 2: [mekka] -> X Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_05",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [pekin] -> X Y X X X\nTurn 2: [dolia] -> X G G X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_06",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [urena] -> Y X Y X Y\nTurn 2: [typal] -> Y X X Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_07",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [favus] -> X Y X X X\nTurn 2: [mopsy] -> G G X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_08",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [bunds] -> X Y Y Y X\nTurn 2: [cooey] -> X G X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_09",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [culet] -> X G X X X\nTurn 2: [orval] -> X X X G X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_10",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [sefer] -> G X X X Y\nTurn 2: [brags] -> X Y Y X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_11",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [absit] -> X Y X Y Y\nTurn 2: [commo] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_12",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [outta] -> Y X X X X\nTurn 2: [segni] -> G X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_13",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [goles] -> X X X X X\nTurn 2: [commo] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_14",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [kiths] -> X X X X X\nTurn 2: [hants] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_15",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [riled] -> Y Y X X X\nTurn 2: [numbs] -> X X Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_16",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [gyved] -> Y X X X X\nTurn 2: [ligne] -> X X Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_17",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [boppy] -> X G X X X\nTurn 2: [sayst] -> X Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_18",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [ferer] -> G X X X X\nTurn 2: [binal] -> X Y X X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_19",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [swayl] -> X X X X X\nTurn 2: [ouzos] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t3_20",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 3 of the game. You have 3 attempts left.\n\nPrior turns and feedback:\nTurn 1: [nides] -> X X X X Y\nTurn 2: [halva] -> Y Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_01",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [mahoe] -> X Y X Y X\nTurn 2: [flaks] -> X X Y Y X\nTurn 3: [rotte] -> Y Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_02",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [crudo] -> X G X X X\nTurn 2: [shags] -> X X X Y X\nTurn 3: [olein] -> X Y X Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_03",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [padis] -> G G X X X\nTurn 2: [sured] -> X X Y G X\nTurn 3: [blebs] -> X Y Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_04",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [lests] -> X Y Y X X\nTurn 2: [abash] -> G X X Y X\nTurn 3: [henny] -> X Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_05",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [huzzy] -> X X X X X\nTurn 2: [remix] -> Y X X X X\nTurn 3: [rotch] -> Y X Y Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_06",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [venus] -> X X G X X\nTurn 2: [snood] -> X Y Y X X\nTurn 3: [sloes] -> X Y Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_07",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [recks] -> X Y X X X\nTurn 2: [hypos] -> X X X Y X\nTurn 3: [jiffs] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_08",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [opter] -> Y X X X X\nTurn 2: [kynds] -> X Y X X X\nTurn 3: [coofs] -> X Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_09",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [bortz] -> X Y G X X\nTurn 2: [keeps] -> X X X Y X\nTurn 3: [stele] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_10",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [cotts] -> X Y X X X\nTurn 2: [praus] -> X X X X X\nTurn 3: [reels] -> X Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_11",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [roped] -> X X X Y X\nTurn 2: [kerfs] -> X G X X Y\nTurn 3: [atocs] -> X Y X X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_12",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [tolan] -> X X X Y X\nTurn 2: [slats] -> X X G X X\nTurn 3: [speld] -> X X Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_13",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [knawe] -> Y X Y X X\nTurn 2: [casas] -> Y G X X X\nTurn 3: [volta] -> X X X Y Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_14",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [keema] -> X X X X X\nTurn 2: [lakhs] -> X X X G X\nTurn 3: [tired] -> Y G X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_15",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [uncos] -> X X Y X X\nTurn 2: [hoast] -> Y X Y X Y\nTurn 3: [meany] -> G X Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_16",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [hires] -> X X X X X\nTurn 2: [smoot] -> X X X X G\nTurn 3: [toted] -> Y X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_17",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [mujik] -> X X X Y X\nTurn 2: [gryde] -> X Y Y Y X\nTurn 3: [sonce] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_18",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [johns] -> X Y X X X\nTurn 2: [senas] -> X Y X X X\nTurn 3: [wanes] -> X X X Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_19",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [rebec] -> Y Y X X X\nTurn 2: [oonts] -> X X X Y X\nTurn 3: [tacos] -> G X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t4_20",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 4 of the game. You have 2 attempts left.\n\nPrior turns and feedback:\nTurn 1: [redid] -> Y X X X X\nTurn 2: [buhrs] -> X X X G Y\nTurn 3: [cuddy] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_01",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [debur] -> X Y X X X\nTurn 2: [motts] -> X X X X X\nTurn 3: [trans] -> X X Y X X\nTurn 4: [wrate] -> X X Y X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_02",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [hapax] -> X X X G G\nTurn 2: [bokeh] -> X X X Y X\nTurn 3: [layed] -> Y Y X Y X\nTurn 4: [dholl] -> X X X Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_03",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [janty] -> X X X Y X\nTurn 2: [stags] -> G G X X X\nTurn 3: [houfs] -> X Y X X Y\nTurn 4: [seamy] -> G Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_04",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [wised] -> X Y X X X\nTurn 2: [shmoe] -> X X Y X X\nTurn 3: [orris] -> X X X Y X\nTurn 4: [bumbo] -> X X Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_05",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [rawin] -> Y G X X X\nTurn 2: [lurer] -> X X G X X\nTurn 3: [punji] -> G X X X X\nTurn 4: [tapes] -> Y G Y X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_06",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [yonks] -> X Y X X X\nTurn 2: [anion] -> Y X X G X\nTurn 3: [neist] -> X X X X X\nTurn 4: [khoja] -> X X Y X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_07",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [clomp] -> X X Y X X\nTurn 2: [knowe] -> X Y Y X X\nTurn 3: [jimmy] -> X X X X X\nTurn 4: [doseh] -> Y G X X Y\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_08",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [peeks] -> X X X X Y\nTurn 2: [shive] -> G G X X X\nTurn 3: [perps] -> X X X X Y\nTurn 4: [denet] -> Y X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_09",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [cooee] -> G X G X X\nTurn 2: [dolma] -> X Y X X X\nTurn 3: [avgas] -> X X X X X\nTurn 4: [narcs] -> X X Y Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_10",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [doeks] -> Y X X X X\nTurn 2: [rails] -> X Y Y X X\nTurn 3: [tyees] -> Y X X X X\nTurn 4: [sybbe] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_11",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [lills] -> X X X X X\nTurn 2: [alane] -> Y X X X X\nTurn 3: [wroth] -> X Y X X X\nTurn 4: [chiro] -> G X X G X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_12",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [flyby] -> Y Y X X X\nTurn 2: [desex] -> X X X X X\nTurn 3: [marra] -> X Y X X X\nTurn 4: [tress] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_13",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [phang] -> X X X X Y\nTurn 2: [bangs] -> X X X G X\nTurn 3: [plash] -> X X X X X\nTurn 4: [tiles] -> X G X Y X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_14",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [grise] -> X X X X G\nTurn 2: [unmew] -> X X Y G X\nTurn 3: [gnars] -> X X X X X\nTurn 4: [intra] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_15",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [revie] -> X G X X X\nTurn 2: [byked] -> X X X Y X\nTurn 3: [corse] -> X X X X Y\nTurn 4: [peeps] -> X G X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_16",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [khoja] -> X Y X X Y\nTurn 2: [riven] -> X X X X Y\nTurn 3: [paolo] -> X G X X X\nTurn 4: [rojis] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_17",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [putto] -> X X X X X\nTurn 2: [adman] -> Y X X X X\nTurn 3: [hyson] -> X X X X X\nTurn 4: [seems] -> X Y X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_18",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [unjam] -> X X X X X\nTurn 2: [kolas] -> X G X X X\nTurn 3: [paces] -> X X Y X X\nTurn 4: [baize] -> X X X X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_19",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [haiks] -> X Y X X Y\nTurn 2: [swees] -> Y X X X X\nTurn 3: [senas] -> Y X Y Y X\nTurn 4: [rumen] -> Y X X X G\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    },
+    {
+      "case_id": "t5_20",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a competitive game player. Make sure you read the game instructions carefully, and always follow the required format.\n\nIn each turn, think step-by-step inside <think>...</think> tags, then follow the instructions inside <guess>...</guess> tags."
+        },
+        {
+          "role": "user",
+          "content": "You are Player 0 in Wordle.\nA secret 5-letter word has been chosen. You have 6 attempts to guess it.\nFor each guess, wrap your word in square brackets (e.g., [apple]).\nFeedback for each letter will be given as follows:\n  - G (green): correct letter in the correct position\n  - Y (yellow): letter exists in the word but in the wrong position\n  - X (wrong): letter is not in the word\nEnter your guess to begin.\n\nThis is turn 5 of the game. You have 1 attempts left.\n\nPrior turns and feedback:\nTurn 1: [walla] -> X Y Y X X\nTurn 2: [juves] -> X X X X Y\nTurn 3: [sitka] -> Y X X X Y\nTurn 4: [brank] -> X X G X X\nEnter your next guess (think step-by-step in <think> tags, then output <guess>[word]</guess>)."
+        }
+      ]
+    }
+  ]
+}
