@@ -1,0 +1,26 @@
+model:
+  name: "unsloth/qwen3-4b-unsloth-bnb-4bit"
+  max_seq_length: 4096
+  load_in_4bit: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_target_modules: ["up_proj", "gate_proj", "down_proj"]
+  init_adapter_repo: "goyalayus/wordle-lora-qwen3-4b"
+  init_adapter_revision: "main"
+
+vllm:
+  enabled: true
+  gpu_memory_utilization: 0.9
+  temperature: 0.0  # Greedy decoding for evals
+  top_p: 1.0
+  max_tokens: 1024
+
+evaluation:
+  output_dir: "./outputs/evals"
+
+task:
+  eval_samples: 100
+  eval_seed: 42
+  wordlists:
+    solutions: "tenyson/examples/wordle/wordlists/wordle_solutions.txt"
+    allowed: "tenyson/examples/wordle/wordlists/wordle_allowed_guesses.txt"

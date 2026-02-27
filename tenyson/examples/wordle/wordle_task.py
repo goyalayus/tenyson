@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from datasets import Dataset
+from tenyson.core.plugin import TaskPlugin
 
 # ==============================================================================
 # PROMPTS
@@ -556,4 +557,34 @@ def compute_metrics(prompts: List[str], completions: List[str], dataset_rows: Da
         },
         "detailed_results": detailed_results
     }
+
+
+class WordleTask(TaskPlugin):
+    def get_sft_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
+        return get_sft_dataset(config, tokenizer)
+
+    def get_sft_eval_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
+        return get_sft_eval_dataset(config, tokenizer)
+
+    def get_sft_formatting_func(self, config: Dict[str, Any], tokenizer: Any):
+        return get_sft_formatting_func(config, tokenizer)
+
+    def get_rl_dataset(self, config: Dict[str, Any]) -> Dataset:
+        return get_rl_dataset(config)
+
+    def get_reward_funcs(self, config: Dict[str, Any], tokenizer: Any) -> List[Any]:
+        return get_reward_funcs(config, tokenizer)
+
+    def get_eval_dataset(self, config: Dict[str, Any]) -> Dataset:
+        return get_eval_dataset(config)
+
+    def compute_metrics(
+        self,
+        prompts: List[str],
+        completions: List[str],
+        dataset_rows: Dataset,
+        config: Dict[str, Any],
+        tokenizer: Any,
+    ) -> Dict[str, Any]:
+        return compute_metrics(prompts, completions, dataset_rows, config, tokenizer)
 

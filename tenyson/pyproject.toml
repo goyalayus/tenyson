@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tenyson"
+version = "0.1.0"
+description = "Multi-step research library for SFT/RL/Eval with cloud orchestration and telemetry."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pyyaml",
+  "datasets",
+  "transformers",
+  "trl",
+  "torch",
+  "huggingface_hub",
+  "sqlalchemy",
+  "boto3",
+  "wandb",
+]
+
+[project.optional-dependencies]
+cloud = ["modal"]
+viz = ["matplotlib"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
