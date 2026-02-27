@@ -1,37 +1,17 @@
 import argparse
-import importlib
 import os
-from typing import Any, Dict
-
-import yaml
 
 from tenyson.jobs.eval import EvalJob
 from tenyson.jobs.rl import RLJob
 from tenyson.jobs.sft import SFTJob
+from tenyson.loader import load_config, load_task, load_task_from_spec
 
 
-def _load_config(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        if path.endswith(".json"):
-            import json
-
-            return json.load(f)
-        return yaml.safe_load(f)
-
-
-def _load_task(spec: str):
-    """
-    Load a TaskPlugin implementation given an import spec of the form
-    'module.path:ClassName'.
-    """
-    if ":" not in spec:
-        raise ValueError(
-            f"task-module must be of form 'module.path:ClassName', got: {spec}"
-        )
-    module_name, class_name = spec.split(":", 1)
-    module = importlib.import_module(module_name)
-    task_cls = getattr(module, class_name)
-    return task_cls()
+def _resolve_task(spec: str):
+    """Resolve task from a file path or a module:ClassName spec."""
+    if spec.endswith(".py") or "/" in spec or "\\" in spec:
+        return load_task(spec)
+    return load_task_from_spec(spec)
 
 
 def main() -> None:
@@ -41,14 +21,14 @@ def main() -> None:
     parser.add_argument(
         "--task-module",
         required=True,
-        help="TaskPlugin import path, e.g. 'tenyson.examples.wordle.wordle_task:WordleTask'",
+        help="Path to task .py file or module.path:ClassName spec",
     )
 
     args = parser.parse_args()
 
     config_path = os.path.abspath(args.config)
-    config = _load_config(config_path)
-    task = _load_task(args.task_module)
+    config = load_config(config_path)
+    task = _resolve_task(args.task_module)
 
     if args.job_type == "sft":
         job = SFTJob(config=config, task=task)

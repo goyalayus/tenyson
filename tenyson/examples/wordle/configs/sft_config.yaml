@@ -33,6 +33,14 @@ training:
   report_to: ["wandb"]
   hf_repo_id: "username/wordle-lora-qwen3-4b"  # Replace with your repo
   val_size: 100
+  # Early stopping based on eval_loss: stop if constant or increasing for N evals.
+  early_stopping_patience: 2        # N: number of consecutive evals with no improvement.
+  early_stopping_min_delta: 0.0     # X: minimum absolute improvement in eval_loss.
 
 task:
   sft_dataset: "goyalayus/wordle-reasoning-sft-prefix-keep-think"
+
+# Optional: enable SQL telemetry for metrics and manual stop control.
+telemetry:
+  db_url: "sqlite:///./tenyson_telemetry.db"
+

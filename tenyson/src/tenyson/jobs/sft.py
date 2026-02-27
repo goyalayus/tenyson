@@ -65,8 +65,13 @@ class SFTJob:
         return model, tokenizer, seq_len
 
     def run(self) -> JobResult:
+        from transformers import EarlyStoppingCallback
         from trl import SFTConfig, SFTTrainer
-        from tenyson.core.telemetry import SFTTelemetryCallback, TelemetryClient
+        from tenyson.core.telemetry import (
+            ManualStopTelemetryCallback,
+            SFTTelemetryCallback,
+            TelemetryClient,
+        )
 
         start = time.time()
         train_cfg = self.config.get("training", {})
@@ -121,11 +126,13 @@ class SFTJob:
         )
 
         if eval_dataset is not None:
+            # Align evaluation and saving to step-based cadence.
             training_args.eval_strategy = "steps"
             training_args.eval_steps = train_cfg.get("eval_steps", 100)
             training_args.per_device_eval_batch_size = train_cfg.get(
                 "per_device_eval_batch_size", 2
             )
+            training_args.save_strategy = getattr(training_args, "save_strategy", "steps")
 
         trainer_kwargs: Dict[str, Any] = {
             "model": model,
@@ -142,13 +149,35 @@ class SFTJob:
         if collator is not None:
             trainer_kwargs["data_collator"] = collator
 
-        # Optional telemetry wiring.
+        # Optional telemetry wiring and manual stop callback.
+        callbacks = []
         telemetry_cfg = self.config.get("telemetry", {})
-        callbacks = None
         db_url = telemetry_cfg.get("db_url")
         if db_url:
             client = TelemetryClient(db_url=db_url)
-            callbacks = [SFTTelemetryCallback(run_id=run_name, client=client)]
+            callbacks.append(SFTTelemetryCallback(run_id=run_name, client=client))
+            callbacks.append(
+                ManualStopTelemetryCallback(run_id=run_name, client=client)
+            )
+
+        # Optional eval-loss early stopping.
+        patience = train_cfg.get("early_stopping_patience")
+        if eval_dataset is not None and patience is not None:
+            min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
+            # Configure best-model tracking on eval_loss.
+            training_args.load_best_model_at_end = True
+            training_args.metric_for_best_model = "eval_loss"
+            training_args.greater_is_better = False
+            training_args.save_strategy = "steps"
+
+            callbacks.append(
+                EarlyStoppingCallback(
+                    early_stopping_patience=int(patience),
+                    early_stopping_threshold=min_delta,
+                )
+            )
+
+        if callbacks:
             trainer_kwargs["callbacks"] = callbacks
 
         trainer = SFTTrainer(**trainer_kwargs)

@@ -123,6 +123,7 @@ class RLJob:
         from tenyson.core.telemetry import (
             GRPOEpochTelemetryCallback,
             Generation,
+            ManualStopTelemetryCallback,
             Rollout,
             TelemetryClient,
         )
@@ -189,8 +190,16 @@ class RLJob:
         telemetry_client = None
         if db_url:
             telemetry_client = TelemetryClient(db_url=db_url)
+            manual_stop_every = int(
+                telemetry_cfg.get("manual_stop_check_every_n_steps", 1)
+            )
             callbacks = list(callbacks) + [
-                GRPOEpochTelemetryCallback(run_id=run_name, client=telemetry_client)
+                GRPOEpochTelemetryCallback(run_id=run_name, client=telemetry_client),
+                ManualStopTelemetryCallback(
+                    run_id=run_name,
+                    client=telemetry_client,
+                    check_every_n_steps=manual_stop_every,
+                ),
             ]
 
             # Wrap the first reward function to log per-prompt/per-completion rewards

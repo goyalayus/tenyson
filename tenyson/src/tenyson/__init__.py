@@ -6,6 +6,7 @@ from tenyson.cloud.aws import AWSManager
 from tenyson.cloud.modal import ModalManager
 from tenyson.cloud.manager import CloudManager
 from tenyson.reporting.builder import ReportBuilder
+from tenyson.loader import load_config, load_task, load_task_from_spec
 
 __all__ = [
     "SFTJob",
@@ -16,4 +17,7 @@ __all__ = [
     "ModalManager",
     "CloudManager",
     "ReportBuilder",
+    "load_config",
+    "load_task",
+    "load_task_from_spec",
 ]

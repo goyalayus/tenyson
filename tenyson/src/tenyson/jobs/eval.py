@@ -2,7 +2,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 from uuid import uuid4
 
 from tenyson.core.plugin import TaskPlugin
@@ -104,7 +104,7 @@ class EvalJob:
         return [row["prompt"] for row in dataset]
 
     def run(self) -> JobResult:
-        from tenyson.core.telemetry import Generation, TelemetryClient
+        from tenyson.core.telemetry import Generation, RunControl, TelemetryClient
 
         start = time.time()
         eval_cfg = self.config.get("evaluation", {})
@@ -123,34 +123,70 @@ class EvalJob:
         print(f"[EvalJob] Loaded {len(dataset)} examples for evaluation.", flush=True)
 
         sampling_params = self._build_sampling_params(tokenizer)
-        prompts = self._extract_prompts(dataset)
+        all_prompts: Sequence[str] = self._extract_prompts(dataset)
+
+        # Optional telemetry / manual-stop wiring.
+        telemetry_cfg = self.config.get("telemetry", {})
+        db_url = telemetry_cfg.get("db_url")
+        client = None
+        if db_url:
+            client = TelemetryClient(db_url=db_url)
+
+        batch_size = int(self.config.get("evaluation", {}).get("batch_size", 32))
+        batch_size = max(1, batch_size)
+
+        processed_prompts: List[str] = []
+        processed_completions: List[str] = []
+
+        def _should_stop() -> bool:
+            if client is None:
+                return False
+            session = client.Session()
+            try:
+                control_row = (
+                    session.query(RunControl)
+                    .filter(RunControl.run_id == self.run_id)
+                    .one_or_none()
+                )
+                return bool(control_row and control_row.stop_requested)
+            finally:
+                session.close()
 
         print(
             f"[EvalJob] Starting batched generation with vLLM (temp={sampling_params.temperature})...",
             flush=True,
         )
-        outputs = model.fast_generate(
-            prompts,
-            sampling_params=sampling_params,
-            use_tqdm=True,
-        )
+        for start_idx in range(0, len(all_prompts), batch_size):
+            end_idx = min(start_idx + batch_size, len(all_prompts))
+            batch_prompts = list(all_prompts[start_idx:end_idx])
 
-        completions: List[str] = []
-        for out in outputs:
-            # Assuming single generation per prompt for eval.
-            completions.append(out.outputs[0].text)
+            outputs = model.fast_generate(
+                batch_prompts,
+                sampling_params=sampling_params,
+                use_tqdm=True,
+            )
+
+            for out in outputs:
+                processed_completions.append(out.outputs[0].text)
+            processed_prompts.extend(batch_prompts)
+
+            if _should_stop():
+                print(
+                    f"[EvalJob] Manual stop requested after processing {len(processed_prompts)} prompts; stopping early.",
+                    flush=True,
+                )
+                break
 
         print("[EvalJob] Generation complete. Computing metrics...", flush=True)
 
         # Optional telemetry: log eval prompts and completions into the
         # shared Generation table when a telemetry DB is configured.
-        telemetry_cfg = self.config.get("telemetry", {})
-        db_url = telemetry_cfg.get("db_url")
-        if db_url:
-            client = TelemetryClient(db_url=db_url)
+        if client is not None:
             session = client.Session()
             try:
-                for idx, (prompt, completion) in enumerate(zip(prompts, completions)):
+                for idx, (prompt, completion) in enumerate(
+                    zip(processed_prompts, processed_completions)
+                ):
                     generation = Generation(
                         id=str(uuid4()),
                         run_id=self.run_id,
@@ -164,9 +200,21 @@ class EvalJob:
                 session.commit()
             finally:
                 session.close()
+
+        # Only pass the processed subset through to metrics.
+        processed_dataset = dataset.select(range(len(processed_prompts)))
         results = self.task.compute_metrics(
-            prompts, completions, dataset, self.config, tokenizer
+            processed_prompts,
+            processed_completions,
+            processed_dataset,
+            self.config,
+            tokenizer,
         )
+
+        if len(processed_prompts) < len(all_prompts):
+            # Flag partial evaluations so downstream tooling can recognise them.
+            results.setdefault("metadata", {})
+            results["metadata"]["stopped_early"] = True
 
         out_file = output_dir / "results.json"
         with open(out_file, "w", encoding="utf-8") as f:

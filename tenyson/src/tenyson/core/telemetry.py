@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 
@@ -62,6 +62,18 @@ class SFTMetric(Base):
     loss = Column(Float)
     eval_loss = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RunControl(Base):
+    """
+    Simple control row for a run, used to request a graceful stop.
+    """
+
+    __tablename__ = "run_controls"
+    id = Column(String, primary_key=True)
+    run_id = Column(String, index=True, unique=True)
+    stop_requested = Column(Boolean, default=False, nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -154,3 +166,44 @@ class SFTTelemetryCallback(TrainerCallback):
             session.commit()
         finally:
             session.close()
+
+
+class ManualStopTelemetryCallback(TrainerCallback):
+    """
+    Polls the RunControl table for a given run_id and requests a graceful stop
+    when stop_requested is set.
+    """
+
+    def __init__(
+        self, run_id: str, client: TelemetryClient, check_every_n_steps: int = 1
+    ):
+        self.run_id = run_id
+        self.client = client
+        self.check_every_n_steps = max(1, int(check_every_n_steps))
+
+    def on_step_end(
+        self, args, state: TrainerState, control: TrainerControl, **kwargs
+    ):
+        # Optionally throttle checks; default is every step for responsiveness.
+        if state.global_step % self.check_every_n_steps != 0:
+            return control
+
+        session = self.client.Session()
+        try:
+            control_row = (
+                session.query(RunControl)
+                .filter(RunControl.run_id == self.run_id)
+                .one_or_none()
+            )
+            if control_row and control_row.stop_requested:
+                print(
+                    f"[ManualStopTelemetryCallback] Stop requested for run_id="
+                    f"{self.run_id} at step {state.global_step}",
+                    flush=True,
+                )
+                control.should_training_stop = True
+                control.should_save = True
+        finally:
+            session.close()
+
+        return control
