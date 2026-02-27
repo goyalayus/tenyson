@@ -39,11 +39,31 @@ def main():
             "sft_status": sft_result.status,
             "rl_status": rl_result.status,
             "eval_status": eval_result.status,
-            "eval_constraint_accuracy": eval_result.metrics.get("constraint_accuracy", "n/a"),
+            "eval_constraint_accuracy": eval_result.metrics.get(
+                "constraint_accuracy", "n/a"
+            ),
             "eval_dict_accuracy": eval_result.metrics.get("dict_accuracy", "n/a"),
             "eval_format_accuracy": eval_result.metrics.get("format_accuracy", "n/a"),
+            # Defaults for optional WandB placeholders so the report still
+            # renders cleanly when WandB is not used.
+            "sft_wandb_link": "n/a",
+            "rl_wandb_link": "n/a",
         }
     )
+
+    # If WandB was enabled for SFT / RL runs, replace the defaults with links.
+    if sft_result.wandb_url:
+        report.attach_wandb_scalar_link(
+            placeholder="sft_wandb_link",
+            run_url=sft_result.wandb_url,
+            metric_name="SFT run (WandB)",
+        )
+    if rl_result.wandb_url:
+        report.attach_wandb_scalar_link(
+            placeholder="rl_wandb_link",
+            run_url=rl_result.wandb_url,
+            metric_name="RL run (WandB)",
+        )
     report.generate()
 
 

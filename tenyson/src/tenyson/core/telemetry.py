@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import uuid4
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -18,7 +19,27 @@ class Rollout(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class Generation(Base):
+    """
+    Stores individual completions and rewards for RL / Eval runs.
+    """
+
+    __tablename__ = "generations"
+    id = Column(String, primary_key=True)
+    run_id = Column(String, index=True)
+    global_step = Column(Integer, index=True)
+    phase = Column(String, index=True)  # e.g. "rl" or "eval"
+    prompt_text = Column(String)
+    completion_text = Column(String)
+    reward = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class EpochMetric(Base):
+    """
+    Stores per-epoch metrics for GRPO RL training.
+    """
+
     __tablename__ = "epoch_metrics"
     id = Column(String, primary_key=True)
     run_id = Column(String, index=True)
@@ -26,6 +47,20 @@ class EpochMetric(Base):
     epoch_number = Column(Integer)
     loss = Column(Float)
     kl = Column(Float)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SFTMetric(Base):
+    """
+    Stores logged metrics for SFT training.
+    """
+
+    __tablename__ = "sft_metrics"
+    id = Column(String, primary_key=True)
+    run_id = Column(String, index=True)
+    global_step = Column(Integer, index=True)
+    loss = Column(Float)
+    eval_loss = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -40,18 +75,82 @@ class TelemetryClient:
 
 
 class GRPOEpochTelemetryCallback(TrainerCallback):
+    """
+    Logs per-epoch GRPO metrics (loss, KL) into the SQL database.
+    """
+
     def __init__(self, run_id: str, client: TelemetryClient):
         self.run_id = run_id
         self.client = client
         self.current_step: Optional[int] = None
         self.current_epoch = 0
 
-    def on_step_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+    def on_step_begin(
+        self, args, state: TrainerState, control: TrainerControl, **kwargs
+    ):
         if self.current_step != state.global_step:
             self.current_step = state.global_step
             self.current_epoch = 0
 
-    def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+    def on_log(
+        self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs
+    ):
         if not logs:
             return
         self.current_epoch += 1
+
+        loss_val = float(logs.get("loss", 0.0))
+        # TRL may log KL under different names; fall back if needed.
+        kl_val = float(
+            logs.get("kl", logs.get("kl_divergence", logs.get("approx_kl", 0.0)))
+        )
+
+        session = self.client.Session()
+        try:
+            metric = EpochMetric(
+                id=str(uuid4()),
+                run_id=self.run_id,
+                global_step=int(state.global_step),
+                epoch_number=int(self.current_epoch),
+                loss=loss_val,
+                kl=kl_val,
+            )
+            session.add(metric)
+            session.commit()
+        finally:
+            session.close()
+
+
+class SFTTelemetryCallback(TrainerCallback):
+    """
+    Logs loss and eval_loss for SFT runs.
+    """
+
+    def __init__(self, run_id: str, client: TelemetryClient):
+        self.run_id = run_id
+        self.client = client
+
+    def on_log(
+        self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs
+    ):
+        if not logs:
+            return
+
+        loss_val = logs.get("loss")
+        eval_loss_val = logs.get("eval_loss")
+        if loss_val is None and eval_loss_val is None:
+            return
+
+        session = self.client.Session()
+        try:
+            metric = SFTMetric(
+                id=str(uuid4()),
+                run_id=self.run_id,
+                global_step=int(state.global_step),
+                loss=float(loss_val) if loss_val is not None else 0.0,
+                eval_loss=float(eval_loss_val) if eval_loss_val is not None else None,
+            )
+            session.add(metric)
+            session.commit()
+        finally:
+            session.close()

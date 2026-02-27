@@ -1,8 +1,14 @@
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+import wandb
 
 
 class ReportBuilder:
+    """
+    Simple markdown templating plus optional WandB metric embedding.
+    """
+
     def __init__(self, template_path: str, output_path: str):
         self.template_path = Path(template_path)
         self.output_path = Path(output_path)
@@ -12,6 +18,40 @@ class ReportBuilder:
         for key, value in data.items():
             self.content = self.content.replace("{" + key + "}", str(value))
 
+    def attach_wandb_scalar_link(
+        self,
+        placeholder: str,
+        run_url: str,
+        metric_name: str,
+    ) -> None:
+        """
+        Replace a placeholder with a markdown link to a WandB run + metric.
+        """
+        link = f"[{metric_name}]({run_url})"
+        self.content = self.content.replace("{" + placeholder + "}", link)
+
+    def attach_wandb_latest_value(
+        self,
+        placeholder: str,
+        run_path: str,
+        metric_name: str,
+        api: Optional[wandb.Api] = None,
+    ) -> None:
+        """
+        Replace a placeholder with the latest scalar value for a metric
+        from a WandB run specified as 'entity/project/run_id'.
+        """
+        api = api or wandb.Api()
+        run = api.run(run_path)
+        history = run.history(keys=[metric_name], pandas=False)
+        latest = None
+        for row in history:
+            if metric_name in row:
+                latest = row[metric_name]
+        if latest is not None:
+            self.content = self.content.replace("{" + placeholder + "}", str(latest))
+
     def generate(self) -> None:
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_dir = self.output_path.parent
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.output_path.write_text(self.content, encoding="utf-8")
