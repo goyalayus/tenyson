@@ -11,9 +11,8 @@ requires-python = ">=3.10"
 dependencies = [
   "pyyaml",
   "datasets",
-  "transformers",
-  "trl",
-  "torch",
+  "unsloth",
+  "vllm",
   "huggingface_hub",
   "sqlalchemy",
   "boto3",
