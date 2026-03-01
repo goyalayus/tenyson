@@ -74,21 +74,7 @@ class ModalManager(BaseCloudManager):
 
         image = (
             modal.Image.debian_slim(python_version="3.11")
-            .apt_install("git")
-            .pip_install(
-                "torch==2.5.1",
-                "vllm==0.7.3",
-                "huggingface_hub",
-                "hf_transfer",
-                "wandb",
-                "python-dotenv",
-                "datasets",
-                "pyyaml",
-            )
-            .run_commands(
-                "pip install unsloth unsloth-zoo",
-                "pip install git+https://github.com/huggingface/trl.git",
-            )
+            .run_commands("pip install unsloth vllm")
             .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
         )
 

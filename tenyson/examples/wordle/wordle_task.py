@@ -377,6 +377,21 @@ def generate_synthetic_wordle_dataset(config: Dict[str, Any], seed: int, n_sampl
     return Dataset.from_list(rows)
 
 
+def _validate_eval_exact_turns(turns: Any) -> List[int]:
+    if not isinstance(turns, list) or not turns:
+        raise ValueError("task.eval_exact_turns must be a non-empty list of turns (1..5).")
+    parsed: List[int] = []
+    for turn in turns:
+        if not isinstance(turn, int):
+            raise ValueError(
+                f"task.eval_exact_turns must contain integers only, got {type(turn).__name__}."
+            )
+        if turn < 1 or turn > 5:
+            raise ValueError(f"task.eval_exact_turns values must be within 1..5, got {turn}.")
+        parsed.append(turn)
+    return sorted(list(set(parsed)))
+
+
 # ==============================================================================
 # SFT PLUGIN HOOKS
 # ==============================================================================
@@ -494,8 +509,43 @@ def get_eval_dataset(config: Dict[str, Any]) -> Dataset:
     task_cfg = config.get("task", {})
     n_samples = task_cfg.get("eval_samples", 100)
     seed = task_cfg.get("eval_seed", 42)
-    
-    return generate_synthetic_wordle_dataset(config, seed, n_samples)
+    exact_turns = task_cfg.get("eval_exact_turns")
+
+    if exact_turns is None:
+        return generate_synthetic_wordle_dataset(config, seed, n_samples)
+
+    turns = _validate_eval_exact_turns(exact_turns)
+
+    # Build a balanced exact-turn eval set by round-robin sampling each turn.
+    per_turn = max(1, n_samples // len(turns))
+    rows: List[Dict[str, Any]] = []
+    row_id = 0
+    for idx, turn in enumerate(turns):
+        local_cfg = json.loads(json.dumps(config))
+        local_cfg.setdefault("task", {})["min_history_turns"] = turn
+        local_cfg.setdefault("task", {})["max_history_turns"] = turn
+        local_seed = int(seed) + idx
+        local_ds = generate_synthetic_wordle_dataset(local_cfg, local_seed, per_turn)
+        for row in local_ds:
+            copied = dict(row)
+            copied["id"] = row_id
+            row_id += 1
+            rows.append(copied)
+
+    # Fill any remainder from the first requested turn for deterministic size.
+    while len(rows) < n_samples:
+        turn = turns[0]
+        local_cfg = json.loads(json.dumps(config))
+        local_cfg.setdefault("task", {})["min_history_turns"] = turn
+        local_cfg.setdefault("task", {})["max_history_turns"] = turn
+        local_seed = int(seed) + len(rows)
+        local_ds = generate_synthetic_wordle_dataset(local_cfg, local_seed, 1)
+        copied = dict(local_ds[0])
+        copied["id"] = row_id
+        row_id += 1
+        rows.append(copied)
+
+    return Dataset.from_list(rows[:n_samples])
 
 
 def compute_metrics(prompts: List[str], completions: List[str], dataset_rows: Dataset, config: Dict[str, Any], tokenizer: Any) -> Dict[str, Any]:
@@ -587,4 +637,3 @@ class WordleTask(TaskPlugin):
         tokenizer: Any,
     ) -> Dict[str, Any]:
         return compute_metrics(prompts, completions, dataset_rows, config, tokenizer)
-

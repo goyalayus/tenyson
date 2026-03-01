@@ -238,10 +238,7 @@ class AWSManager(BaseCloudManager):
         print("[AWSManager] SSH is up. Preparing environment...")
         setup_cmds = [
             "source activate pytorch",
-            "pip install unsloth unsloth-zoo",
-            "pip install vllm==0.7.3",
-            "pip install git+https://github.com/huggingface/trl.git",
-            "pip install wandb datasets pyyaml",
+            "pip install unsloth vllm",
             "mkdir -p ~/workspace",
         ]
         setup_cmd = " && ".join(setup_cmds)
