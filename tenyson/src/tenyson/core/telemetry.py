@@ -76,6 +76,34 @@ class RunControl(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class RunMetadata(Base):
+    """
+    Stores run metadata (e.g. WandB URL) so clients can poll for early URLs
+    before the run finishes. Requires a shared DB that both worker and client can reach.
+    """
+
+    __tablename__ = "run_metadata"
+    id = Column(String, primary_key=True)
+    run_id = Column(String, index=True, unique=True)
+    wandb_url = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RunFailure(Base):
+    """
+    Records run failures for queryable history (e.g. pipeline step failed).
+    """
+
+    __tablename__ = "run_failures"
+    id = Column(String, primary_key=True)
+    run_id = Column(String, index=True)
+    step_label = Column(String, index=True)
+    failure_reason = Column(String)
+    instance_id = Column(String, nullable=True)
+    spot_interruption = Column(Boolean, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 @dataclass
 class TelemetryClient:
     db_url: str
@@ -206,4 +234,65 @@ class ManualStopTelemetryCallback(TrainerCallback):
         finally:
             session.close()
 
+        return control
+
+
+class WandBUrlTelemetryCallback(TrainerCallback):
+    """
+    When WandB is enabled and telemetry uses a shared DB, upserts the run's
+    WandB URL to RunMetadata as soon as WandB is inited so clients can poll
+    for the link before the run finishes.
+    """
+
+    def __init__(self, run_id: str, client: TelemetryClient):
+        self.run_id = run_id
+        self.client = client
+        self._written = False
+
+    def _maybe_write_url(self) -> None:
+        if self._written:
+            return
+        try:
+            import wandb  # type: ignore[import-not-found]
+            run = getattr(wandb, "run", None)
+            if run is None:
+                return
+            url = getattr(run, "url", None)
+            if not url:
+                return
+        except Exception:  # noqa: BLE001
+            return
+        session = self.client.Session()
+        try:
+            existing = (
+                session.query(RunMetadata)
+                .filter(RunMetadata.run_id == self.run_id)
+                .one_or_none()
+            )
+            now = datetime.now(timezone.utc)
+            if existing:
+                existing.wandb_url = url
+                existing.updated_at = now
+            else:
+                session.add(
+                    RunMetadata(
+                        id=str(uuid4()),
+                        run_id=self.run_id,
+                        wandb_url=url,
+                        updated_at=now,
+                    )
+                )
+            session.commit()
+            self._written = True
+        finally:
+            session.close()
+
+    def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        self._maybe_write_url()
+        return control
+
+    def on_log(
+        self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs
+    ):
+        self._maybe_write_url()
         return control

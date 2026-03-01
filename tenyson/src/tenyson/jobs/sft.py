@@ -71,6 +71,7 @@ class SFTJob:
             ManualStopTelemetryCallback,
             SFTTelemetryCallback,
             TelemetryClient,
+            WandBUrlTelemetryCallback,
         )
 
         start = time.time()
@@ -146,6 +147,24 @@ class SFTJob:
             trainer_kwargs["formatting_func"] = formatting_func
 
         collator = self.task.get_sft_data_collator(self.config, tokenizer)
+        if collator is None:
+            loss_on_assistant_only = train_cfg.get("loss_on_assistant_only", False)
+            response_template = train_cfg.get("response_template") or ""
+            if loss_on_assistant_only and response_template:
+                if train_cfg.get("packing", False):
+                    raise ValueError(
+                        "loss_on_assistant_only is not supported with packing=True. "
+                        "Set training.packing to false."
+                    )
+                from tenyson.jobs.sft_collator import CompletionOnlyDataCollator
+
+                instruction_template = train_cfg.get("instruction_template")
+                collator = CompletionOnlyDataCollator(
+                    tokenizer=tokenizer,
+                    response_template=response_template,
+                    instruction_template=instruction_template,
+                    max_length=seq_len,
+                )
         if collator is not None:
             trainer_kwargs["data_collator"] = collator
 
@@ -159,6 +178,13 @@ class SFTJob:
             callbacks.append(
                 ManualStopTelemetryCallback(run_id=run_name, client=client)
             )
+            report_to = train_cfg.get("report_to", "none")
+            if report_to == "wandb" or (
+                isinstance(report_to, list) and "wandb" in report_to
+            ):
+                callbacks.append(
+                    WandBUrlTelemetryCallback(run_id=run_name, client=client)
+                )
 
         # Optional eval-loss early stopping.
         patience = train_cfg.get("early_stopping_patience")
@@ -182,8 +208,27 @@ class SFTJob:
 
         trainer = SFTTrainer(**trainer_kwargs)
 
+        resume_path = train_cfg.get("resume_from_checkpoint")
+        if resume_path:
+            if not os.path.isdir(resume_path):
+                # Maybe HF repo/revision: try to download.
+                try:
+                    from huggingface_hub import snapshot_download
+                    parts = resume_path.split(":", 1)
+                    repo_id = parts[0]
+                    revision = parts[1] if len(parts) > 1 else "main"
+                    resume_path = snapshot_download(repo_id=repo_id, revision=revision)
+                except Exception as e:  # noqa: BLE001
+                    raise ValueError(
+                        f"resume_from_checkpoint must be a local directory or repo:revision; got {resume_path}: {e}"
+                    ) from e
+            print(f"[SFTJob] Resuming from checkpoint: {resume_path}", flush=True)
+
         print("[SFTJob] Starting training...", flush=True)
-        train_result = trainer.train()
+        if resume_path:
+            train_result = trainer.train(resume_from_checkpoint=resume_path)
+        else:
+            train_result = trainer.train()
 
         hf_repo_id = train_cfg.get("hf_repo_id")
         if hf_repo_id:

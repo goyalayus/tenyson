@@ -18,6 +18,20 @@ class ReportBuilder:
         for key, value in data.items():
             self.content = self.content.replace("{" + key + "}", str(value))
 
+    def update(self, data: Dict[str, Any]) -> None:
+        """
+        Incremental update: read current report from disk (or use in-memory content),
+        replace only the placeholders for keys in `data`, then write back.
+        Use after an initial fill() + generate() to update the report as steps complete.
+        """
+        if self.output_path.exists():
+            self.content = self.output_path.read_text(encoding="utf-8")
+        for key, value in data.items():
+            self.content = self.content.replace("{" + key + "}", str(value))
+        self.output_dir = self.output_path.parent
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(self.content, encoding="utf-8")
+
     def attach_wandb_scalar_link(
         self,
         placeholder: str,

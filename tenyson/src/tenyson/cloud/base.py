@@ -1,7 +1,17 @@
 from abc import ABC, abstractmethod
+import sys
 from typing import Any
 
 from tenyson.jobs.result import JobResult
+
+
+def _red_print(message: str) -> None:
+    """Print message to stderr in red if stderr is a TTY; otherwise plain."""
+    if sys.stderr.isatty():
+        sys.stderr.write(f"\033[91m{message}\033[0m\n")
+    else:
+        sys.stderr.write(f"{message}\n")
+    sys.stderr.flush()
 
 
 class JobFailedError(Exception):

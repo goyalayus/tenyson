@@ -11,9 +11,10 @@ It provides:
 
 ## basic usage
 
-- **Local jobs**: Instantiate a `TaskPlugin`, load a YAML config, then run a job.
+Run jobs in the cloud via a manager (AWS or Modal). The manager launches the job remotely using `python -m tenyson.runner`, syncs outputs back, and returns a `JobResult` instance.
 
 ```python
+from tenyson.cloud.aws import AWSManager
 from tenyson.jobs.sft import SFTJob
 from tenyson.examples.wordle.wordle_task import WordleTask
 import yaml
@@ -23,15 +24,6 @@ with open("tenyson/examples/wordle/configs/sft_config.yaml", "r", encoding="utf-
 
 task = WordleTask()
 job = SFTJob(config=cfg, task=task)
-result = job.run()
-print(result.metrics, result.wandb_url)
-```
-
-- **Cloud runs via AWS / Modal**: Wrap the job with a cloud manager. The manager now launches the job remotely using `python -m tenyson.runner`, pulls back the `JobResult` JSON, and returns a populated `JobResult` instance.
-
-```python
-from tenyson.cloud.aws import AWSManager
-
 cloud = AWSManager(
     instance_type="g5.2xlarge",
     key_name="my-key-name",
@@ -39,7 +31,12 @@ cloud = AWSManager(
     security_group="sg-...",
 )
 result = cloud.run(job)  # result is the remote JobResult
+print(result.metrics, result.wandb_url)
 ```
+
+- **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
+- **Resume from checkpoint**: Set `training.resume_from_checkpoint` in your config (or pass `--resume-from-checkpoint` to `tenyson.runner`) to a checkpoint directory (or `repo:revision` for HF). SFT and RL load full checkpoints (model, optimizer, scheduler) and continue training.
+- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. Each step is `(label, config, JobClass, task)`. When a step fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest checkpoint), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
 
 ## telemetry
 
@@ -86,7 +83,7 @@ The same `Generation` table is intended for logging eval prompts and completions
 
 `tenyson.jobs.result.JobResult` is the common return type from all jobs and cloud managers:
 
-- **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`, `local_output_dir`.
+- **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`, `local_output_dir`. On failure, cloud managers also set `failure_reason`, `instance_id`, and `spot_interruption`.
 - **Persistence**: the `.save(path)` method serialises the result to JSON; jobs always save a `results.json` or `job_result.json` in their output directory.
 
 `ReportBuilder` turns a markdown template into a final report with:
@@ -145,7 +142,8 @@ python -m tenyson.runner \
 ```
 
 - **`--job-type`**: one of `sft`, `rl`, or `eval`.
-- **`--config`**: YAML or JSON config file; the same schema used by local jobs.
+- **`--config`**: YAML or JSON config file; the same schema used by jobs run via cloud managers.
 - **`--task-module`**: Either a path to a Python file containing a single `TaskPlugin` subclass (e.g. `tenyson/examples/wordle/wordle_task.py`), or a `module.path:ClassName` spec for remote/advanced use.
+- **`--resume-from-checkpoint`**: (SFT/RL only) Path to a checkpoint directory or `repo_id:revision` to resume training.
 
-`AWSManager` and `ModalManager` both use this CLI internally for remote execution; you can also use it directly on any machine where `tenyson` is installed.
+`AWSManager` and `ModalManager` invoke this entrypoint on the remote worker. You can also run it directly on a machine that will execute the job (e.g. a dedicated runner node).

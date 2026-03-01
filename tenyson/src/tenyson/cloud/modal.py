@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from tenyson.cloud.base import BaseCloudManager
+from tenyson.cloud.base import BaseCloudManager, _red_print
 from tenyson.jobs.result import JobResult
 
 
@@ -139,10 +139,26 @@ class ModalManager(BaseCloudManager):
         }
         gpu_request = gpu_map.get(self.gpu, modal.gpu.A100())
 
-        # Run synchronously.
-        run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
-            job_type, str(config_rel_path), task_spec
-        )
+        # Run synchronously; on failure return failed JobResult instead of raising.
+        try:
+            run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
+                job_type, str(config_rel_path), task_spec
+            )
+        except Exception as exc:  # noqa: BLE001
+            train_cfg = job.config.get("training", {})
+            eval_cfg = job.config.get("evaluation", {})
+            run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
+            result = JobResult(
+                run_id=run_name,
+                status="failed",
+                total_time_seconds=0.0,
+                failure_reason=str(exc),
+                instance_id=None,
+                spot_interruption=None,
+                local_output_dir=None,
+            )
+            _red_print(f"[TENYSON] Step failed (Modal): {exc}")
+            return result
 
         # The repo is mounted read-write into the Modal container, so outputs
         # produced under /workspace/outputs are visible locally under ./outputs.
@@ -173,11 +189,8 @@ class ModalManager(BaseCloudManager):
             print(f"[ModalManager] Loading JobResult from {local_result_path}")
             with open(local_result_path, "r", encoding="utf-8") as f:
                 data: Dict[str, Any] = json.load(f)
-            return JobResult(**data)
+            return JobResult.from_dict(data)
         except Exception as exc:  # noqa: BLE001
-            print(
-                f"[ModalManager] Warning: failed to load remote JobResult, "
-                f"falling back to local execution: {exc}",
-                flush=True,
-            )
-            return job.run()
+            raise RuntimeError(
+                f"ModalManager: failed to load remote JobResult after run: {exc}"
+            ) from exc

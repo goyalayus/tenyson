@@ -28,6 +28,9 @@ training:
   save_total_limit: 1
   optim: "adamw_8bit"
   packing: false
+  # Train only on assistant tokens (mask system/user). Requires response_template for your chat format.
+  loss_on_assistant_only: true
+  response_template: "<|im_start|>assistant\n"
   run_name: "lora_sft_qwen3-4b"
   output_dir: "./outputs/lora_sft_qwen3-4b"
   report_to: ["wandb"]

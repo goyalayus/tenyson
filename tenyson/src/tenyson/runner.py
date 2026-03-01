@@ -23,11 +23,18 @@ def main() -> None:
         required=True,
         help="Path to task .py file or module.path:ClassName spec",
     )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        default=None,
+        help="Path to checkpoint directory (or repo:revision) to resume training (SFT/RL only)",
+    )
 
     args = parser.parse_args()
 
     config_path = os.path.abspath(args.config)
     config = load_config(config_path)
+    if args.resume_from_checkpoint and args.job_type in ("sft", "rl"):
+        config.setdefault("training", {})["resume_from_checkpoint"] = args.resume_from_checkpoint
     task = _resolve_task(args.task_module)
 
     if args.job_type == "sft":

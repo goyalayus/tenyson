@@ -126,6 +126,7 @@ class RLJob:
             ManualStopTelemetryCallback,
             Rollout,
             TelemetryClient,
+            WandBUrlTelemetryCallback,
         )
 
         start = time.time()
@@ -175,6 +176,9 @@ class RLJob:
             max_completion_length=train_cfg.get("max_completion_length", 2048),
             bf16=False,
             fp16=False,
+            save_steps=train_cfg.get("save_steps", 100),
+            save_strategy="steps",
+            save_total_limit=train_cfg.get("save_total_limit", 2),
         )
 
         import inspect
@@ -201,6 +205,15 @@ class RLJob:
                     check_every_n_steps=manual_stop_every,
                 ),
             ]
+            report_to = train_cfg.get("report_to", ["none"])
+            if report_to == "wandb" or (
+                isinstance(report_to, list) and "wandb" in report_to
+            ):
+                callbacks = list(callbacks) + [
+                    WandBUrlTelemetryCallback(
+                        run_id=run_name, client=telemetry_client
+                    ),
+                ]
 
             # Wrap the first reward function to log per-prompt/per-completion rewards
             # into the Generation / Rollout tables. We only wrap the first entry to
@@ -265,8 +278,26 @@ class RLJob:
         )
         print(f"[RLJob] Trainable parameters: {trainable_count}", flush=True)
 
+        resume_path = train_cfg.get("resume_from_checkpoint")
+        if resume_path:
+            if not Path(resume_path).is_dir():
+                try:
+                    from huggingface_hub import snapshot_download
+                    parts = str(resume_path).split(":", 1)
+                    repo_id = parts[0]
+                    revision = parts[1] if len(parts) > 1 else "main"
+                    resume_path = snapshot_download(repo_id=repo_id, revision=revision)
+                except Exception as e:  # noqa: BLE001
+                    raise ValueError(
+                        f"resume_from_checkpoint must be a local directory or repo:revision; got {resume_path}: {e}"
+                    ) from e
+            print(f"[RLJob] Resuming from checkpoint: {resume_path}", flush=True)
+
         print("[RLJob] Starting GRPO training...", flush=True)
-        train_result = trainer.train()
+        if resume_path:
+            train_result = trainer.train(resume_from_checkpoint=resume_path)
+        else:
+            train_result = trainer.train()
 
         hf_repo_id = train_cfg.get("hf_repo_id")
         if hf_repo_id:

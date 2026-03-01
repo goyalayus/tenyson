@@ -10,7 +10,7 @@ from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
 
-from tenyson.cloud.base import BaseCloudManager, JobFailedError
+from tenyson.cloud.base import BaseCloudManager, JobFailedError, _red_print
 from tenyson.jobs.result import JobResult
 
 
@@ -34,6 +34,8 @@ class AWSManager(BaseCloudManager):
         profile: str | None = None,
         ami: str | None = None,
         auto_terminate: bool = True,
+        use_spot: bool = False,
+        spot_max_price: str | None = None,
     ):
         super().__init__(auto_terminate=auto_terminate)
         self.instance_type = instance_type
@@ -44,6 +46,8 @@ class AWSManager(BaseCloudManager):
         self.subnet = subnet
         self.profile = profile
         self.ami = ami
+        self.use_spot = use_spot
+        self.spot_max_price = spot_max_price
 
     # ---- Helpers -----------------------------------------------------
 
@@ -128,9 +132,11 @@ class AWSManager(BaseCloudManager):
     # ---- Public API --------------------------------------------------
 
     def run(self, job: Any) -> JobResult:
-        # If required AWS parameters are missing, fall back to local execution.
         if not (self.key_name and self.key_path and self.security_group):
-            return job.run()
+            raise ValueError(
+                "AWSManager requires key_name, key_path, and security_group for cloud execution. "
+                "Provide all three to run on EC2."
+            )
 
         session = self._get_session()
         ec2 = session.client("ec2")
@@ -156,6 +162,12 @@ class AWSManager(BaseCloudManager):
         }
         if self.subnet:
             run_args["SubnetId"] = self.subnet
+        if self.use_spot:
+            run_args["InstanceMarketOptions"] = {"MarketType": "spot"}
+            if self.spot_max_price is not None:
+                run_args["InstanceMarketOptions"]["SpotOptions"] = {
+                    "MaxPrice": self.spot_max_price
+                }
 
         instances = ec2_resource.create_instances(**run_args)
         instance = instances[0]
@@ -210,6 +222,16 @@ class AWSManager(BaseCloudManager):
                 public_ip, self.key_path, user, str(cfg_path.parent), "~/workspace"
             )
 
+        # If resuming, sync the checkpoint (or outputs) to the instance so the path is valid.
+        resume_path = job.config.get("training", {}).get("resume_from_checkpoint")
+        if resume_path and os.path.isdir(resume_path):
+            # Sync entire outputs tree so checkpoint path exists on remote.
+            outputs_src = os.path.join(repo_root, "outputs")
+            if os.path.isdir(outputs_src):
+                self._rsync_to_host(
+                    public_ip, self.key_path, user, outputs_src, "~/workspace/outputs"
+                )
+
         # HF / W&B env vars.
         env_exports = []
         for var in ["HF_TOKEN", "WANDB_API_KEY"]:
@@ -248,7 +270,50 @@ class AWSManager(BaseCloudManager):
             public_ip, self.key_path, user, f"bash -c '{remote_cmd}'"
         )
         if not success:
-            raise JobFailedError("Remote job failed.")
+            # Best-effort rsync to recover checkpoints and logs.
+            print("[AWSManager] Remote job failed. Syncing outputs back (best-effort)...")
+            outputs_local_root = os.path.join(repo_root, "outputs")
+            os.makedirs(outputs_local_root, exist_ok=True)
+            self._rsync_from_host(
+                public_ip,
+                self.key_path,
+                user,
+                "~/workspace/outputs",
+                outputs_local_root,
+            )
+            # Get instance state reason (e.g. Spot interruption).
+            failure_reason = "Remote job failed."
+            spot_interruption = False
+            try:
+                instance.reload()
+                state_reason = getattr(instance, "state_reason", None)
+                if state_reason and isinstance(state_reason, dict):
+                    code = state_reason.get("Code") or ""
+                    msg = state_reason.get("Message") or ""
+                    if "Spot" in code or "Spot" in msg:
+                        spot_interruption = True
+                        failure_reason = f"Spot instance interrupted: {code} {msg}".strip()
+                    else:
+                        failure_reason = code or msg or failure_reason
+            except Exception:  # noqa: S110
+                pass
+            if self.auto_terminate:
+                print(f"[AWSManager] Terminating instance {instance.id}...")
+                instance.terminate()
+            train_cfg = job.config.get("training", {})
+            eval_cfg = job.config.get("evaluation", {})
+            run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
+            result = JobResult(
+                run_id=run_name,
+                status="failed",
+                total_time_seconds=0.0,
+                failure_reason=failure_reason,
+                instance_id=instance.id,
+                spot_interruption=spot_interruption,
+                local_output_dir=os.path.join(repo_root, "outputs"),
+            )
+            _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
+            return result
 
         # Sync remote outputs back to the local repo.
         print("[AWSManager] Syncing remote outputs back to local machine...")
@@ -293,11 +358,8 @@ class AWSManager(BaseCloudManager):
             print(f"[AWSManager] Loading JobResult from {local_result_path}")
             with open(local_result_path, "r", encoding="utf-8") as f:
                 data: Dict[str, Any] = json.load(f)
-            return JobResult(**data)
+            return JobResult.from_dict(data)
         except Exception as exc:  # noqa: BLE001
-            print(
-                f"[AWSManager] Warning: failed to load remote JobResult, "
-                f"falling back to local execution: {exc}",
-                flush=True,
-            )
-            return job.run()
+            raise RuntimeError(
+                f"AWSManager: failed to load remote JobResult after sync: {exc}"
+            ) from exc
