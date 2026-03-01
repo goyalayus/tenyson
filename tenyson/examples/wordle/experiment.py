@@ -19,12 +19,14 @@ def _before_step(
     config: dict,
     previous_results: list,
 ) -> None:
-    """Set init_adapter_repo from the previous step's result for config chaining."""
-    if not previous_results:
-        return
-    prev = previous_results[-1]
-    adapter = prev.hf_repo_id or prev.local_output_dir or ""
-    config.setdefault("model", {})["init_adapter_repo"] = adapter
+    """Set init_adapter_repo from the most recent previous result that has hf_repo_id."""
+    for prev in reversed(previous_results):
+        if getattr(prev, "hf_repo_id", None):
+            model_cfg = config.setdefault("model", {})
+            model_cfg["init_adapter_repo"] = prev.hf_repo_id
+            if getattr(prev, "hf_revision", None):
+                model_cfg["init_adapter_revision"] = prev.hf_revision
+            return
 
 
 def main():

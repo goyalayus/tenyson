@@ -3,8 +3,9 @@ model:
   max_seq_length: 4096
   load_in_4bit: true
   fast_inference: true
-  init_adapter_repo: "goyalayus/wordle-lora-qwen3-4b"
-  init_adapter_revision: "step-1320"
+  # Set by pipeline before_step from previous step's hf_repo_id.
+  init_adapter_repo: ""
+  init_adapter_revision: "main"
 
 lora:
   r: 16
@@ -36,7 +37,8 @@ training:
   run_name: "wordle_rl_vllm_config_test"
   output_dir: "./outputs/rl_grpo"
   report_to: ["wandb"]
-  hf_repo_id: ""
+  # Unique repo per run when set. Leave empty to skip push.
+  hf_repo_base: "username/wordle-lora"
 
 task:
   synthetic_samples: 4096

@@ -5,7 +5,7 @@ model:
   lora_r: 16
   lora_alpha: 32
   lora_target_modules: ["up_proj", "gate_proj", "down_proj"]
-  init_adapter_repo: "goyalayus/wordle-lora-qwen3-4b"
+  init_adapter_repo: ""
   init_adapter_revision: "main"
 
 vllm:

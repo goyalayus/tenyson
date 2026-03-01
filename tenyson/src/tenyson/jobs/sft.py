@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict
 
 from tenyson.core.plugin import TaskPlugin
+from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
@@ -230,11 +231,12 @@ class SFTJob:
         else:
             train_result = trainer.train()
 
-        hf_repo_id = train_cfg.get("hf_repo_id")
-        if hf_repo_id:
-            print(f"[SFTJob] Pushing adapter to Hub: {hf_repo_id}", flush=True)
-            model.push_to_hub(hf_repo_id)
-            tokenizer.push_to_hub(hf_repo_id)
+        hf_repo_base = train_cfg.get("hf_repo_base") or train_cfg.get("hf_repo_id") or ""
+        push_repo_id = unique_repo_id(hf_repo_base, run_name) if hf_repo_base else ""
+        if push_repo_id:
+            print(f"[SFTJob] Pushing adapter to Hub: {push_repo_id}", flush=True)
+            model.push_to_hub(push_repo_id)
+            tokenizer.push_to_hub(push_repo_id)
         else:
             print("[SFTJob] Saving model locally...", flush=True)
             model.save_pretrained(output_dir)
@@ -274,7 +276,8 @@ class SFTJob:
             total_time_seconds=total_time,
             metrics=metrics,
              wandb_url=wandb_url,
-            hf_repo_id=hf_repo_id or None,
+            hf_repo_id=push_repo_id or None,
+            hf_revision="main" if push_repo_id else None,
             local_output_dir=output_dir,
         )
         result.save(os.path.join(output_dir, "results.json"))

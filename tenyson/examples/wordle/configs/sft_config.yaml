@@ -34,7 +34,8 @@ training:
   run_name: "lora_sft_qwen3-4b"
   output_dir: "./outputs/lora_sft_qwen3-4b"
   report_to: ["wandb"]
-  hf_repo_id: "username/wordle-lora-qwen3-4b"  # Replace with your repo
+  # Unique repo per run: base + run_name + short uid. Replace with your HF username.
+  hf_repo_base: "username/wordle-lora"
   val_size: 100
   # Early stopping based on eval_loss: stop if constant or increasing for N evals.
   early_stopping_patience: 2        # N: number of consecutive evals with no improvement.

@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from uuid import uuid4
 
 from tenyson.core.plugin import TaskPlugin
+from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
@@ -299,10 +300,11 @@ class RLJob:
         else:
             train_result = trainer.train()
 
-        hf_repo_id = train_cfg.get("hf_repo_id")
-        if hf_repo_id:
-            print(f"[RLJob] Pushing final model to Hub: {hf_repo_id}", flush=True)
-            trainer.model.push_to_hub(hf_repo_id)
+        hf_repo_base = train_cfg.get("hf_repo_base") or train_cfg.get("hf_repo_id") or ""
+        push_repo_id = unique_repo_id(hf_repo_base, run_name) if hf_repo_base else ""
+        if push_repo_id:
+            print(f"[RLJob] Pushing final model to Hub: {push_repo_id}", flush=True)
+            trainer.model.push_to_hub(push_repo_id)
 
         total_time = time.time() - start
 
@@ -334,7 +336,8 @@ class RLJob:
             total_time_seconds=total_time,
             metrics=metrics,
             wandb_url=wandb_url,
-            hf_repo_id=hf_repo_id or None,
+            hf_repo_id=push_repo_id or None,
+            hf_revision="main" if push_repo_id else None,
             local_output_dir=str(output_dir),
         )
         result.save(str(output_dir / "results.json"))
