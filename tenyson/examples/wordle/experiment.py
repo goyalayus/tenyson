@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import yaml
@@ -40,21 +41,37 @@ def main():
     rl_cfg = load_yaml(str(base_dir / "configs" / "rl_config.yaml"))
     eval_cfg = load_yaml(str(base_dir / "configs" / "eval_config.yaml"))
 
+    rl_mixed_cfg = copy.deepcopy(rl_cfg)
+    rl_mixed_cfg.setdefault("training", {})["run_name"] = "wordle_rl_mixed"
+    rl_mixed_cfg.setdefault("training", {})["output_dir"] = "./outputs/rl_mixed"
+
+    rl_alt_cfg = copy.deepcopy(rl_cfg)
+    rl_alt_cfg.setdefault("training", {})["run_name"] = "wordle_rl_alt"
+    rl_alt_cfg.setdefault("training", {})["output_dir"] = "./outputs/rl_alt"
+
     steps = [
         ("sft", sft_cfg, SFTJob, task),
-        ("rl", rl_cfg, RLJob, task),
         ("eval", eval_cfg, EvalJob, task),
+        {
+            "label": "rl_branches",
+            "parallel": [
+                ("rl_mixed", rl_mixed_cfg, RLJob, task),
+                ("rl_alt", rl_alt_cfg, RLJob, task),
+            ],
+        },
     ]
 
     report_initial_data = {
         "sft_status": "pending",
-        "rl_status": "pending",
+        "rl_mixed_status": "pending",
+        "rl_alt_status": "pending",
         "eval_status": "pending",
         "eval_constraint_accuracy": "pending",
         "eval_dict_accuracy": "pending",
         "eval_format_accuracy": "pending",
         "sft_wandb_link": "—",
-        "rl_wandb_link": "—",
+        "rl_mixed_wandb_link": "—",
+        "rl_alt_wandb_link": "—",
     }
 
     run_pipeline(

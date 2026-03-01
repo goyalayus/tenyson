@@ -36,7 +36,7 @@ print(result.metrics, result.wandb_url)
 
 - **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
 - **Resume from checkpoint**: Set `training.resume_from_checkpoint` in your config (or pass `--resume-from-checkpoint` to `tenyson.runner`) to a checkpoint directory (or `repo:revision` for HF). SFT and RL load full checkpoints (model, optimizer, scheduler) and continue training.
-- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. Each step is `(label, config, JobClass, task)`. When a step fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest checkpoint), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
+- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest checkpoint), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
 
 ## telemetry
 
