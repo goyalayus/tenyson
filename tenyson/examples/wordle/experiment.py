@@ -1,11 +1,13 @@
+from pathlib import Path
+
 import yaml
 
 from tenyson.cloud.aws import AWSManager
 from tenyson.jobs.eval import EvalJob
 from tenyson.jobs.rl import RLJob
 from tenyson.jobs.sft import SFTJob
+from tenyson.loader import load_task
 from tenyson.pipeline import run_pipeline
-from tenyson.examples.wordle.wordle_task import WordleTask
 
 
 def load_yaml(path: str):
@@ -30,12 +32,13 @@ def _before_step(
 
 
 def main():
-    task = WordleTask()
+    base_dir = Path(__file__).parent
+    task = load_task(str(Path(__file__).with_name("wordle_task.py")))
     cloud = AWSManager(instance_type="g5.2xlarge", auto_terminate=True)
 
-    sft_cfg = load_yaml("tenyson/examples/wordle/configs/sft_config.yaml")
-    rl_cfg = load_yaml("tenyson/examples/wordle/configs/rl_config.yaml")
-    eval_cfg = load_yaml("tenyson/examples/wordle/configs/eval_config.yaml")
+    sft_cfg = load_yaml(str(base_dir / "configs" / "sft_config.yaml"))
+    rl_cfg = load_yaml(str(base_dir / "configs" / "rl_config.yaml"))
+    eval_cfg = load_yaml(str(base_dir / "configs" / "eval_config.yaml"))
 
     steps = [
         ("sft", sft_cfg, SFTJob, task),
@@ -57,8 +60,8 @@ def main():
     run_pipeline(
         steps,
         cloud,
-        report_template_path="tenyson/examples/wordle/report_template.md",
-        report_output_path="tenyson/examples/wordle/final_report.md",
+        report_template_path=str(base_dir / "report_template.md"),
+        report_output_path=str(base_dir / "final_report.md"),
         report_initial_data=report_initial_data,
         before_step=_before_step,
     )

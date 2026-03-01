@@ -1,3 +1,6 @@
+import importlib
+import inspect
+import os
 from typing import Any, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
@@ -23,6 +26,41 @@ class ModalManager(BaseCloudManager):
         self.gpu = gpu
         self.timeout = timeout
         self.profile = profile
+
+    def _resolve_local_project_root(self) -> str:
+        """
+        Resolve the local project root that contains src-layout package files.
+        Supports invoking from either project root or one directory above.
+        """
+        root = os.path.abspath(".")
+        candidates = [root, os.path.join(root, "tenyson")]
+        for candidate in candidates:
+            if os.path.isfile(os.path.join(candidate, "pyproject.toml")) and os.path.isfile(
+                os.path.join(candidate, "src", "tenyson", "runner.py")
+            ):
+                return os.path.abspath(candidate)
+        return os.path.abspath(root)
+
+    def _resolve_task_spec(self, task: Any, repo_root: str) -> str:
+        """
+        Prefer module:Class for importable task modules; fall back to a task file path
+        relative to the mounted repo root for file-loaded plugins.
+        """
+        module_path = task.__class__.__module__
+        class_name = task.__class__.__name__
+        try:
+            importlib.import_module(module_path)
+            return f"{module_path}:{class_name}"
+        except Exception:  # noqa: BLE001
+            pass
+
+        task_file = inspect.getsourcefile(task.__class__)
+        if task_file:
+            abs_repo = os.path.abspath(repo_root)
+            abs_task = os.path.abspath(task_file)
+            if abs_task.startswith(abs_repo + os.sep) or abs_task == abs_repo:
+                return os.path.relpath(abs_task, abs_repo)
+        return f"{module_path}:{class_name}"
 
     def run(self, job: Any) -> JobResult:
         try:
@@ -64,22 +102,22 @@ class ModalManager(BaseCloudManager):
         except modal.exception.NotFoundError:
             pass
 
-        repo_root = modal.Mount.from_local_dir(
-            ".", remote_path="/workspace"
-        )
+        local_project_root = self._resolve_local_project_root()
+        repo_mount = modal.Mount.from_local_dir(local_project_root, remote_path="/workspace")
 
         @app.function(
             image=image,
             gpu=None,
             timeout=self.timeout,
             secrets=secrets,
-            mounts=[repo_root],
+            mounts=[repo_mount],
         )
         def run_remote(job_type: str, config_rel_path: str, task_spec: str) -> None:
             import os
             import sys
 
             os.chdir("/workspace")
+            os.environ["PYTHONPATH"] = f"src:{os.environ.get('PYTHONPATH', '')}"
             cmd = [
                 sys.executable,
                 "-m",
@@ -115,12 +153,10 @@ class ModalManager(BaseCloudManager):
             job_type = "eval"
 
         task = job.task
-        module_path = task.__class__.__module__
-        class_name = task.__class__.__name__
-        task_spec = f"{module_path}:{class_name}"
+        task_spec = self._resolve_task_spec(task, local_project_root)
 
         # Write config into the repo root so it is visible under /workspace.
-        cfg_dir = Path(".") / ".tenyson_modal_configs"
+        cfg_dir = Path(local_project_root) / ".tenyson_modal_configs"
         cfg_dir.mkdir(parents=True, exist_ok=True)
         config_rel_path = cfg_dir / f"{job_type}_job_config.json"
         with open(config_rel_path, "w", encoding="utf-8") as f:
@@ -142,7 +178,7 @@ class ModalManager(BaseCloudManager):
         # Run synchronously; on failure return failed JobResult instead of raising.
         try:
             run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
-                job_type, str(config_rel_path), task_spec
+                job_type, os.path.relpath(str(config_rel_path), local_project_root), task_spec
             )
         except Exception as exc:  # noqa: BLE001
             train_cfg = job.config.get("training", {})
@@ -184,7 +220,7 @@ class ModalManager(BaseCloudManager):
                 result_filename = "results.json"
 
             rel_output_dir = str(output_dir).lstrip("./")
-            repo_root = Path(".")
+            repo_root = Path(local_project_root)
             local_result_path = repo_root / rel_output_dir / result_filename
             print(f"[ModalManager] Loading JobResult from {local_result_path}")
             with open(local_result_path, "r", encoding="utf-8") as f:

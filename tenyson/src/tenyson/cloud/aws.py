@@ -1,3 +1,5 @@
+import importlib
+import inspect
 import json
 import os
 import subprocess
@@ -129,6 +131,46 @@ class AWSManager(BaseCloudManager):
         result = subprocess.run(rsync_cmd)
         return result.returncode == 0
 
+    def _resolve_local_project_root(self, repo_root: str) -> Path:
+        """
+        Resolve the local project root that contains src-layout package files.
+        Supports invoking from either project root or one directory above.
+        """
+        root = Path(repo_root).resolve()
+        candidates = [root, root / "tenyson"]
+        for candidate in candidates:
+            if (candidate / "pyproject.toml").is_file() and (
+                candidate / "src" / "tenyson" / "runner.py"
+            ).is_file():
+                return candidate
+        return root
+
+    def _resolve_task_spec(self, task: Any, repo_root: str) -> str:
+        """
+        Prefer module:Class for importable task modules; fall back to a task file path
+        relative to the synced repo root for file-loaded plugins.
+        """
+        module_path = task.__class__.__module__
+        class_name = task.__class__.__name__
+        try:
+            importlib.import_module(module_path)
+            return f"{module_path}:{class_name}"
+        except Exception:  # noqa: BLE001
+            pass
+
+        task_file = inspect.getsourcefile(task.__class__)
+        if task_file:
+            abs_repo = Path(repo_root).resolve()
+            abs_task = Path(task_file).resolve()
+            try:
+                rel = abs_task.relative_to(abs_repo)
+            except ValueError:
+                rel = None
+            if rel is not None:
+                return str(rel)
+
+        return f"{module_path}:{class_name}"
+
     # ---- Public API --------------------------------------------------
 
     def run(self, job: Any) -> JobResult:
@@ -207,6 +249,12 @@ class AWSManager(BaseCloudManager):
 
         print("[AWSManager] Syncing codebase to instance...")
         repo_root = os.getcwd()
+        local_project_root = self._resolve_local_project_root(repo_root)
+        local_project_rel = os.path.relpath(local_project_root, Path(repo_root).resolve())
+        if local_project_rel == ".":
+            remote_project_root = "~/workspace"
+        else:
+            remote_project_root = f"~/workspace/{local_project_rel}"
         self._rsync_to_host(public_ip, self.key_path, user, repo_root, "~/workspace")
 
         # Prepare remote config for this job.
@@ -219,7 +267,7 @@ class AWSManager(BaseCloudManager):
 
             # Re-rsync just the config file into workspace.
             self._rsync_to_host(
-                public_ip, self.key_path, user, str(cfg_path.parent), "~/workspace"
+                public_ip, self.key_path, user, str(cfg_path.parent), remote_project_root
             )
 
         # If resuming, sync the checkpoint (or outputs) to the instance so the path is valid.
@@ -227,9 +275,11 @@ class AWSManager(BaseCloudManager):
         if resume_path and os.path.isdir(resume_path):
             # Sync entire outputs tree so checkpoint path exists on remote.
             outputs_src = os.path.join(repo_root, "outputs")
+            if local_project_rel != ".":
+                outputs_src = os.path.join(str(local_project_root), "outputs")
             if os.path.isdir(outputs_src):
                 self._rsync_to_host(
-                    public_ip, self.key_path, user, outputs_src, "~/workspace/outputs"
+                    public_ip, self.key_path, user, outputs_src, f"{remote_project_root}/outputs"
                 )
 
         # HF / W&B env vars.
@@ -240,9 +290,7 @@ class AWSManager(BaseCloudManager):
                 env_exports.append(f"export {var}={val}")
 
         task = job.task
-        module_path = task.__class__.__module__
-        class_name = task.__class__.__name__
-        task_spec = f"{module_path}:{class_name}"
+        task_spec = self._resolve_task_spec(task, repo_root)
 
         job_type = "sft"
         from tenyson.jobs.sft import SFTJob as _S
@@ -258,7 +306,8 @@ class AWSManager(BaseCloudManager):
         remote_cmd = (
             "source activate pytorch"
             + (f" && {env_chain}" if env_chain else "")
-            + " && cd ~/workspace && "
+            + f" && cd {remote_project_root} && "
+            + "export PYTHONPATH=src:${PYTHONPATH} && "
             + "python -m tenyson.runner "
             + f"--job-type {job_type} "
             + "--config job_config.yaml "
@@ -273,12 +322,14 @@ class AWSManager(BaseCloudManager):
             # Best-effort rsync to recover checkpoints and logs.
             print("[AWSManager] Remote job failed. Syncing outputs back (best-effort)...")
             outputs_local_root = os.path.join(repo_root, "outputs")
+            if local_project_rel != ".":
+                outputs_local_root = os.path.join(str(local_project_root), "outputs")
             os.makedirs(outputs_local_root, exist_ok=True)
             self._rsync_from_host(
                 public_ip,
                 self.key_path,
                 user,
-                "~/workspace/outputs",
+                f"{remote_project_root}/outputs",
                 outputs_local_root,
             )
             # Get instance state reason (e.g. Spot interruption).
@@ -318,12 +369,14 @@ class AWSManager(BaseCloudManager):
         # Sync remote outputs back to the local repo.
         print("[AWSManager] Syncing remote outputs back to local machine...")
         outputs_local_root = os.path.join(repo_root, "outputs")
+        if local_project_rel != ".":
+            outputs_local_root = os.path.join(str(local_project_root), "outputs")
         os.makedirs(outputs_local_root, exist_ok=True)
         self._rsync_from_host(
             public_ip,
             self.key_path,
             user,
-            "~/workspace/outputs",
+            f"{remote_project_root}/outputs",
             outputs_local_root,
         )
 
@@ -354,7 +407,9 @@ class AWSManager(BaseCloudManager):
                 result_filename = "results.json"
 
             rel_output_dir = output_dir.lstrip("./")
-            local_result_path = os.path.join(repo_root, rel_output_dir, result_filename)
+            local_result_path = os.path.join(
+                str(local_project_root), rel_output_dir, result_filename
+            )
             print(f"[AWSManager] Loading JobResult from {local_result_path}")
             with open(local_result_path, "r", encoding="utf-8") as f:
                 data: Dict[str, Any] = json.load(f)
