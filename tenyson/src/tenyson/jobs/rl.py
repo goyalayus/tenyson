@@ -126,6 +126,8 @@ class RLJob:
             GRPOEpochTelemetryCallback,
             Generation,
             ManualStopTelemetryCallback,
+            record_run_summary,
+            resolve_telemetry_context,
             Rollout,
             TelemetryClient,
             WandBUrlTelemetryCallback,
@@ -192,7 +194,7 @@ class RLJob:
 
         # Optional telemetry wiring.
         telemetry_cfg = self.config.get("telemetry", {})
-        db_url = telemetry_cfg.get("db_url")
+        db_url, experiment_id = resolve_telemetry_context(self.config)
         telemetry_client = None
         if db_url:
             telemetry_client = TelemetryClient(db_url=db_url)
@@ -200,9 +202,14 @@ class RLJob:
                 telemetry_cfg.get("manual_stop_check_every_n_steps", 1)
             )
             callbacks = list(callbacks) + [
-                GRPOEpochTelemetryCallback(run_id=run_name, client=telemetry_client),
+                GRPOEpochTelemetryCallback(
+                    run_id=run_name,
+                    experiment_id=experiment_id,  # type: ignore[arg-type]
+                    client=telemetry_client,
+                ),
                 ManualStopTelemetryCallback(
                     run_id=run_name,
+                    experiment_id=experiment_id,  # type: ignore[arg-type]
                     client=telemetry_client,
                     check_every_n_steps=manual_stop_every,
                 ),
@@ -213,7 +220,9 @@ class RLJob:
             ):
                 callbacks = list(callbacks) + [
                     WandBUrlTelemetryCallback(
-                        run_id=run_name, client=telemetry_client
+                        run_id=run_name,
+                        experiment_id=experiment_id,  # type: ignore[arg-type]
+                        client=telemetry_client,
                     ),
                 ]
 
@@ -238,6 +247,7 @@ class RLJob:
                             ):
                                 rollout = Rollout(
                                     id=str(uuid4()),
+                                    experiment_id=experiment_id,
                                     run_id=run_id,
                                     global_step=step,
                                     prompt_text=str(prompt),
@@ -245,6 +255,7 @@ class RLJob:
                                 session.add(rollout)
                                 generation = Generation(
                                     id=str(uuid4()),
+                                    experiment_id=experiment_id,
                                     run_id=run_id,
                                     global_step=step,
                                     phase="rl",
@@ -342,4 +353,11 @@ class RLJob:
             local_output_dir=str(output_dir),
         )
         result.save(str(output_dir / "results.json"))
+        if telemetry_client is not None and experiment_id is not None:
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase="rl",
+                result=result,
+            )
         return result

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+import json
+import os
+from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, create_engine
@@ -13,6 +15,7 @@ Base = declarative_base()
 class Rollout(Base):
     __tablename__ = "rollouts"
     id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
     prompt_text = Column(String)
@@ -26,6 +29,7 @@ class Generation(Base):
 
     __tablename__ = "generations"
     id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
     phase = Column(String, index=True)  # e.g. "rl" or "eval"
@@ -42,6 +46,7 @@ class EpochMetric(Base):
 
     __tablename__ = "epoch_metrics"
     id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
     epoch_number = Column(Integer)
@@ -57,6 +62,7 @@ class SFTMetric(Base):
 
     __tablename__ = "sft_metrics"
     id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
     loss = Column(Float)
@@ -71,7 +77,8 @@ class RunControl(Base):
 
     __tablename__ = "run_controls"
     id = Column(String, primary_key=True)
-    run_id = Column(String, index=True, unique=True)
+    experiment_id = Column(String, index=True)
+    run_id = Column(String, index=True)
     stop_requested = Column(Boolean, default=False, nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -84,7 +91,8 @@ class RunMetadata(Base):
 
     __tablename__ = "run_metadata"
     id = Column(String, primary_key=True)
-    run_id = Column(String, index=True, unique=True)
+    experiment_id = Column(String, index=True)
+    run_id = Column(String, index=True)
     wandb_url = Column(String, nullable=True)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -96,12 +104,37 @@ class RunFailure(Base):
 
     __tablename__ = "run_failures"
     id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     step_label = Column(String, index=True)
     failure_reason = Column(String)
     instance_id = Column(String, nullable=True)
     spot_interruption = Column(Boolean, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RunSummary(Base):
+    """
+    Final per-job summary row for querying run outcomes by experiment.
+    """
+
+    __tablename__ = "run_summaries"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
+    run_id = Column(String, index=True)
+    phase = Column(String, index=True)  # "sft" | "rl" | "eval"
+    status = Column(String, index=True)  # "success" | "failed"
+    total_time_seconds = Column(Float, nullable=True)
+    metrics_json = Column(String, nullable=True)
+    hf_repo_id = Column(String, nullable=True)
+    hf_revision = Column(String, nullable=True)
+    wandb_url = Column(String, nullable=True)
+    local_output_dir = Column(String, nullable=True)
+    failure_reason = Column(String, nullable=True)
+    instance_id = Column(String, nullable=True)
+    spot_interruption = Column(Boolean, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -114,13 +147,91 @@ class TelemetryClient:
         self.Session = sessionmaker(bind=self.engine)
 
 
+def resolve_experiment_id(config: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolve experiment_id from config first, then TENYSON_EXPERIMENT_ID env var.
+    """
+    telemetry_cfg = config.get("telemetry", {}) if isinstance(config, dict) else {}
+    from_config = str(telemetry_cfg.get("experiment_id", "")).strip()
+    if from_config:
+        return from_config
+    from_env = str(os.getenv("TENYSON_EXPERIMENT_ID", "")).strip()
+    return from_env or None
+
+
+def resolve_telemetry_context(config: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Return (db_url, experiment_id). If db_url is set, experiment_id is required.
+    """
+    telemetry_cfg = config.get("telemetry", {}) if isinstance(config, dict) else {}
+    db_url = telemetry_cfg.get("db_url")
+    if not db_url:
+        return None, None
+    experiment_id = resolve_experiment_id(config)
+    if not experiment_id:
+        raise ValueError(
+            "Telemetry enabled but experiment_id is missing. "
+            "Set telemetry.experiment_id or TENYSON_EXPERIMENT_ID."
+        )
+    return db_url, experiment_id
+
+
+def record_run_summary(
+    client: TelemetryClient,
+    experiment_id: str,
+    phase: str,
+    result: Any,
+) -> None:
+    """
+    Upsert final run summary keyed by (experiment_id, run_id, phase).
+    """
+    run_id = str(getattr(result, "run_id", "unknown"))
+    metrics = getattr(result, "metrics", {}) or {}
+    now = datetime.now(timezone.utc)
+    session = client.Session()
+    try:
+        existing = (
+            session.query(RunSummary)
+            .filter(RunSummary.experiment_id == experiment_id)
+            .filter(RunSummary.run_id == run_id)
+            .filter(RunSummary.phase == phase)
+            .one_or_none()
+        )
+        if existing is None:
+            existing = RunSummary(
+                id=str(uuid4()),
+                experiment_id=experiment_id,
+                run_id=run_id,
+                phase=phase,
+                created_at=now,
+            )
+            session.add(existing)
+
+        existing.status = str(getattr(result, "status", "unknown"))
+        total_time = getattr(result, "total_time_seconds", None)
+        existing.total_time_seconds = float(total_time) if total_time is not None else None
+        existing.metrics_json = json.dumps(metrics, ensure_ascii=False, default=str)
+        existing.hf_repo_id = getattr(result, "hf_repo_id", None)
+        existing.hf_revision = getattr(result, "hf_revision", None)
+        existing.wandb_url = getattr(result, "wandb_url", None)
+        existing.local_output_dir = getattr(result, "local_output_dir", None)
+        existing.failure_reason = getattr(result, "failure_reason", None)
+        existing.instance_id = getattr(result, "instance_id", None)
+        existing.spot_interruption = getattr(result, "spot_interruption", None)
+        existing.updated_at = now
+        session.commit()
+    finally:
+        session.close()
+
+
 class GRPOEpochTelemetryCallback(TrainerCallback):
     """
     Logs per-epoch GRPO metrics (loss, KL) into the SQL database.
     """
 
-    def __init__(self, run_id: str, client: TelemetryClient):
+    def __init__(self, run_id: str, experiment_id: str, client: TelemetryClient):
         self.run_id = run_id
+        self.experiment_id = experiment_id
         self.client = client
         self.current_step: Optional[int] = None
         self.current_epoch = 0
@@ -149,6 +260,7 @@ class GRPOEpochTelemetryCallback(TrainerCallback):
         try:
             metric = EpochMetric(
                 id=str(uuid4()),
+                experiment_id=self.experiment_id,
                 run_id=self.run_id,
                 global_step=int(state.global_step),
                 epoch_number=int(self.current_epoch),
@@ -166,8 +278,9 @@ class SFTTelemetryCallback(TrainerCallback):
     Logs loss and eval_loss for SFT runs.
     """
 
-    def __init__(self, run_id: str, client: TelemetryClient):
+    def __init__(self, run_id: str, experiment_id: str, client: TelemetryClient):
         self.run_id = run_id
+        self.experiment_id = experiment_id
         self.client = client
 
     def on_log(
@@ -185,6 +298,7 @@ class SFTTelemetryCallback(TrainerCallback):
         try:
             metric = SFTMetric(
                 id=str(uuid4()),
+                experiment_id=self.experiment_id,
                 run_id=self.run_id,
                 global_step=int(state.global_step),
                 loss=float(loss_val) if loss_val is not None else 0.0,
@@ -203,9 +317,14 @@ class ManualStopTelemetryCallback(TrainerCallback):
     """
 
     def __init__(
-        self, run_id: str, client: TelemetryClient, check_every_n_steps: int = 1
+        self,
+        run_id: str,
+        experiment_id: str,
+        client: TelemetryClient,
+        check_every_n_steps: int = 1,
     ):
         self.run_id = run_id
+        self.experiment_id = experiment_id
         self.client = client
         self.check_every_n_steps = max(1, int(check_every_n_steps))
 
@@ -218,11 +337,10 @@ class ManualStopTelemetryCallback(TrainerCallback):
 
         session = self.client.Session()
         try:
-            control_row = (
-                session.query(RunControl)
-                .filter(RunControl.run_id == self.run_id)
-                .one_or_none()
-            )
+            query = session.query(RunControl).filter(RunControl.run_id == self.run_id)
+            if self.experiment_id:
+                query = query.filter(RunControl.experiment_id == self.experiment_id)
+            control_row = query.order_by(RunControl.updated_at.desc()).first()
             if control_row and control_row.stop_requested:
                 print(
                     f"[ManualStopTelemetryCallback] Stop requested for run_id="
@@ -244,8 +362,9 @@ class WandBUrlTelemetryCallback(TrainerCallback):
     for the link before the run finishes.
     """
 
-    def __init__(self, run_id: str, client: TelemetryClient):
+    def __init__(self, run_id: str, experiment_id: str, client: TelemetryClient):
         self.run_id = run_id
+        self.experiment_id = experiment_id
         self.client = client
         self._written = False
 
@@ -267,7 +386,9 @@ class WandBUrlTelemetryCallback(TrainerCallback):
             existing = (
                 session.query(RunMetadata)
                 .filter(RunMetadata.run_id == self.run_id)
-                .one_or_none()
+                .filter(RunMetadata.experiment_id == self.experiment_id)
+                .order_by(RunMetadata.updated_at.desc())
+                .first()
             )
             now = datetime.now(timezone.utc)
             if existing:
@@ -277,6 +398,7 @@ class WandBUrlTelemetryCallback(TrainerCallback):
                 session.add(
                     RunMetadata(
                         id=str(uuid4()),
+                        experiment_id=self.experiment_id,
                         run_id=self.run_id,
                         wandb_url=url,
                         updated_at=now,

@@ -15,6 +15,8 @@ def notify_failure(
     failure_log_dir: Optional[str] = None,
     failure_webhook_url: Optional[str] = None,
     db_url: Optional[str] = None,
+    experiment_id: Optional[str] = None,
+    phase: Optional[str] = None,
 ) -> None:
     """
     On step failure: optionally write a JSON log file, POST to webhook, and/or
@@ -26,6 +28,7 @@ def notify_failure(
     spot_interruption = getattr(result, "spot_interruption", None)
 
     payload = {
+        "experiment_id": experiment_id,
         "run_id": run_id,
         "step_name": step_label,
         "failure_reason": failure_reason,
@@ -58,13 +61,18 @@ def notify_failure(
 
     if db_url:
         try:
-            from tenyson.core.telemetry import RunFailure, TelemetryClient
+            from tenyson.core.telemetry import (
+                record_run_summary,
+                RunFailure,
+                TelemetryClient,
+            )
 
             client = TelemetryClient(db_url=db_url)
             session = client.Session()
             try:
                 row = RunFailure(
                     id=str(uuid4()),
+                    experiment_id=experiment_id,
                     run_id=run_id,
                     step_label=step_label,
                     failure_reason=failure_reason,
@@ -75,5 +83,12 @@ def notify_failure(
                 session.commit()
             finally:
                 session.close()
+            if experiment_id and phase:
+                record_run_summary(
+                    client=client,
+                    experiment_id=experiment_id,
+                    phase=phase,
+                    result=result,
+                )
         except Exception:  # noqa: S110
             pass

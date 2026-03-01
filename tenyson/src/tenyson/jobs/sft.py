@@ -70,6 +70,8 @@ class SFTJob:
         from trl import SFTConfig, SFTTrainer
         from tenyson.core.telemetry import (
             ManualStopTelemetryCallback,
+            record_run_summary,
+            resolve_telemetry_context,
             SFTTelemetryCallback,
             TelemetryClient,
             WandBUrlTelemetryCallback,
@@ -171,20 +173,34 @@ class SFTJob:
 
         # Optional telemetry wiring and manual stop callback.
         callbacks = []
-        telemetry_cfg = self.config.get("telemetry", {})
-        db_url = telemetry_cfg.get("db_url")
+        db_url, experiment_id = resolve_telemetry_context(self.config)
+        telemetry_client: Any = None
         if db_url:
-            client = TelemetryClient(db_url=db_url)
-            callbacks.append(SFTTelemetryCallback(run_id=run_name, client=client))
+            telemetry_client = TelemetryClient(db_url=db_url)
             callbacks.append(
-                ManualStopTelemetryCallback(run_id=run_name, client=client)
+                SFTTelemetryCallback(
+                    run_id=run_name,
+                    experiment_id=experiment_id,  # type: ignore[arg-type]
+                    client=telemetry_client,
+                )
+            )
+            callbacks.append(
+                ManualStopTelemetryCallback(
+                    run_id=run_name,
+                    experiment_id=experiment_id,  # type: ignore[arg-type]
+                    client=telemetry_client,
+                )
             )
             report_to = train_cfg.get("report_to", "none")
             if report_to == "wandb" or (
                 isinstance(report_to, list) and "wandb" in report_to
             ):
                 callbacks.append(
-                    WandBUrlTelemetryCallback(run_id=run_name, client=client)
+                    WandBUrlTelemetryCallback(
+                        run_id=run_name,
+                        experiment_id=experiment_id,  # type: ignore[arg-type]
+                        client=telemetry_client,
+                    )
                 )
 
         # Optional eval-loss early stopping.
@@ -281,4 +297,11 @@ class SFTJob:
             local_output_dir=output_dir,
         )
         result.save(os.path.join(output_dir, "results.json"))
+        if telemetry_client is not None and experiment_id is not None:
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase="sft",
+                result=result,
+            )
         return result

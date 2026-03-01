@@ -104,7 +104,13 @@ class EvalJob:
         return [row["prompt"] for row in dataset]
 
     def run(self) -> JobResult:
-        from tenyson.core.telemetry import Generation, RunControl, TelemetryClient
+        from tenyson.core.telemetry import (
+            Generation,
+            record_run_summary,
+            resolve_telemetry_context,
+            RunControl,
+            TelemetryClient,
+        )
 
         start = time.time()
         eval_cfg = self.config.get("evaluation", {})
@@ -126,8 +132,7 @@ class EvalJob:
         all_prompts: Sequence[str] = self._extract_prompts(dataset)
 
         # Optional telemetry / manual-stop wiring.
-        telemetry_cfg = self.config.get("telemetry", {})
-        db_url = telemetry_cfg.get("db_url")
+        db_url, experiment_id = resolve_telemetry_context(self.config)
         client = None
         if db_url:
             client = TelemetryClient(db_url=db_url)
@@ -146,6 +151,7 @@ class EvalJob:
                 control_row = (
                     session.query(RunControl)
                     .filter(RunControl.run_id == self.run_id)
+                    .filter(RunControl.experiment_id == experiment_id)
                     .one_or_none()
                 )
                 return bool(control_row and control_row.stop_requested)
@@ -189,6 +195,7 @@ class EvalJob:
                 ):
                     generation = Generation(
                         id=str(uuid4()),
+                        experiment_id=experiment_id,
                         run_id=self.run_id,
                         global_step=idx,
                         phase="eval",
@@ -235,4 +242,11 @@ class EvalJob:
         )
         # Also persist JobResult alongside detailed results.
         result.save(str(output_dir / "job_result.json"))
+        if client is not None and experiment_id is not None:
+            record_run_summary(
+                client=client,
+                experiment_id=experiment_id,
+                phase="eval",
+                result=result,
+            )
         return result

@@ -360,6 +360,23 @@ class AWSManager(BaseCloudManager):
                 spot_interruption=spot_interruption,
                 local_output_dir=os.path.join(repo_root, "outputs"),
             )
+            try:
+                from tenyson.core.telemetry import (
+                    record_run_summary,
+                    resolve_telemetry_context,
+                    TelemetryClient,
+                )
+
+                db_url, experiment_id = resolve_telemetry_context(job.config)
+                if db_url and experiment_id:
+                    record_run_summary(
+                        client=TelemetryClient(db_url=db_url),
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        result=result,
+                    )
+            except Exception:  # noqa: S110
+                pass
             _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
             return result
 

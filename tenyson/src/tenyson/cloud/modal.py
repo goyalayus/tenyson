@@ -179,6 +179,23 @@ class ModalManager(BaseCloudManager):
                 spot_interruption=None,
                 local_output_dir=None,
             )
+            try:
+                from tenyson.core.telemetry import (
+                    record_run_summary,
+                    resolve_telemetry_context,
+                    TelemetryClient,
+                )
+
+                db_url, experiment_id = resolve_telemetry_context(job.config)
+                if db_url and experiment_id:
+                    record_run_summary(
+                        client=TelemetryClient(db_url=db_url),
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        result=result,
+                    )
+            except Exception:  # noqa: S110
+                pass
             _red_print(f"[TENYSON] Step failed (Modal): {exc}")
             return result
 

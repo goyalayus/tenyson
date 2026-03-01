@@ -20,15 +20,15 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     client = TelemetryClient(db_url=db_url)
     session = client.Session()
     try:
-        control_row = (
-            session.query(RunControl)
-            .filter(RunControl.run_id == args.run_id)
-            .one_or_none()
-        )
+        query = session.query(RunControl).filter(RunControl.run_id == args.run_id)
+        if args.experiment_id:
+            query = query.filter(RunControl.experiment_id == args.experiment_id)
+        control_row = query.order_by(RunControl.updated_at.desc()).first()
         now = datetime.now(timezone.utc)
         if control_row is None:
             control_row = RunControl(
                 id=str(uuid4()),
+                experiment_id=args.experiment_id,
                 run_id=args.run_id,
                 stop_requested=True,
                 updated_at=now,
@@ -43,7 +43,11 @@ def _cmd_stop(args: argparse.Namespace) -> None:
         session.close()
 
     print(
-        f"[tenyson.ctl] Marked run_id={args.run_id} as stop_requested in {db_url}",
+        (
+            f"[tenyson.ctl] Marked run_id={args.run_id}"
+            f"{f' experiment_id={args.experiment_id}' if args.experiment_id else ''}"
+            f" as stop_requested in {db_url}"
+        ),
         flush=True,
     )
 
@@ -66,6 +70,14 @@ def main() -> None:
         default=None,
         help="Telemetry database URL (overrides TENYSON_DB_URL).",
     )
+    stop_parser.add_argument(
+        "--experiment-id",
+        default=os.getenv("TENYSON_EXPERIMENT_ID"),
+        help=(
+            "Optional experiment identifier. When provided, stop is scoped to "
+            "(experiment_id, run_id)."
+        ),
+    )
     stop_parser.set_defaults(func=_cmd_stop)
 
     args = parser.parse_args()
@@ -77,4 +89,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

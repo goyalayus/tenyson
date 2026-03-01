@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from tenyson.cloud.base import _red_print
 from tenyson.core.notify import notify_failure
+from tenyson.core.telemetry import resolve_experiment_id
 from tenyson.jobs.result import JobResult
 from tenyson.reporting.builder import ReportBuilder
 
@@ -256,12 +257,15 @@ def run_pipeline(
                         f"[TENYSON] Step \"{label}\" failed: "
                         f"{getattr(result, 'failure_reason', 'unknown')}"
                     )
+                    experiment_id = resolve_experiment_id(config)
                     notify_failure(
                         step_label=label,
                         result=result,
                         failure_log_dir=failure_log_dir,
                         failure_webhook_url=failure_webhook_url,
                         db_url=db_url,
+                        experiment_id=experiment_id,
+                        phase=job_type,
                     )
 
                     action = _prompt_failure_action(config, job_type, on_failure)
@@ -290,12 +294,15 @@ def run_pipeline(
             _red_print(
                 f"[TENYSON] Step \"{label}\" failed: {getattr(result, 'failure_reason', 'unknown')}"
             )
+            experiment_id = resolve_experiment_id(config)
             notify_failure(
                 step_label=label,
                 result=result,
                 failure_log_dir=failure_log_dir,
                 failure_webhook_url=failure_webhook_url,
                 db_url=db_url,
+                experiment_id=experiment_id,
+                phase=job_type,
             )
 
             action = _prompt_failure_action(config, job_type, on_failure)
