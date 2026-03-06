@@ -37,8 +37,10 @@ training:
   run_name: "wordle_rl_vllm_config_test"
   output_dir: "./outputs/rl_grpo"
   report_to: ["wandb"]
-  # Unique repo per run when set. Leave empty to skip push.
+  # Stable repo per run lineage: <hf_repo_base>-<run_name>. Leave empty to skip push.
   hf_repo_base: "username/wordle-lora"
+  # Push adapter/tokenizer to Hub every N optimizer steps.
+  hf_push_every_steps: 50
 
 task:
   synthetic_samples: 4096

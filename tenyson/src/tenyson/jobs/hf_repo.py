@@ -1,7 +1,6 @@
-"""Helpers for deriving unique Hugging Face repo ids from a base and run name."""
+"""Helpers for deriving stable Hugging Face repo ids from a base and run name."""
 
 import re
-from uuid import uuid4
 
 
 def sanitize_run_name(run_name: str) -> str:
@@ -13,10 +12,14 @@ def sanitize_run_name(run_name: str) -> str:
 
 
 def unique_repo_id(base: str, run_name: str) -> str:
-    """Derive a unique repo id for pushing: base + sanitized run_name + short uid."""
+    """
+    Derive a stable repo id for pushing: base + sanitized run_name.
+
+    This keeps a single canonical repository per run_name lineage so repeated pushes
+    (including periodic checkpoint pushes) update the same target.
+    """
     base = (base or "").strip().rstrip("/")
     if not base:
         return ""
     safe_name = sanitize_run_name(run_name)
-    short_uid = uuid4().hex[:8]
-    return f"{base}-{safe_name}-{short_uid}"
+    return f"{base}-{safe_name}"

@@ -34,8 +34,10 @@ training:
   run_name: "lora_sft_qwen3-4b"
   output_dir: "./outputs/lora_sft_qwen3-4b"
   report_to: ["wandb"]
-  # Unique repo per run: base + run_name + short uid. Replace with your HF username.
+  # Stable repo per run lineage: <hf_repo_base>-<run_name>. Replace with your HF username.
   hf_repo_base: "username/wordle-lora"
+  # Push adapter/tokenizer to Hub every N optimizer steps.
+  hf_push_every_steps: 20
   val_size: 100
   # Early stopping based on eval_loss: stop if constant or increasing for N evals.
   early_stopping_patience: 2        # N: number of consecutive evals with no improvement.
@@ -47,4 +49,3 @@ task:
 # Optional: enable SQL telemetry for metrics and manual stop control.
 telemetry:
   db_url: "sqlite:///./tenyson_telemetry.db"
-

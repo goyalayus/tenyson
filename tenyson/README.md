@@ -40,7 +40,8 @@ print(result.metrics, result.wandb_url)
 
 - **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
 - **GPU runner package setup**: cloud managers currently install runtime dependencies with `pip install unsloth vllm`.
-- **Resume from checkpoint**: Set `training.resume_from_checkpoint` in your config (or pass `--resume-from-checkpoint` to `tenyson.runner`) to a checkpoint directory (or `repo:revision` for HF). SFT and RL load full checkpoints (model, optimizer, scheduler) and continue training.
+- **HF push cadence (SFT/RL)**: set `training.hf_repo_base` to enable periodic pushes to a stable repo id `<hf_repo_base>-<run_name>`. Set `training.hf_push_every_steps` (defaults to `training.save_steps`) to control cadence.
+- **Checkpoint mode**: when `training.hf_repo_base` is enabled, SFT/RL do push-only syncing to Hub and do not keep local trainer checkpoints. Set `training.resume_from_checkpoint` only when you provide an explicit checkpoint path/revision to resume from.
 - **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest checkpoint), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
 
 ## wordle research workflow (current example)
@@ -185,7 +186,7 @@ Semantics:
 
 - `metric_for_best_model = "eval_loss"` and `greater_is_better = false`;
 - improvement means the best `eval_loss` decreases by more than `early_stopping_min_delta`;
-- if `eval_loss` is constant or increasing for `early_stopping_patience` evaluations, training stops and the best checkpoint is kept.
+- if `eval_loss` is constant or increasing for `early_stopping_patience` evaluations, training stops. In local-checkpoint mode, the best checkpoint is reloaded; in Hub push-only mode, the latest trained weights are kept and pushed.
 
 ## runner cli
 

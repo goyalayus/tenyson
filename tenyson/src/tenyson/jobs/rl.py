@@ -124,6 +124,7 @@ class RLJob:
     def run(self) -> JobResult:
         require_gpu_provider_runtime()
         from trl import GRPOConfig, GRPOTrainer
+        from tenyson.core.hub_push import PeriodicHubPushCallback, ensure_hf_repo
         from tenyson.core.telemetry import (
             GRPOEpochTelemetryCallback,
             Generation,
@@ -140,6 +141,13 @@ class RLJob:
         vllm_cfg = self.config.get("vllm", {})
 
         run_name = train_cfg.get("run_name", self.run_id)
+        hf_repo_base = train_cfg.get("hf_repo_base") or train_cfg.get("hf_repo_id") or ""
+        push_repo_id = unique_repo_id(hf_repo_base, run_name) if hf_repo_base else ""
+        hf_push_every_steps = int(
+            train_cfg.get("hf_push_every_steps", train_cfg.get("save_steps", 100))
+        )
+        if push_repo_id and hf_push_every_steps <= 0:
+            raise ValueError("training.hf_push_every_steps must be >= 1 when HF push is enabled.")
         output_dir = Path(train_cfg.get("output_dir", f"./outputs/{run_name}"))
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,7 +191,7 @@ class RLJob:
             bf16=False,
             fp16=False,
             save_steps=train_cfg.get("save_steps", 100),
-            save_strategy="steps",
+            save_strategy="no" if push_repo_id else "steps",
             save_total_limit=train_cfg.get("save_total_limit", 2),
         )
 
@@ -193,6 +201,16 @@ class RLJob:
         grpo_args = GRPOConfig(**{k: v for k, v in cfg_kwargs.items() if k in accepted})
 
         callbacks = self.task.get_rl_callbacks(self.config, tokenizer, str(output_dir))
+        if push_repo_id:
+            ensure_hf_repo(push_repo_id)
+            callbacks = list(callbacks) + [
+                PeriodicHubPushCallback(
+                    repo_id=push_repo_id,
+                    run_name=run_name,
+                    push_every_steps=hf_push_every_steps,
+                    tokenizer=tokenizer,
+                )
+            ]
 
         # Optional telemetry wiring.
         telemetry_cfg = self.config.get("telemetry", {})
@@ -313,12 +331,6 @@ class RLJob:
             train_result = trainer.train(resume_from_checkpoint=resume_path)
         else:
             train_result = trainer.train()
-
-        hf_repo_base = train_cfg.get("hf_repo_base") or train_cfg.get("hf_repo_id") or ""
-        push_repo_id = unique_repo_id(hf_repo_base, run_name) if hf_repo_base else ""
-        if push_repo_id:
-            print(f"[RLJob] Pushing final model to Hub: {push_repo_id}", flush=True)
-            trainer.model.push_to_hub(push_repo_id)
 
         total_time = time.time() - start
 
