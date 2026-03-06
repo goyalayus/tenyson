@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Sequence
 from uuid import uuid4
 
 from tenyson.core.plugin import TaskPlugin
+from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.jobs.result import JobResult
 
 
@@ -104,6 +105,7 @@ class EvalJob:
         return [row["prompt"] for row in dataset]
 
     def run(self) -> JobResult:
+        require_gpu_provider_runtime()
         from tenyson.core.telemetry import (
             Generation,
             record_run_summary,

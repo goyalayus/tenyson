@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict
 
 from tenyson.core.plugin import TaskPlugin
+from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
@@ -66,6 +67,7 @@ class SFTJob:
         return model, tokenizer, seq_len
 
     def run(self) -> JobResult:
+        require_gpu_provider_runtime()
         from transformers import EarlyStoppingCallback
         from trl import SFTConfig, SFTTrainer
         from tenyson.core.telemetry import (

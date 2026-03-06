@@ -104,6 +104,8 @@ class ModalManager(BaseCloudManager):
 
             os.chdir("/workspace")
             os.environ["PYTHONPATH"] = f"src:{os.environ.get('PYTHONPATH', '')}"
+            os.environ["TENYSON_EXECUTION_MODE"] = "cloud"
+            os.environ["TENYSON_GPU_PROVIDER"] = "modal"
             cmd = [
                 sys.executable,
                 "-m",

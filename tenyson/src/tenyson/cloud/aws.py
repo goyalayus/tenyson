@@ -280,7 +280,10 @@ class AWSManager(BaseCloudManager):
                 )
 
         # HF / W&B env vars.
-        env_exports = []
+        env_exports = [
+            "export TENYSON_EXECUTION_MODE=cloud",
+            "export TENYSON_GPU_PROVIDER=aws",
+        ]
         for var in ["HF_TOKEN", "WANDB_API_KEY"]:
             val = os.environ.get(var)
             if val:

@@ -13,6 +13,8 @@ It provides:
 
 Run jobs in the cloud via a manager (AWS or Modal). The manager launches the job remotely using `python -m tenyson.runner`, syncs outputs back, and returns a `JobResult` instance.
 
+Local execution is intentionally disabled: jobs must run through supported GPU providers (AWS or Modal).
+
 ```python
 from pathlib import Path
 import yaml
@@ -210,4 +212,4 @@ python -m tenyson.runner \
 - **`--task-module`**: Either a path to a Python file containing a single `TaskPlugin` subclass (e.g. `examples/wordle/wordle_task.py`), or a `module.path:ClassName` spec for remote/advanced use (e.g. `examples.wordle.wordle_task:WordleTask`).
 - **`--resume-from-checkpoint`**: (SFT/RL only) Path to a checkpoint directory or `repo_id:revision` to resume training.
 
-`AWSManager` and `ModalManager` invoke this entrypoint on the remote worker. You can also run it directly on a machine that will execute the job (e.g. a dedicated runner node).
+`AWSManager` and `ModalManager` invoke this entrypoint on the remote worker. Running this entrypoint locally is blocked unless the cloud runtime context variables are set by a supported provider manager.

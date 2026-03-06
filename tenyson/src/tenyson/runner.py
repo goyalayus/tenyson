@@ -4,6 +4,7 @@ import os
 from tenyson.jobs.eval import EvalJob
 from tenyson.jobs.rl import RLJob
 from tenyson.jobs.sft import SFTJob
+from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.loader import load_config, load_task, load_task_from_spec
 
 
@@ -15,6 +16,7 @@ def _resolve_task(spec: str):
 
 
 def main() -> None:
+    require_gpu_provider_runtime()
     parser = argparse.ArgumentParser(description="Tenyson remote job runner")
     parser.add_argument("--job-type", required=True, choices=["sft", "rl", "eval"])
     parser.add_argument("--config", required=True, help="Path to YAML/JSON config")
@@ -49,4 +51,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

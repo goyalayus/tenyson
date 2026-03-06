@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from uuid import uuid4
 
 from tenyson.core.plugin import TaskPlugin
+from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
@@ -121,6 +122,7 @@ class RLJob:
         return model, tokenizer
 
     def run(self) -> JobResult:
+        require_gpu_provider_runtime()
         from trl import GRPOConfig, GRPOTrainer
         from tenyson.core.telemetry import (
             GRPOEpochTelemetryCallback,
