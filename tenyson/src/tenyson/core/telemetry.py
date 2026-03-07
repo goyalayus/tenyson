@@ -34,7 +34,7 @@ def _validate_shared_db_url(db_url: str) -> None:
     if driver.startswith("sqlite"):
         raise ValueError(
             "SQLite telemetry URLs are not supported. Use a hosted SQL database URL "
-            "(for example: postgresql+psycopg2://user:pass@host:5432/dbname)."
+            "(for example: postgresql+psycopg://user:pass@host:5432/dbname)."
         )
     if host in {"", "localhost", "127.0.0.1"}:
         raise ValueError(

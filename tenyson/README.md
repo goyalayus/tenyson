@@ -39,7 +39,7 @@ print(result.metrics, result.wandb_url)
 ```
 
 - **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
-- **GPU runner package setup**: cloud managers currently install runtime dependencies with `pip install unsloth vllm`.
+- **GPU runner package setup**: cloud managers install runtime dependencies with `pip install unsloth vllm huggingface_hub safetensors pyyaml sqlalchemy 'psycopg[binary]' wandb` (we intentionally do not install `trl`/`transformers`/`datasets` directly because Unsloth pulls them transitively).
 - **HF push cadence (SFT/RL)**: set `training.hf_repo_base` (required) to enable periodic pushes to a stable repo id `<hf_repo_base>-<run_name>`. Set `training.hf_push_every_steps` (defaults to `training.save_steps`) to control cadence.
 - **Checkpoint mode**: SFT/RL are Hub-only. Local trainer checkpoints are disabled. Resume is supported only via `training.resume_from_checkpoint: "repo_id:revision"`.
 - **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest Hub revision), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
@@ -115,7 +115,7 @@ Example snippet in a YAML config:
 
 ```yaml
 telemetry:
-  db_url: "postgresql+psycopg2://user:password@db.example.com:5432/tenyson"
+  db_url: "postgresql+psycopg://user:password@db.example.com:5432/tenyson"
   experiment_id: "wordle_research_2026_03_01"
 ```
 
@@ -124,7 +124,7 @@ With telemetry enabled, you can mark a run for manual stop from another process:
 ```bash
 python -m tenyson.core.control \
   --run-id lora_sft_qwen3-4b \
-  --db-url postgresql+psycopg2://user:password@db.example.com:5432/tenyson
+  --db-url postgresql+psycopg://user:password@db.example.com:5432/tenyson
 ```
 
 The next step or batch will see the `stop_requested` flag in the database and exit the loop cleanly; summaries/results remain queryable in telemetry DB.

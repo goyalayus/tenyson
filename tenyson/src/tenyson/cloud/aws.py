@@ -11,6 +11,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from tenyson.cloud.base import BaseCloudManager, JobFailedError, _red_print
+from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.run_config import materialize_run_config
 from tenyson.jobs.result import JobResult
 
@@ -221,7 +222,7 @@ class AWSManager(BaseCloudManager):
         print("[AWSManager] SSH is up. Preparing environment...")
         setup_cmds = [
             "source activate pytorch",
-            "pip install unsloth vllm",
+            runtime_pip_install_command(),
             "mkdir -p ~/workspace",
         ]
         setup_cmd = " && ".join(setup_cmds)

@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
+from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.run_config import materialize_run_config
 from tenyson.jobs.result import JobResult
 
@@ -75,7 +76,7 @@ class ModalManager(BaseCloudManager):
 
         image = (
             modal.Image.debian_slim(python_version="3.11")
-            .run_commands("pip install unsloth vllm")
+            .run_commands(runtime_pip_install_command())
             .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
         )
 

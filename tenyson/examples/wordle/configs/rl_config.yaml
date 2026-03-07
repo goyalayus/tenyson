@@ -57,5 +57,5 @@ task:
     overlength_penalty: -0.5
 
 telemetry:
-  db_url: "postgresql+psycopg2://user:password@db.example.com:5432/tenyson"
+  db_url: "postgresql+psycopg://user:password@db.example.com:5432/tenyson"
   experiment_id: "wordle_research_2026_03_07"
