@@ -24,3 +24,7 @@ task:
   wordlists:
     solutions: "tenyson/examples/wordle/wordlists/wordle_solutions.txt"
     allowed: "tenyson/examples/wordle/wordlists/wordle_allowed_guesses.txt"
+
+telemetry:
+  db_url: "postgresql+psycopg2://user:password@db.example.com:5432/tenyson"
+  experiment_id: "wordle_research_2026_03_07"

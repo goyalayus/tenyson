@@ -1,7 +1,5 @@
-import json
 import os
 import time
-from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
 
@@ -129,8 +127,9 @@ class RLJob:
             GRPOEpochTelemetryCallback,
             Generation,
             ManualStopTelemetryCallback,
+            record_run_result,
             record_run_summary,
-            resolve_telemetry_context,
+            resolve_required_telemetry_context,
             Rollout,
             TelemetryClient,
             WandBUrlTelemetryCallback,
@@ -139,21 +138,32 @@ class RLJob:
         start = time.time()
         train_cfg = self.config.get("training", {})
         vllm_cfg = self.config.get("vllm", {})
+        db_url, experiment_id = resolve_required_telemetry_context(self.config)
+        telemetry_client = TelemetryClient(db_url=db_url)
 
         run_name = train_cfg.get("run_name", self.run_id)
-        hf_repo_base = train_cfg.get("hf_repo_base") or train_cfg.get("hf_repo_id") or ""
-        push_repo_id = unique_repo_id(hf_repo_base, run_name) if hf_repo_base else ""
+        hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
+        if not hf_repo_base:
+            raise ValueError(
+                "training.hf_repo_base is required for RL runs. "
+                "Tenyson stores checkpoints/adapters on Hugging Face only."
+            )
+        if not os.getenv("HF_TOKEN", "").strip():
+            raise ValueError(
+                "HF_TOKEN environment variable is required for RL runs."
+            )
+
+        push_repo_id = unique_repo_id(hf_repo_base, run_name)
+        if not push_repo_id:
+            raise ValueError("Failed to derive a valid Hugging Face repo id.")
         hf_push_every_steps = int(
             train_cfg.get("hf_push_every_steps", train_cfg.get("save_steps", 100))
         )
-        if push_repo_id and hf_push_every_steps <= 0:
+        if hf_push_every_steps <= 0:
             raise ValueError("training.hf_push_every_steps must be >= 1 when HF push is enabled.")
-        output_dir = Path(train_cfg.get("output_dir", f"./outputs/{run_name}"))
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
 
-        # Dump config for reproducibility.
-        with open(output_dir / "config.json", "w", encoding="utf-8") as f:
-            json.dump(self.config, f, indent=2)
+        ensure_hf_repo(push_repo_id)
 
         model, tokenizer = self._build_model_and_tokenizer()
 
@@ -167,7 +177,7 @@ class RLJob:
         vllm_sampling_params = self._build_vllm_sampling_params(tokenizer)
 
         cfg_kwargs: Dict[str, Any] = dict(
-            output_dir=str(output_dir / "trainer_out"),
+            output_dir=str(os.path.join(output_dir, "trainer_out")),
             max_steps=train_cfg.get("max_steps", 1000),
             per_device_train_batch_size=train_cfg.get("per_device_batch_size", 1),
             gradient_accumulation_steps=train_cfg.get(
@@ -191,7 +201,7 @@ class RLJob:
             bf16=False,
             fp16=False,
             save_steps=train_cfg.get("save_steps", 100),
-            save_strategy="no" if push_repo_id else "steps",
+            save_strategy="no",
             save_total_limit=train_cfg.get("save_total_limit", 2),
         )
 
@@ -201,101 +211,94 @@ class RLJob:
         grpo_args = GRPOConfig(**{k: v for k, v in cfg_kwargs.items() if k in accepted})
 
         callbacks = self.task.get_rl_callbacks(self.config, tokenizer, str(output_dir))
-        if push_repo_id:
-            ensure_hf_repo(push_repo_id)
-            callbacks = list(callbacks) + [
-                PeriodicHubPushCallback(
-                    repo_id=push_repo_id,
-                    run_name=run_name,
-                    push_every_steps=hf_push_every_steps,
-                    tokenizer=tokenizer,
-                )
-            ]
-
-        # Optional telemetry wiring.
-        telemetry_cfg = self.config.get("telemetry", {})
-        db_url, experiment_id = resolve_telemetry_context(self.config)
-        telemetry_client = None
-        if db_url:
-            telemetry_client = TelemetryClient(db_url=db_url)
-            manual_stop_every = int(
-                telemetry_cfg.get("manual_stop_check_every_n_steps", 1)
+        callbacks = list(callbacks) + [
+            PeriodicHubPushCallback(
+                repo_id=push_repo_id,
+                run_name=run_name,
+                push_every_steps=hf_push_every_steps,
+                tokenizer=tokenizer,
             )
+        ]
+
+        telemetry_cfg = self.config.get("telemetry", {})
+        manual_stop_every = int(
+            telemetry_cfg.get("manual_stop_check_every_n_steps", 1)
+        )
+        callbacks = list(callbacks) + [
+            GRPOEpochTelemetryCallback(
+                run_id=run_name,
+                experiment_id=experiment_id,
+                client=telemetry_client,
+            ),
+            ManualStopTelemetryCallback(
+                run_id=run_name,
+                experiment_id=experiment_id,
+                client=telemetry_client,
+                check_every_n_steps=manual_stop_every,
+            ),
+        ]
+        report_to = train_cfg.get("report_to", ["none"])
+        if report_to == "wandb" or (
+            isinstance(report_to, list) and "wandb" in report_to
+        ):
             callbacks = list(callbacks) + [
-                GRPOEpochTelemetryCallback(
+                WandBUrlTelemetryCallback(
                     run_id=run_name,
-                    experiment_id=experiment_id,  # type: ignore[arg-type]
+                    experiment_id=experiment_id,
                     client=telemetry_client,
-                ),
-                ManualStopTelemetryCallback(
-                    run_id=run_name,
-                    experiment_id=experiment_id,  # type: ignore[arg-type]
-                    client=telemetry_client,
-                    check_every_n_steps=manual_stop_every,
                 ),
             ]
-            report_to = train_cfg.get("report_to", ["none"])
-            if report_to == "wandb" or (
-                isinstance(report_to, list) and "wandb" in report_to
-            ):
-                callbacks = list(callbacks) + [
-                    WandBUrlTelemetryCallback(
-                        run_id=run_name,
-                        experiment_id=experiment_id,  # type: ignore[arg-type]
-                        client=telemetry_client,
-                    ),
-                ]
 
-            # Wrap the first reward function to log per-prompt/per-completion rewards
-            # into the Generation / Rollout tables. We only wrap the first entry to
-            # avoid double-logging if users supply multiple reward functions.
-            if reward_funcs:
+        # Wrap the first reward function to log per-prompt/per-completion rewards
+        # into the Generation / Rollout tables. We only wrap the first entry to
+        # avoid double-logging if users supply multiple reward functions.
+        if reward_funcs:
 
-                def make_wrapped(
-                    base_func, client: TelemetryClient, run_id: str
-                ):  # type: ignore[override]
-                    def wrapped(
-                        prompts: List[Any], completions: List[Any], **kwargs
-                    ) -> List[float]:
-                        rewards = base_func(prompts, completions, **kwargs)
-                        try:
-                            session = client.Session()
-                            # Best-effort global_step; fall back to 0 if not provided.
-                            step = int(kwargs.get("global_step", 0))
-                            for prompt, completion, reward in zip(
-                                prompts, completions, rewards
-                            ):
-                                rollout = Rollout(
-                                    id=str(uuid4()),
-                                    experiment_id=experiment_id,
-                                    run_id=run_id,
-                                    global_step=step,
-                                    prompt_text=str(prompt),
-                                )
-                                session.add(rollout)
-                                generation = Generation(
-                                    id=str(uuid4()),
-                                    experiment_id=experiment_id,
-                                    run_id=run_id,
-                                    global_step=step,
-                                    phase="rl",
-                                    prompt_text=str(prompt),
-                                    completion_text=str(completion),
-                                    reward=float(reward),
-                                )
-                                session.add(generation)
-                            session.commit()
-                        finally:
-                            session.close()
-                        return rewards
+            def make_wrapped(
+                base_func, client: TelemetryClient, run_id: str
+            ):  # type: ignore[override]
+                def wrapped(
+                    prompts: List[Any], completions: List[Any], **kwargs
+                ) -> List[float]:
+                    rewards = base_func(prompts, completions, **kwargs)
+                    try:
+                        session = client.Session()
+                        # Best-effort global_step; fall back to 0 if not provided.
+                        step = int(kwargs.get("global_step", 0))
+                        for prompt, completion, reward in zip(
+                            prompts, completions, rewards
+                        ):
+                            rollout = Rollout(
+                                id=str(uuid4()),
+                                experiment_id=experiment_id,
+                                run_id=run_id,
+                                global_step=step,
+                                prompt_text=str(prompt),
+                            )
+                            session.add(rollout)
+                            generation = Generation(
+                                id=str(uuid4()),
+                                experiment_id=experiment_id,
+                                run_id=run_id,
+                                global_step=step,
+                                phase="rl",
+                                prompt_text=str(prompt),
+                                completion_text=str(completion),
+                                reward=float(reward),
+                            )
+                            session.add(generation)
+                        session.commit()
+                    finally:
+                        session.close()
+                    return rewards
 
-                    return wrapped
+                return wrapped
 
-                # Replace only the first reward function with the wrapped version.
-                reward_funcs = [
-                    make_wrapped(reward_funcs[0], telemetry_client, run_name),
-                    *reward_funcs[1:],
-                ]
+            # Replace only the first reward function with the wrapped version.
+            reward_funcs = [
+                make_wrapped(reward_funcs[0], telemetry_client, run_name),
+                *reward_funcs[1:],
+            ]
 
         trainer = GRPOTrainer(
             model=model,
@@ -311,19 +314,27 @@ class RLJob:
         )
         print(f"[RLJob] Trainable parameters: {trainable_count}", flush=True)
 
-        resume_path = train_cfg.get("resume_from_checkpoint")
-        if resume_path:
-            if not Path(resume_path).is_dir():
-                try:
-                    from huggingface_hub import snapshot_download
-                    parts = str(resume_path).split(":", 1)
-                    repo_id = parts[0]
-                    revision = parts[1] if len(parts) > 1 else "main"
-                    resume_path = snapshot_download(repo_id=repo_id, revision=revision)
-                except Exception as e:  # noqa: BLE001
-                    raise ValueError(
-                        f"resume_from_checkpoint must be a local directory or repo:revision; got {resume_path}: {e}"
-                    ) from e
+        resume_path = None
+        resume_ref = train_cfg.get("resume_from_checkpoint")
+        if resume_ref:
+            resume_ref = str(resume_ref).strip()
+            if ":" not in resume_ref:
+                raise ValueError(
+                    "training.resume_from_checkpoint must be of form 'repo_id:revision'. "
+                    f"Local checkpoint paths are not supported: {resume_ref}"
+                )
+            try:
+                from huggingface_hub import snapshot_download
+
+                repo_id, revision = resume_ref.split(":", 1)
+                if not repo_id or not revision:
+                    raise ValueError("Both repo_id and revision are required.")
+                resume_path = snapshot_download(repo_id=repo_id, revision=revision)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(
+                    "training.resume_from_checkpoint must be a valid Hugging Face "
+                    f"reference 'repo_id:revision'; got {resume_ref}: {e}"
+                ) from e
             print(f"[RLJob] Resuming from checkpoint: {resume_path}", flush=True)
 
         print("[RLJob] Starting GRPO training...", flush=True)
@@ -364,14 +375,19 @@ class RLJob:
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
             hf_revision="main" if push_repo_id else None,
-            local_output_dir=str(output_dir),
         )
-        result.save(str(output_dir / "results.json"))
-        if telemetry_client is not None and experiment_id is not None:
-            record_run_summary(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                phase="rl",
-                result=result,
-            )
+        record_run_summary(
+            client=telemetry_client,
+            experiment_id=experiment_id,
+            phase="rl",
+            result=result,
+        )
+        record_run_result(
+            client=telemetry_client,
+            experiment_id=experiment_id,
+            run_id=run_name,
+            phase="rl",
+            results_payload=result,
+            job_result_payload=result,
+        )
         return result

@@ -1,6 +1,5 @@
 import importlib
 import inspect
-import json
 import os
 import subprocess
 import sys
@@ -111,22 +110,6 @@ class AWSManager(BaseCloudManager):
             f"ssh -i {key_path} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
             f"{local_dir}/",
             f"{user}@{host}:{remote_dir}/",
-        ]
-        result = subprocess.run(rsync_cmd)
-        return result.returncode == 0
-
-    def _rsync_from_host(
-        self, host: str, key_path: str, user: str, remote_dir: str, local_dir: str
-    ):
-        rsync_cmd = [
-            "rsync",
-            "-avz",
-            "--exclude",
-            "__pycache__",
-            "-e",
-            f"ssh -i {key_path} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
-            f"{user}@{host}:{remote_dir}/",
-            f"{local_dir}/",
         ]
         result = subprocess.run(rsync_cmd)
         return result.returncode == 0
@@ -257,6 +240,13 @@ class AWSManager(BaseCloudManager):
         from tenyson.jobs.sft import SFTJob as _S
         from tenyson.jobs.rl import RLJob as _R
         from tenyson.jobs.eval import EvalJob as _E
+        from tenyson.core.telemetry import (
+            TelemetryClient,
+            record_run_result,
+            record_run_summary,
+            resolve_required_telemetry_context,
+            wait_for_run_result,
+        )
 
         if isinstance(job, _R):
             job_type = "rl"
@@ -266,6 +256,38 @@ class AWSManager(BaseCloudManager):
         train_cfg = job.config.get("training", {})
         eval_cfg = job.config.get("evaluation", {})
         run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
+        db_url, experiment_id = resolve_required_telemetry_context(job.config)
+        telemetry_client = TelemetryClient(db_url=db_url)
+
+        def _finalize_failure(
+            failure_reason: str,
+            *,
+            spot_interruption: bool = False,
+        ) -> JobResult:
+            result = JobResult(
+                run_id=run_name,
+                status="failed",
+                total_time_seconds=0.0,
+                failure_reason=failure_reason,
+                instance_id=instance.id,
+                spot_interruption=spot_interruption,
+            )
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase=job_type,
+                result=result,
+            )
+            record_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
+                results_payload=result,
+                job_result_payload=result,
+            )
+            return result
+
         config_path = materialize_run_config(
             config=job.config,
             project_root=Path(local_project_root),
@@ -274,19 +296,18 @@ class AWSManager(BaseCloudManager):
         )
         config_rel_path = os.path.relpath(str(config_path), str(local_project_root))
 
-        self._rsync_to_host(public_ip, self.key_path, user, repo_root, "~/workspace")
-
-        # If resuming, sync the checkpoint (or outputs) to the instance so the path is valid.
-        resume_path = job.config.get("training", {}).get("resume_from_checkpoint")
-        if resume_path and os.path.isdir(resume_path):
-            # Sync entire outputs tree so checkpoint path exists on remote.
-            outputs_src = os.path.join(repo_root, "outputs")
-            if local_project_rel != ".":
-                outputs_src = os.path.join(str(local_project_root), "outputs")
-            if os.path.isdir(outputs_src):
-                self._rsync_to_host(
-                    public_ip, self.key_path, user, outputs_src, f"{remote_project_root}/outputs"
-                )
+        sync_ok = self._rsync_to_host(public_ip, self.key_path, user, repo_root, "~/workspace")
+        if not sync_ok:
+            if self.auto_terminate:
+                print(f"[AWSManager] Terminating instance {instance.id}...")
+                instance.terminate()
+            failure_reason = (
+                "Failed to sync code/config to instance via rsync. "
+                "Remote run was not started."
+            )
+            result = _finalize_failure(failure_reason=failure_reason)
+            _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
+            return result
 
         # HF / W&B env vars.
         env_exports = [
@@ -318,19 +339,6 @@ class AWSManager(BaseCloudManager):
             public_ip, self.key_path, user, f"bash -c '{remote_cmd}'"
         )
         if not success:
-            # Best-effort rsync to recover checkpoints and logs.
-            print("[AWSManager] Remote job failed. Syncing outputs back (best-effort)...")
-            outputs_local_root = os.path.join(repo_root, "outputs")
-            if local_project_rel != ".":
-                outputs_local_root = os.path.join(str(local_project_root), "outputs")
-            os.makedirs(outputs_local_root, exist_ok=True)
-            self._rsync_from_host(
-                public_ip,
-                self.key_path,
-                user,
-                f"{remote_project_root}/outputs",
-                outputs_local_root,
-            )
             # Get instance state reason (e.g. Spot interruption).
             failure_reason = "Remote job failed."
             spot_interruption = False
@@ -350,87 +358,30 @@ class AWSManager(BaseCloudManager):
             if self.auto_terminate:
                 print(f"[AWSManager] Terminating instance {instance.id}...")
                 instance.terminate()
-            train_cfg = job.config.get("training", {})
-            eval_cfg = job.config.get("evaluation", {})
-            run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
-            result = JobResult(
-                run_id=run_name,
-                status="failed",
-                total_time_seconds=0.0,
+            result = _finalize_failure(
                 failure_reason=failure_reason,
-                instance_id=instance.id,
                 spot_interruption=spot_interruption,
-                local_output_dir=os.path.join(repo_root, "outputs"),
             )
-            try:
-                from tenyson.core.telemetry import (
-                    record_run_summary,
-                    resolve_telemetry_context,
-                    TelemetryClient,
-                )
-
-                db_url, experiment_id = resolve_telemetry_context(job.config)
-                if db_url and experiment_id:
-                    record_run_summary(
-                        client=TelemetryClient(db_url=db_url),
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                        result=result,
-                    )
-            except Exception:  # noqa: S110
-                pass
             _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
             return result
-
-        # Sync remote outputs back to the local repo.
-        print("[AWSManager] Syncing remote outputs back to local machine...")
-        outputs_local_root = os.path.join(repo_root, "outputs")
-        if local_project_rel != ".":
-            outputs_local_root = os.path.join(str(local_project_root), "outputs")
-        os.makedirs(outputs_local_root, exist_ok=True)
-        self._rsync_from_host(
-            public_ip,
-            self.key_path,
-            user,
-            f"{remote_project_root}/outputs",
-            outputs_local_root,
-        )
 
         if self.auto_terminate:
             print(f"[AWSManager] Terminating instance {instance.id}...")
             instance.terminate()
 
-        # Try to load the JobResult that was written remotely.
         try:
-            from tenyson.jobs.sft import SFTJob as _S
-            from tenyson.jobs.rl import RLJob as _R
-            from tenyson.jobs.eval import EvalJob as _E
-
-            if isinstance(job, _E):
-                # EvalJob writes a dedicated job_result.json.
-                eval_cfg = job.config.get("evaluation", {})
-                run_name = eval_cfg.get("run_name", job.run_id)
-                output_dir = eval_cfg.get(
-                    "output_dir", f"./outputs/{run_name}"
-                )
-                result_filename = "job_result.json"
-            else:
-                train_cfg = job.config.get("training", {})
-                run_name = train_cfg.get("run_name", job.run_id)
-                output_dir = train_cfg.get(
-                    "output_dir", f"./outputs/{run_name}"
-                )
-                result_filename = "results.json"
-
-            rel_output_dir = output_dir.lstrip("./")
-            local_result_path = os.path.join(
-                str(local_project_root), rel_output_dir, result_filename
+            _results_payload, job_result_payload = wait_for_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
             )
-            print(f"[AWSManager] Loading JobResult from {local_result_path}")
-            with open(local_result_path, "r", encoding="utf-8") as f:
-                data: Dict[str, Any] = json.load(f)
-            return JobResult.from_dict(data)
+            return JobResult.from_dict(job_result_payload)
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                f"AWSManager: failed to load remote JobResult after sync: {exc}"
-            ) from exc
+            failure_reason = (
+                "Remote run completed but canonical run result was not available in "
+                f"telemetry DB: {exc}"
+            )
+            result = _finalize_failure(failure_reason=failure_reason)
+            _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
+            return result

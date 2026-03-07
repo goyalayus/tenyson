@@ -28,7 +28,7 @@ def main() -> None:
     parser.add_argument(
         "--resume-from-checkpoint",
         default=None,
-        help="Path to checkpoint directory (or repo:revision) to resume training (SFT/RL only)",
+        help="Hugging Face reference repo_id:revision to resume training (SFT/RL only)",
     )
 
     args = parser.parse_args()

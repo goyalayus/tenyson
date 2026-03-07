@@ -127,9 +127,14 @@ class ModalManager(BaseCloudManager):
                     f"Tenyson job failed inside Modal with code {result.returncode}"
                 )
 
-        # Prepare job metadata.
         from pathlib import Path
-        import json
+        from tenyson.core.telemetry import (
+            TelemetryClient,
+            record_run_result,
+            record_run_summary,
+            resolve_required_telemetry_context,
+            wait_for_run_result,
+        )
 
         job_type = "sft"
         from tenyson.jobs.sft import SFTJob as _S
@@ -147,6 +152,8 @@ class ModalManager(BaseCloudManager):
         train_cfg = job.config.get("training", {})
         eval_cfg = job.config.get("evaluation", {})
         run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
+        db_url, experiment_id = resolve_required_telemetry_context(job.config)
+        telemetry_client = TelemetryClient(db_url=db_url)
         config_path = materialize_run_config(
             config=job.config,
             project_root=Path(local_project_root),
@@ -183,59 +190,58 @@ class ModalManager(BaseCloudManager):
                 failure_reason=str(exc),
                 instance_id=None,
                 spot_interruption=None,
-                local_output_dir=None,
             )
-            try:
-                from tenyson.core.telemetry import (
-                    record_run_summary,
-                    resolve_telemetry_context,
-                    TelemetryClient,
-                )
-
-                db_url, experiment_id = resolve_telemetry_context(job.config)
-                if db_url and experiment_id:
-                    record_run_summary(
-                        client=TelemetryClient(db_url=db_url),
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                        result=result,
-                    )
-            except Exception:  # noqa: S110
-                pass
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase=job_type,
+                result=result,
+            )
+            record_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
+                results_payload=result,
+                job_result_payload=result,
+            )
             _red_print(f"[TENYSON] Step failed (Modal): {exc}")
             return result
 
-        # The repo is mounted read-write into the Modal container, so outputs
-        # produced under /workspace/outputs are visible locally under ./outputs.
-        # Try to load the JobResult written by the remote job.
         try:
-            from tenyson.jobs.sft import SFTJob as _S
-            from tenyson.jobs.rl import RLJob as _R
-            from tenyson.jobs.eval import EvalJob as _E
-
-            if isinstance(job, _E):
-                eval_cfg = job.config.get("evaluation", {})
-                run_name = eval_cfg.get("run_name", job.run_id)
-                output_dir = eval_cfg.get(
-                    "output_dir", f"./outputs/{run_name}"
-                )
-                result_filename = "job_result.json"
-            else:
-                train_cfg = job.config.get("training", {})
-                run_name = train_cfg.get("run_name", job.run_id)
-                output_dir = train_cfg.get(
-                    "output_dir", f"./outputs/{run_name}"
-                )
-                result_filename = "results.json"
-
-            rel_output_dir = str(output_dir).lstrip("./")
-            repo_root = Path(local_project_root)
-            local_result_path = repo_root / rel_output_dir / result_filename
-            print(f"[ModalManager] Loading JobResult from {local_result_path}")
-            with open(local_result_path, "r", encoding="utf-8") as f:
-                data: Dict[str, Any] = json.load(f)
-            return JobResult.from_dict(data)
+            _results_payload, job_result_payload = wait_for_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
+            )
+            return JobResult.from_dict(job_result_payload)
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                f"ModalManager: failed to load remote JobResult after run: {exc}"
-            ) from exc
+            failure_reason = (
+                "Modal job completed but canonical run result was not available in "
+                f"telemetry DB: {exc}"
+            )
+            result = JobResult(
+                run_id=run_name,
+                status="failed",
+                total_time_seconds=0.0,
+                failure_reason=failure_reason,
+                instance_id=None,
+                spot_interruption=None,
+            )
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase=job_type,
+                result=result,
+            )
+            record_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
+                results_payload=result,
+                job_result_payload=result,
+            )
+            _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
+            return result

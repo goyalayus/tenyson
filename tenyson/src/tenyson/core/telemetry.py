@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import time
 from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, create_engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
@@ -159,10 +160,28 @@ class RunSummary(Base):
     hf_repo_id = Column(String, nullable=True)
     hf_revision = Column(String, nullable=True)
     wandb_url = Column(String, nullable=True)
-    local_output_dir = Column(String, nullable=True)
     failure_reason = Column(String, nullable=True)
     instance_id = Column(String, nullable=True)
     spot_interruption = Column(Boolean, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RunResult(Base):
+    """
+    Canonical per-job payloads keyed by (experiment_id, run_id, phase).
+
+    - results_json: detailed payload (e.g. eval compute_metrics output)
+    - job_result_json: serialized JobResult-compatible dictionary
+    """
+
+    __tablename__ = "run_results"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
+    run_id = Column(String, index=True)
+    phase = Column(String, index=True)
+    results_json = Column(Text, nullable=False)
+    job_result_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -207,6 +226,24 @@ def resolve_telemetry_context(config: Dict[str, Any]) -> Tuple[Optional[str], Op
     return db_url, experiment_id
 
 
+def resolve_required_telemetry_context(config: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Return required telemetry context. Raises when db_url or experiment_id is missing.
+    """
+    db_url, experiment_id = resolve_telemetry_context(config)
+    if not db_url:
+        raise ValueError(
+            "Missing telemetry.db_url. Tenyson requires a hosted SQL telemetry DB "
+            "for all runs."
+        )
+    if not experiment_id:
+        raise ValueError(
+            "Missing telemetry.experiment_id. Set telemetry.experiment_id or "
+            "TENYSON_EXPERIMENT_ID."
+        )
+    return str(db_url), str(experiment_id)
+
+
 def record_run_summary(
     client: TelemetryClient,
     experiment_id: str,
@@ -245,7 +282,6 @@ def record_run_summary(
         existing.hf_repo_id = getattr(result, "hf_repo_id", None)
         existing.hf_revision = getattr(result, "hf_revision", None)
         existing.wandb_url = getattr(result, "wandb_url", None)
-        existing.local_output_dir = getattr(result, "local_output_dir", None)
         existing.failure_reason = getattr(result, "failure_reason", None)
         existing.instance_id = getattr(result, "instance_id", None)
         existing.spot_interruption = getattr(result, "spot_interruption", None)
@@ -253,6 +289,121 @@ def record_run_summary(
         session.commit()
     finally:
         session.close()
+
+
+def _as_payload_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "__dict__"):
+        return dict(getattr(value, "__dict__"))
+    return {"value": value}
+
+
+def record_run_result(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    results_payload: Any,
+    job_result_payload: Any,
+) -> None:
+    """
+    Upsert canonical per-run payloads in run_results.
+    """
+    now = datetime.now(timezone.utc)
+    session = client.Session()
+    try:
+        existing = (
+            session.query(RunResult)
+            .filter(RunResult.experiment_id == experiment_id)
+            .filter(RunResult.run_id == str(run_id))
+            .filter(RunResult.phase == phase)
+            .order_by(RunResult.updated_at.desc())
+            .first()
+        )
+        if existing is None:
+            existing = RunResult(
+                id=str(uuid4()),
+                experiment_id=experiment_id,
+                run_id=str(run_id),
+                phase=phase,
+                created_at=now,
+            )
+            session.add(existing)
+
+        existing.results_json = json.dumps(
+            _as_payload_dict(results_payload), ensure_ascii=False, default=str
+        )
+        existing.job_result_json = json.dumps(
+            _as_payload_dict(job_result_payload), ensure_ascii=False, default=str
+        )
+        existing.updated_at = now
+        session.commit()
+    finally:
+        session.close()
+
+
+def get_run_result(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """
+    Read canonical per-run payloads from run_results.
+    """
+    session = client.Session()
+    try:
+        row = (
+            session.query(RunResult)
+            .filter(RunResult.experiment_id == experiment_id)
+            .filter(RunResult.run_id == str(run_id))
+            .filter(RunResult.phase == phase)
+            .order_by(RunResult.updated_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+
+        results_payload = json.loads(row.results_json) if row.results_json else {}
+        job_result_payload = json.loads(row.job_result_json) if row.job_result_json else {}
+        if not isinstance(results_payload, dict):
+            results_payload = {"value": results_payload}
+        if not isinstance(job_result_payload, dict):
+            job_result_payload = {"value": job_result_payload}
+        return results_payload, job_result_payload
+    finally:
+        session.close()
+
+
+def wait_for_run_result(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    timeout_seconds: int = 120,
+    poll_interval_seconds: float = 2.0,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Poll run_results until the canonical payload is available or timeout.
+    """
+    deadline = time.time() + max(1, int(timeout_seconds))
+    while True:
+        row = get_run_result(
+            client=client,
+            experiment_id=experiment_id,
+            run_id=run_id,
+            phase=phase,
+        )
+        if row is not None:
+            return row
+        if time.time() >= deadline:
+            break
+        time.sleep(max(0.1, float(poll_interval_seconds)))
+    raise TimeoutError(
+        f"Timed out waiting for run_results row "
+        f"(experiment_id={experiment_id}, run_id={run_id}, phase={phase})."
+    )
 
 
 class GRPOEpochTelemetryCallback(TrainerCallback):

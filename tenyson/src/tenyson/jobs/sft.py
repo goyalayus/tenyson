@@ -1,4 +1,3 @@
-import json
 import os
 import time
 from typing import Any, Dict
@@ -73,8 +72,9 @@ class SFTJob:
         from tenyson.core.hub_push import PeriodicHubPushCallback, ensure_hf_repo
         from tenyson.core.telemetry import (
             ManualStopTelemetryCallback,
+            record_run_result,
             record_run_summary,
-            resolve_telemetry_context,
+            resolve_required_telemetry_context,
             SFTTelemetryCallback,
             TelemetryClient,
             WandBUrlTelemetryCallback,
@@ -84,18 +84,28 @@ class SFTJob:
         train_cfg = self.config.get("training", {})
         run_name = train_cfg.get("run_name", self.run_id)
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
-        hf_repo_base = train_cfg.get("hf_repo_base") or train_cfg.get("hf_repo_id") or ""
-        push_repo_id = unique_repo_id(hf_repo_base, run_name) if hf_repo_base else ""
+        db_url, experiment_id = resolve_required_telemetry_context(self.config)
+        telemetry_client: Any = TelemetryClient(db_url=db_url)
+
+        hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
+        if not hf_repo_base:
+            raise ValueError(
+                "training.hf_repo_base is required for SFT runs. "
+                "Tenyson stores checkpoints/adapters on Hugging Face only."
+            )
+        if not os.getenv("HF_TOKEN", "").strip():
+            raise ValueError(
+                "HF_TOKEN environment variable is required for SFT runs."
+            )
+
+        push_repo_id = unique_repo_id(hf_repo_base, run_name)
+        if not push_repo_id:
+            raise ValueError("Failed to derive a valid Hugging Face repo id.")
         hf_push_every_steps = int(
             train_cfg.get("hf_push_every_steps", train_cfg.get("save_steps", 100))
         )
-        if push_repo_id and hf_push_every_steps <= 0:
+        if hf_push_every_steps <= 0:
             raise ValueError("training.hf_push_every_steps must be >= 1 when HF push is enabled.")
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Save config for reproducibility.
-        with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(self.config, f, indent=2)
 
         model, tokenizer, seq_len = self._build_model_and_tokenizer()
 
@@ -125,7 +135,7 @@ class SFTJob:
             lr_scheduler_type=train_cfg.get("lr_scheduler_type", "linear"),
             warmup_steps=train_cfg.get("warmup_steps", 10),
             logging_steps=train_cfg.get("logging_steps", 1),
-            save_strategy="no" if push_repo_id else "steps",
+            save_strategy="no",
             save_steps=train_cfg.get("save_steps", 100),
             save_total_limit=train_cfg.get("save_total_limit", 2),
             optim=train_cfg.get("optim", "adamw_8bit"),
@@ -181,55 +191,49 @@ class SFTJob:
         if collator is not None:
             trainer_kwargs["data_collator"] = collator
 
-        # Optional telemetry wiring and manual stop callback.
         callbacks = []
-        if push_repo_id:
-            ensure_hf_repo(push_repo_id)
-            callbacks.append(
-                PeriodicHubPushCallback(
-                    repo_id=push_repo_id,
-                    run_name=run_name,
-                    push_every_steps=hf_push_every_steps,
-                    tokenizer=tokenizer,
-                )
+        ensure_hf_repo(push_repo_id)
+        callbacks.append(
+            PeriodicHubPushCallback(
+                repo_id=push_repo_id,
+                run_name=run_name,
+                push_every_steps=hf_push_every_steps,
+                tokenizer=tokenizer,
             )
+        )
 
-        db_url, experiment_id = resolve_telemetry_context(self.config)
-        telemetry_client: Any = None
-        if db_url:
-            telemetry_client = TelemetryClient(db_url=db_url)
+        callbacks.append(
+            SFTTelemetryCallback(
+                run_id=run_name,
+                experiment_id=experiment_id,
+                client=telemetry_client,
+            )
+        )
+        callbacks.append(
+            ManualStopTelemetryCallback(
+                run_id=run_name,
+                experiment_id=experiment_id,
+                client=telemetry_client,
+            )
+        )
+        report_to = train_cfg.get("report_to", "none")
+        if report_to == "wandb" or (
+            isinstance(report_to, list) and "wandb" in report_to
+        ):
             callbacks.append(
-                SFTTelemetryCallback(
+                WandBUrlTelemetryCallback(
                     run_id=run_name,
-                    experiment_id=experiment_id,  # type: ignore[arg-type]
+                    experiment_id=experiment_id,
                     client=telemetry_client,
                 )
             )
-            callbacks.append(
-                ManualStopTelemetryCallback(
-                    run_id=run_name,
-                    experiment_id=experiment_id,  # type: ignore[arg-type]
-                    client=telemetry_client,
-                )
-            )
-            report_to = train_cfg.get("report_to", "none")
-            if report_to == "wandb" or (
-                isinstance(report_to, list) and "wandb" in report_to
-            ):
-                callbacks.append(
-                    WandBUrlTelemetryCallback(
-                        run_id=run_name,
-                        experiment_id=experiment_id,  # type: ignore[arg-type]
-                        client=telemetry_client,
-                    )
-                )
 
         # Optional eval-loss early stopping.
         patience = train_cfg.get("early_stopping_patience")
         if eval_dataset is not None and patience is not None:
             min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
             # Configure best-model tracking on eval_loss.
-            training_args.load_best_model_at_end = not bool(push_repo_id)
+            training_args.load_best_model_at_end = False
             training_args.metric_for_best_model = "eval_loss"
             training_args.greater_is_better = False
 
@@ -245,20 +249,27 @@ class SFTJob:
 
         trainer = SFTTrainer(**trainer_kwargs)
 
-        resume_path = train_cfg.get("resume_from_checkpoint")
-        if resume_path:
-            if not os.path.isdir(resume_path):
-                # Maybe HF repo/revision: try to download.
-                try:
-                    from huggingface_hub import snapshot_download
-                    parts = resume_path.split(":", 1)
-                    repo_id = parts[0]
-                    revision = parts[1] if len(parts) > 1 else "main"
-                    resume_path = snapshot_download(repo_id=repo_id, revision=revision)
-                except Exception as e:  # noqa: BLE001
-                    raise ValueError(
-                        f"resume_from_checkpoint must be a local directory or repo:revision; got {resume_path}: {e}"
-                    ) from e
+        resume_path = None
+        resume_ref = train_cfg.get("resume_from_checkpoint")
+        if resume_ref:
+            resume_ref = str(resume_ref).strip()
+            if ":" not in resume_ref:
+                raise ValueError(
+                    "training.resume_from_checkpoint must be of form 'repo_id:revision'. "
+                    f"Local checkpoint paths are not supported: {resume_ref}"
+                )
+            try:
+                from huggingface_hub import snapshot_download
+
+                repo_id, revision = resume_ref.split(":", 1)
+                if not repo_id or not revision:
+                    raise ValueError("Both repo_id and revision are required.")
+                resume_path = snapshot_download(repo_id=repo_id, revision=revision)
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(
+                    "training.resume_from_checkpoint must be a valid Hugging Face "
+                    f"reference 'repo_id:revision'; got {resume_ref}: {e}"
+                ) from e
             print(f"[SFTJob] Resuming from checkpoint: {resume_path}", flush=True)
 
         print("[SFTJob] Starting training...", flush=True)
@@ -266,11 +277,6 @@ class SFTJob:
             train_result = trainer.train(resume_from_checkpoint=resume_path)
         else:
             train_result = trainer.train()
-
-        if not push_repo_id:
-            print("[SFTJob] Saving model locally...", flush=True)
-            model.save_pretrained(output_dir)
-            tokenizer.save_pretrained(output_dir)
 
         total_time = time.time() - start
 
@@ -308,14 +314,19 @@ class SFTJob:
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
             hf_revision="main" if push_repo_id else None,
-            local_output_dir=output_dir,
         )
-        result.save(os.path.join(output_dir, "results.json"))
-        if telemetry_client is not None and experiment_id is not None:
-            record_run_summary(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                phase="sft",
-                result=result,
-            )
+        record_run_summary(
+            client=telemetry_client,
+            experiment_id=experiment_id,
+            phase="sft",
+            result=result,
+        )
+        record_run_result(
+            client=telemetry_client,
+            experiment_id=experiment_id,
+            run_id=run_name,
+            phase="sft",
+            results_payload=result,
+            job_result_payload=result,
+        )
         return result

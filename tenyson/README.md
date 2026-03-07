@@ -11,7 +11,7 @@ It provides:
 
 ## basic usage
 
-Run jobs in the cloud via a manager (AWS or Modal). The manager launches the job remotely using `python -m tenyson.runner`, syncs outputs back, and returns a `JobResult` instance.
+Run jobs in the cloud via a manager (AWS or Modal). The manager launches the job remotely using `python -m tenyson.runner`, reads canonical results from telemetry DB, and returns a `JobResult` instance.
 
 Local execution is intentionally disabled: jobs must run through supported GPU providers (AWS or Modal).
 
@@ -40,9 +40,9 @@ print(result.metrics, result.wandb_url)
 
 - **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
 - **GPU runner package setup**: cloud managers currently install runtime dependencies with `pip install unsloth vllm`.
-- **HF push cadence (SFT/RL)**: set `training.hf_repo_base` to enable periodic pushes to a stable repo id `<hf_repo_base>-<run_name>`. Set `training.hf_push_every_steps` (defaults to `training.save_steps`) to control cadence.
-- **Checkpoint mode**: when `training.hf_repo_base` is enabled, SFT/RL do push-only syncing to Hub and do not keep local trainer checkpoints. Set `training.resume_from_checkpoint` only when you provide an explicit checkpoint path/revision to resume from.
-- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest checkpoint), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
+- **HF push cadence (SFT/RL)**: set `training.hf_repo_base` (required) to enable periodic pushes to a stable repo id `<hf_repo_base>-<run_name>`. Set `training.hf_push_every_steps` (defaults to `training.save_steps`) to control cadence.
+- **Checkpoint mode**: SFT/RL are Hub-only. Local trainer checkpoints are disabled. Resume is supported only via `training.resume_from_checkpoint: "repo_id:revision"`.
+- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest Hub revision), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
 
 ## wordle research workflow (current example)
 
@@ -60,7 +60,7 @@ print(result.metrics, result.wandb_url)
      - then final mixed eval (turns 1..5)
 4. **Final report generation** into `examples/wordle/final_report.md`
 
-All runs use dedicated output directories under `./outputs/wordle_research/...` so artifacts never collide.
+All runs keep canonical metrics/results in the telemetry DB (plus adapters on HF for SFT/RL).
 
 ### required environment variables for `examples/wordle/experiment.py`
 
@@ -76,7 +76,7 @@ Optional:
 - `TENYSON_AWS_SPOT_MAX_PRICE`
 - `AWS_PROFILE`
 - `TENYSON_HF_REPO_BASE` (override HF repo base for SFT/RL pushes)
-- `HF_TOKEN`
+- `HF_TOKEN` (required for SFT/RL jobs)
 - `WANDB_API_KEY`
 
 Run from project root (`tenyson/`):
@@ -87,15 +87,15 @@ python examples/wordle/experiment.py
 
 ## telemetry
 
-If you set `telemetry.db_url` in your config, jobs log structured metrics to a shared SQL database and can receive manual stop requests from the same control store.
+Telemetry is mandatory. Every run must set `telemetry.db_url` and `telemetry.experiment_id`.
 
 For cloud runs, telemetry must use a network-reachable hosted SQL endpoint (recommended: Postgres). SQLite and localhost DB URLs are intentionally rejected.
 
-When telemetry is enabled, each run also needs an **experiment id** so multiple runs can be grouped in one DB:
+Each run also needs an **experiment id** so multiple runs can be grouped in one DB:
 
 - Prefer config: `telemetry.experiment_id`
 - Fallback env var: `TENYSON_EXPERIMENT_ID`
-- If neither is set while `telemetry.db_url` is set, the job fails fast with a clear error.
+- Missing db_url or experiment_id fails fast.
 
 - **SFT**:
   - `SFTTelemetryCallback` writes into the `sft_metrics` table.
@@ -107,6 +107,9 @@ When telemetry is enabled, each run also needs an **experiment id** so multiple 
 - **Eval**:
   - `EvalJob` streams batched generations and can log prompts/completions into `generations` (with `phase="eval"`).
   - When a manual stop is requested, eval stops between batches, computes metrics on the processed subset only, and marks `results.metadata.stopped_early = true`.
+- **Canonical run payloads**:
+  - `run_summaries` stores per-run status/metrics summary.
+  - `run_results` stores full per-run payloads (`results_json`) plus serialized `JobResult` (`job_result_json`), keyed by `(experiment_id, run_id, phase)`.
 
 Example snippet in a YAML config:
 
@@ -124,14 +127,11 @@ python -m tenyson.core.control \
   --db-url postgresql+psycopg2://user:password@db.example.com:5432/tenyson
 ```
 
-The next step or batch will see the `stop_requested` flag in the database and exit the loop cleanly; the job will still save or push results as usual (SFT/RL checkpoints, partial eval metrics and generations).
+The next step or batch will see the `stop_requested` flag in the database and exit the loop cleanly; summaries/results remain queryable in telemetry DB.
 
 ## eval and generations
 
-`EvalJob` mirrors the old eval script: it loads a model plus adapter, runs batched vLLM generation, computes metrics via the `TaskPlugin`, and writes:
-
-- A detailed `results.json` with metrics, and
-- A `job_result.json` containing the `JobResult` fields for the run.
+`EvalJob` mirrors the old eval script: it loads a model plus adapter, runs batched vLLM generation, computes metrics via the `TaskPlugin`, and writes canonical payloads to telemetry DB (`run_results` + `run_summaries`).
 
 The same `Generation` table is intended for logging eval prompts and completions when you need per-sample telemetry.
 
@@ -152,8 +152,8 @@ When `eval_exact_turns` is set, eval dataset generation is restricted to those e
 
 `tenyson.jobs.result.JobResult` is the common return type from all jobs and cloud managers:
 
-- **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`, `local_output_dir`. On failure, cloud managers also set `failure_reason`, `instance_id`, and `spot_interruption`.
-- **Persistence**: the `.save(path)` method serialises the result to JSON; jobs always save a `results.json` or `job_result.json` in their output directory.
+- **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`. On failure, cloud managers also set `failure_reason`, `instance_id`, and `spot_interruption`.
+- **Persistence**: `run_summaries` and `run_results` tables in telemetry DB are the canonical source of truth.
 
 `ReportBuilder` turns a markdown template into a final report with:
 
@@ -188,7 +188,7 @@ Semantics:
 
 - `metric_for_best_model = "eval_loss"` and `greater_is_better = false`;
 - improvement means the best `eval_loss` decreases by more than `early_stopping_min_delta`;
-- if `eval_loss` is constant or increasing for `early_stopping_patience` evaluations, training stops. In local-checkpoint mode, the best checkpoint is reloaded; in Hub push-only mode, the latest trained weights are kept and pushed.
+- if `eval_loss` is constant or increasing for `early_stopping_patience` evaluations, training stops. Since checkpoints are Hub-only, latest pushed adapters are the recovery path.
 
 ## runner cli
 
@@ -213,6 +213,6 @@ python -m tenyson.runner \
 - **`--job-type`**: one of `sft`, `rl`, or `eval`.
 - **`--config`**: YAML or JSON config file; the same schema used by jobs run via cloud managers.
 - **`--task-module`**: Either a path to a Python file containing a single `TaskPlugin` subclass (e.g. `examples/wordle/wordle_task.py`), or a `module.path:ClassName` spec for remote/advanced use (e.g. `examples.wordle.wordle_task:WordleTask`).
-- **`--resume-from-checkpoint`**: (SFT/RL only) Path to a checkpoint directory or `repo_id:revision` to resume training.
+- **`--resume-from-checkpoint`**: (SFT/RL only) `repo_id:revision` to resume training from Hugging Face.
 
 `AWSManager` and `ModalManager` invoke this entrypoint on the remote worker. Running this entrypoint locally is blocked unless the cloud runtime context variables are set by a supported provider manager.

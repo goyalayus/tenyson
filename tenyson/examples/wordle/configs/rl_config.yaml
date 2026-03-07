@@ -37,7 +37,7 @@ training:
   run_name: "wordle_rl_vllm_config_test"
   output_dir: "./outputs/rl_grpo"
   report_to: ["wandb"]
-  # Stable repo per run lineage: <hf_repo_base>-<run_name>. Leave empty to skip push.
+  # Stable repo per run lineage: <hf_repo_base>-<run_name>. Required.
   hf_repo_base: "username/wordle-lora"
   # Push adapter/tokenizer to Hub every N optimizer steps.
   hf_push_every_steps: 50
@@ -55,3 +55,7 @@ task:
     repeat_penalty: -0.5
     constraint: 0.1
     overlength_penalty: -0.5
+
+telemetry:
+  db_url: "postgresql+psycopg2://user:password@db.example.com:5432/tenyson"
+  experiment_id: "wordle_research_2026_03_07"

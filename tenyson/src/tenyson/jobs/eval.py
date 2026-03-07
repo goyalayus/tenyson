@@ -1,7 +1,4 @@
-import json
-import os
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Sequence
 from uuid import uuid4
 
@@ -108,21 +105,19 @@ class EvalJob:
         require_gpu_provider_runtime()
         from tenyson.core.telemetry import (
             Generation,
+            record_run_result,
             record_run_summary,
-            resolve_telemetry_context,
+            resolve_required_telemetry_context,
             RunControl,
             TelemetryClient,
         )
 
         start = time.time()
         eval_cfg = self.config.get("evaluation", {})
+        run_name = eval_cfg.get("run_name", self.run_id)
 
-        output_dir = Path(eval_cfg.get("output_dir", "./outputs/evals"))
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save config for reproducibility.
-        with open(output_dir / "config.json", "w", encoding="utf-8") as f:
-            json.dump(self.config, f, indent=2)
+        db_url, experiment_id = resolve_required_telemetry_context(self.config)
+        client = TelemetryClient(db_url=db_url)
 
         model, tokenizer = self._build_model_and_tokenizer()
 
@@ -133,12 +128,6 @@ class EvalJob:
         sampling_params = self._build_sampling_params(tokenizer)
         all_prompts: Sequence[str] = self._extract_prompts(dataset)
 
-        # Optional telemetry / manual-stop wiring.
-        db_url, experiment_id = resolve_telemetry_context(self.config)
-        client = None
-        if db_url:
-            client = TelemetryClient(db_url=db_url)
-
         batch_size = int(self.config.get("evaluation", {}).get("batch_size", 32))
         batch_size = max(1, batch_size)
 
@@ -146,15 +135,14 @@ class EvalJob:
         processed_completions: List[str] = []
 
         def _should_stop() -> bool:
-            if client is None:
-                return False
             session = client.Session()
             try:
                 control_row = (
                     session.query(RunControl)
-                    .filter(RunControl.run_id == self.run_id)
+                    .filter(RunControl.run_id == run_name)
                     .filter(RunControl.experiment_id == experiment_id)
-                    .one_or_none()
+                    .order_by(RunControl.updated_at.desc())
+                    .first()
                 )
                 return bool(control_row and control_row.stop_requested)
             finally:
@@ -187,28 +175,26 @@ class EvalJob:
 
         print("[EvalJob] Generation complete. Computing metrics...", flush=True)
 
-        # Optional telemetry: log eval prompts and completions into the
-        # shared Generation table when a telemetry DB is configured.
-        if client is not None:
-            session = client.Session()
-            try:
-                for idx, (prompt, completion) in enumerate(
-                    zip(processed_prompts, processed_completions)
-                ):
-                    generation = Generation(
-                        id=str(uuid4()),
-                        experiment_id=experiment_id,
-                        run_id=self.run_id,
-                        global_step=idx,
-                        phase="eval",
-                        prompt_text=str(prompt),
-                        completion_text=str(completion),
-                        reward=None,
-                    )
-                    session.add(generation)
-                session.commit()
-            finally:
-                session.close()
+        # Telemetry: log eval prompts and completions into shared Generation table.
+        session = client.Session()
+        try:
+            for idx, (prompt, completion) in enumerate(
+                zip(processed_prompts, processed_completions)
+            ):
+                generation = Generation(
+                    id=str(uuid4()),
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    global_step=idx,
+                    phase="eval",
+                    prompt_text=str(prompt),
+                    completion_text=str(completion),
+                    reward=None,
+                )
+                session.add(generation)
+            session.commit()
+        finally:
+            session.close()
 
         # Only pass the processed subset through to metrics.
         processed_dataset = dataset.select(range(len(processed_prompts)))
@@ -225,10 +211,6 @@ class EvalJob:
             results.setdefault("metadata", {})
             results["metadata"]["stopped_early"] = True
 
-        out_file = output_dir / "results.json"
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
-
         metrics = results.get("metrics", {})
         for key, value in metrics.items():
             print(f"[EvalJob] {key}: {value}", flush=True)
@@ -236,19 +218,23 @@ class EvalJob:
         total_time = time.time() - start
 
         result = JobResult(
-            run_id=self.run_id,
+            run_id=run_name,
             status="success",
             total_time_seconds=total_time,
             metrics=metrics,
-            local_output_dir=str(output_dir),
         )
-        # Also persist JobResult alongside detailed results.
-        result.save(str(output_dir / "job_result.json"))
-        if client is not None and experiment_id is not None:
-            record_run_summary(
-                client=client,
-                experiment_id=experiment_id,
-                phase="eval",
-                result=result,
-            )
+        record_run_summary(
+            client=client,
+            experiment_id=experiment_id,
+            phase="eval",
+            result=result,
+        )
+        record_run_result(
+            client=client,
+            experiment_id=experiment_id,
+            run_id=run_name,
+            phase="eval",
+            results_payload=results,
+            job_result_payload=result,
+        )
         return result

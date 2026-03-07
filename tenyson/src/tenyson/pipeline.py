@@ -3,8 +3,6 @@ Pipeline runner with human-in-the-loop on failure: wait for user to choose
 resume from checkpoint, restart from scratch, or abort.
 """
 
-import glob
-import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -18,38 +16,6 @@ from tenyson.reporting.builder import ReportBuilder
 StepTuple = Tuple[str, dict, type, Any]
 ParallelStage = Dict[str, Any]
 PipelineStep = Union[StepTuple, ParallelStage]
-
-
-def get_latest_checkpoint_dir(output_dir: str, job_type: str = "sft") -> Optional[str]:
-    """
-    Find the latest checkpoint directory under output_dir.
-    For SFT: output_dir/checkpoint-*.
-    For RL: output_dir/trainer_out/checkpoint-*.
-    Returns the path with the largest step number, or None if no checkpoints.
-    """
-    if job_type == "rl":
-        search_dir = os.path.join(output_dir, "trainer_out")
-    else:
-        search_dir = output_dir
-    pattern = os.path.join(search_dir, "checkpoint-*")
-    dirs = glob.glob(pattern)
-    if not dirs:
-        return None
-    best_path = None
-    best_step = -1
-    for d in dirs:
-        if not os.path.isdir(d):
-            continue
-        name = os.path.basename(d)
-        if name.startswith("checkpoint-"):
-            try:
-                step = int(name.split("-")[1])
-                if step > best_step:
-                    best_step = step
-                    best_path = d
-            except (IndexError, ValueError):
-                continue
-    return best_path
 
 
 def _report_update_data(label: str, result: JobResult) -> Dict[str, Any]:
@@ -109,18 +75,22 @@ def _validate_parallel_stage(stage: ParallelStage) -> None:
         _validate_step_tuple(branch)
 
 
-def _prompt_failure_action(config: dict, job_type: str, on_failure: str) -> str:
+def _prompt_failure_action(
+    config: dict,
+    job_type: str,
+    on_failure: str,
+    last_result: JobResult,
+) -> str:
     if on_failure != "wait":
         return "abort"
 
     train_cfg = config.get("training", {})
-    output_dir = train_cfg.get("output_dir", "")
-    can_resume = job_type in ("sft", "rl") and output_dir
+    can_resume = job_type in ("sft", "rl") and bool(last_result.hf_repo_id)
 
     while True:
         if can_resume:
             sys.stderr.write(
-                f"  [resume] Resume from last checkpoint\n"
+                f"  [resume] Resume from HF checkpoint\n"
                 f"  [restart] Restart step from scratch\n"
             )
         else:
@@ -138,13 +108,9 @@ def _prompt_failure_action(config: dict, job_type: str, on_failure: str) -> str:
             train_cfg.pop("resume_from_checkpoint", None)
             return "restart"
         if choice == "resume" and can_resume:
-            abs_output = os.path.abspath(output_dir)
-            latest = get_latest_checkpoint_dir(abs_output, job_type)
-            if latest:
-                train_cfg["resume_from_checkpoint"] = latest
-                return "resume"
-            sys.stderr.write("  No checkpoint found; choose restart or abort.\n")
-            continue
+            revision = getattr(last_result, "hf_revision", None) or "main"
+            train_cfg["resume_from_checkpoint"] = f"{last_result.hf_repo_id}:{revision}"
+            return "resume"
         sys.stderr.write("  Invalid choice.\n")
 
 
@@ -268,7 +234,12 @@ def run_pipeline(
                         phase=job_type,
                     )
 
-                    action = _prompt_failure_action(config, job_type, on_failure)
+                    action = _prompt_failure_action(
+                        config=config,
+                        job_type=job_type,
+                        on_failure=on_failure,
+                        last_result=result,
+                    )
                     if action == "abort":
                         return results
                     result = _run_step(label, config, job_class, step_task, cloud)
@@ -305,7 +276,12 @@ def run_pipeline(
                 phase=job_type,
             )
 
-            action = _prompt_failure_action(config, job_type, on_failure)
+            action = _prompt_failure_action(
+                config=config,
+                job_type=job_type,
+                on_failure=on_failure,
+                last_result=result,
+            )
             if action == "abort":
                 return results
 
