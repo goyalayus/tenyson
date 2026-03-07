@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
+from tenyson.core.run_config import materialize_run_config
 from tenyson.jobs.result import JobResult
 
 
@@ -143,12 +144,16 @@ class ModalManager(BaseCloudManager):
         task = job.task
         task_spec = self._resolve_task_spec(task, local_project_root)
 
-        # Write config into the repo root so it is visible under /workspace.
-        cfg_dir = Path(local_project_root) / ".tenyson_modal_configs"
-        cfg_dir.mkdir(parents=True, exist_ok=True)
-        config_rel_path = cfg_dir / f"{job_type}_job_config.json"
-        with open(config_rel_path, "w", encoding="utf-8") as f:
-            json.dump(job.config, f, indent=2)
+        train_cfg = job.config.get("training", {})
+        eval_cfg = job.config.get("evaluation", {})
+        run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
+        config_path = materialize_run_config(
+            config=job.config,
+            project_root=Path(local_project_root),
+            job_type=job_type,
+            run_name=run_name,
+        )
+        config_rel_path = os.path.relpath(str(config_path), local_project_root)
 
         if self.profile:
             import os
@@ -166,12 +171,11 @@ class ModalManager(BaseCloudManager):
         # Run synchronously; on failure return failed JobResult instead of raising.
         try:
             run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
-                job_type, os.path.relpath(str(config_rel_path), local_project_root), task_spec
+                job_type,
+                config_rel_path,
+                task_spec,
             )
         except Exception as exc:  # noqa: BLE001
-            train_cfg = job.config.get("training", {})
-            eval_cfg = job.config.get("evaluation", {})
-            run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
             result = JobResult(
                 run_id=run_name,
                 status="failed",

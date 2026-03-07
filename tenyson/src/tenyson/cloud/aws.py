@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -13,6 +12,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from tenyson.cloud.base import BaseCloudManager, JobFailedError, _red_print
+from tenyson.core.run_config import materialize_run_config
 from tenyson.jobs.result import JobResult
 
 
@@ -252,20 +252,29 @@ class AWSManager(BaseCloudManager):
             remote_project_root = "~/workspace"
         else:
             remote_project_root = f"~/workspace/{local_project_rel}"
+
+        job_type = "sft"
+        from tenyson.jobs.sft import SFTJob as _S
+        from tenyson.jobs.rl import RLJob as _R
+        from tenyson.jobs.eval import EvalJob as _E
+
+        if isinstance(job, _R):
+            job_type = "rl"
+        elif isinstance(job, _E):
+            job_type = "eval"
+
+        train_cfg = job.config.get("training", {})
+        eval_cfg = job.config.get("evaluation", {})
+        run_name = train_cfg.get("run_name") or eval_cfg.get("run_name") or job.run_id
+        config_path = materialize_run_config(
+            config=job.config,
+            project_root=Path(local_project_root),
+            job_type=job_type,
+            run_name=run_name,
+        )
+        config_rel_path = os.path.relpath(str(config_path), str(local_project_root))
+
         self._rsync_to_host(public_ip, self.key_path, user, repo_root, "~/workspace")
-
-        # Prepare remote config for this job.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = Path(tmpdir) / "job_config.yaml"
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                import yaml as _yaml
-
-                _yaml.safe_dump(job.config, f)
-
-            # Re-rsync just the config file into workspace.
-            self._rsync_to_host(
-                public_ip, self.key_path, user, str(cfg_path.parent), remote_project_root
-            )
 
         # If resuming, sync the checkpoint (or outputs) to the instance so the path is valid.
         resume_path = job.config.get("training", {}).get("resume_from_checkpoint")
@@ -292,16 +301,6 @@ class AWSManager(BaseCloudManager):
         task = job.task
         task_spec = self._resolve_task_spec(task, repo_root)
 
-        job_type = "sft"
-        from tenyson.jobs.sft import SFTJob as _S
-        from tenyson.jobs.rl import RLJob as _R
-        from tenyson.jobs.eval import EvalJob as _E
-
-        if isinstance(job, _R):
-            job_type = "rl"
-        elif isinstance(job, _E):
-            job_type = "eval"
-
         env_chain = " && ".join(env_exports) if env_exports else ""
         remote_cmd = (
             "source activate pytorch"
@@ -310,7 +309,7 @@ class AWSManager(BaseCloudManager):
             + "export PYTHONPATH=src:${PYTHONPATH} && "
             + "python -m tenyson.runner "
             + f"--job-type {job_type} "
-            + "--config job_config.yaml "
+            + f"--config {config_rel_path} "
             + f"--task-module {task_spec}"
         )
 

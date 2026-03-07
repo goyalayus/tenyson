@@ -1,0 +1,9 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+
+# Tenyson generated runtime configs
+.tenyson_runs/
+tenyson/.tenyson_runs/
+.tenyson_modal_configs/
+tenyson/.tenyson_modal_configs/
