@@ -87,7 +87,9 @@ python examples/wordle/experiment.py
 
 ## telemetry
 
-If you set `telemetry.db_url` in your config, jobs will log structured metrics to a SQL database (SQLite or Postgres via SQLAlchemy) and can also receive manual stop requests via the same control store.
+If you set `telemetry.db_url` in your config, jobs log structured metrics to a shared SQL database and can receive manual stop requests from the same control store.
+
+For cloud runs, telemetry must use a network-reachable hosted SQL endpoint (recommended: Postgres). SQLite and localhost DB URLs are intentionally rejected.
 
 When telemetry is enabled, each run also needs an **experiment id** so multiple runs can be grouped in one DB:
 
@@ -110,7 +112,7 @@ Example snippet in a YAML config:
 
 ```yaml
 telemetry:
-  db_url: "sqlite:///./tenyson_telemetry.db"
+  db_url: "postgresql+psycopg2://user:password@db.example.com:5432/tenyson"
   experiment_id: "wordle_research_2026_03_01"
 ```
 
@@ -119,7 +121,7 @@ With telemetry enabled, you can mark a run for manual stop from another process:
 ```bash
 python -m tenyson.core.control \
   --run-id lora_sft_qwen3-4b \
-  --db-url sqlite:///./tenyson_telemetry.db
+  --db-url postgresql+psycopg2://user:password@db.example.com:5432/tenyson
 ```
 
 The next step or batch will see the `stop_requested` flag in the database and exit the loop cleanly; the job will still save or push results as usual (SFT/RL checkpoints, partial eval metrics and generations).

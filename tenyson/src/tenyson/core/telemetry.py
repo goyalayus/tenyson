@@ -6,10 +6,40 @@ from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, create_engine
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 
 Base = declarative_base()
+
+
+def _validate_shared_db_url(db_url: str) -> None:
+    """
+    Validate telemetry DB URLs for distributed cloud execution.
+
+    The same DB endpoint must be reachable by both remote workers and local control
+    commands; local-only SQLite files and localhost hosts are rejected.
+    """
+    try:
+        parsed = make_url(str(db_url))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            f"Invalid telemetry.db_url '{db_url}'. Provide a valid hosted SQL connection string."
+        ) from exc
+
+    driver = (parsed.drivername or "").lower()
+    host = (parsed.host or "").strip().lower()
+
+    if driver.startswith("sqlite"):
+        raise ValueError(
+            "SQLite telemetry URLs are not supported. Use a hosted SQL database URL "
+            "(for example: postgresql+psycopg2://user:pass@host:5432/dbname)."
+        )
+    if host in {"", "localhost", "127.0.0.1"}:
+        raise ValueError(
+            "Telemetry DB host must be network-reachable by both local control and "
+            "remote workers. Avoid localhost/127.0.0.1."
+        )
 
 
 class Rollout(Base):
@@ -142,6 +172,7 @@ class TelemetryClient:
     db_url: str
 
     def __post_init__(self) -> None:
+        _validate_shared_db_url(self.db_url)
         self.engine = create_engine(self.db_url)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
