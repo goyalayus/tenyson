@@ -12,25 +12,34 @@ class ReportBuilder:
     def __init__(self, template_path: str, output_path: str):
         self.template_path = Path(template_path)
         self.output_path = Path(output_path)
-        self.content = self.template_path.read_text(encoding="utf-8")
+        self.output_dir = self.output_path.parent
+        self.template = self.template_path.read_text(encoding="utf-8")
+        self.content = self.template
+        self.values: Dict[str, str] = {}
+
+    def _render(self) -> str:
+        content = self.template
+        for key, value in self.values.items():
+            content = content.replace("{" + key + "}", value)
+        self.content = content
+        return content
+
+    def _store_values(self, data: Dict[str, Any]) -> None:
+        for key, value in data.items():
+            self.values[key] = str(value)
 
     def fill(self, data: Dict[str, Any]) -> None:
-        for key, value in data.items():
-            self.content = self.content.replace("{" + key + "}", str(value))
+        self._store_values(data)
+        self._render()
 
     def update(self, data: Dict[str, Any]) -> None:
         """
-        Incremental update: read current report from disk (or use in-memory content),
-        replace only the placeholders for keys in `data`, then write back.
-        Use after an initial fill() + generate() to update the report as steps complete.
+        Incremental update: merge the latest values and re-render the report from the
+        original template so retries can overwrite earlier failed values.
         """
-        if self.output_path.exists():
-            self.content = self.output_path.read_text(encoding="utf-8")
-        for key, value in data.items():
-            self.content = self.content.replace("{" + key + "}", str(value))
-        self.output_dir = self.output_path.parent
+        self._store_values(data)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_text(self.content, encoding="utf-8")
+        self.output_path.write_text(self._render(), encoding="utf-8")
 
     def attach_wandb_scalar_link(
         self,
@@ -42,7 +51,8 @@ class ReportBuilder:
         Replace a placeholder with a markdown link to a WandB run + metric.
         """
         link = f"[{metric_name}]({run_url})"
-        self.content = self.content.replace("{" + placeholder + "}", link)
+        self.values[placeholder] = link
+        self._render()
 
     def attach_wandb_latest_value(
         self,
@@ -63,9 +73,9 @@ class ReportBuilder:
             if metric_name in row:
                 latest = row[metric_name]
         if latest is not None:
-            self.content = self.content.replace("{" + placeholder + "}", str(latest))
+            self.values[placeholder] = str(latest)
+            self._render()
 
     def generate(self) -> None:
-        self.output_dir = self.output_path.parent
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_text(self.content, encoding="utf-8")
+        self.output_path.write_text(self._render(), encoding="utf-8")
