@@ -93,7 +93,7 @@ class SFTJob:
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=db_url)
-        if begin_run_attempt(telemetry_client, experiment_id, run_name):
+        if begin_run_attempt(telemetry_client, experiment_id, run_name, phase="sft"):
             print(
                 "[SFTJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,

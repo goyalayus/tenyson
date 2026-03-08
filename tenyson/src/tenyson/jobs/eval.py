@@ -135,7 +135,7 @@ class EvalJob:
 
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         client = TelemetryClient(db_url=db_url)
-        if begin_run_attempt(client, experiment_id, run_name):
+        if begin_run_attempt(client, experiment_id, run_name, phase="eval"):
             print(
                 "[EvalJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,
@@ -219,7 +219,9 @@ class EvalJob:
             session.close()
 
         # Only pass the processed subset through to metrics.
-        processed_dataset = dataset.select(range(len(processed_prompts)))
+        processed_samples = len(processed_prompts)
+        expected_samples = len(all_prompts)
+        processed_dataset = dataset.select(range(processed_samples))
         results = self.task.compute_metrics(
             processed_prompts,
             processed_completions,
@@ -227,10 +229,12 @@ class EvalJob:
             self.config,
             tokenizer,
         )
-
-        if len(processed_prompts) < len(all_prompts):
+        stopped_early = processed_samples < expected_samples
+        results.setdefault("metadata", {})
+        results["metadata"]["processed_samples"] = processed_samples
+        results["metadata"]["expected_samples"] = expected_samples
+        if stopped_early:
             # Flag partial evaluations so downstream tooling can recognise them.
-            results.setdefault("metadata", {})
             results["metadata"]["stopped_early"] = True
 
         metrics = results.get("metrics", {})
@@ -241,9 +245,12 @@ class EvalJob:
 
         result = JobResult(
             run_id=run_name,
-            status="success",
+            status="partial" if stopped_early else "success",
             total_time_seconds=total_time,
             metrics=metrics,
+            stopped_early=stopped_early,
+            processed_samples=processed_samples,
+            expected_samples=expected_samples,
         )
         record_run_summary(
             client=client,

@@ -44,6 +44,13 @@ def _build_cloud(kwargs: Dict[str, Any]) -> AWSManager:
     return AWSManager(**kwargs)
 
 
+def _is_retryable_failure(result: JobResult) -> bool:
+    return str(getattr(result, "status", "") or "").lower() not in {
+        "success",
+        "partial",
+    }
+
+
 @dataclass(frozen=True)
 class _ActiveRun:
     run_id: str
@@ -153,7 +160,7 @@ def _run_single_step(
         if abort_controller is not None:
             abort_controller.unregister_step(active_run_id)
 
-    if abort_controller is not None and matched_result.status != "success":
+    if abort_controller is not None and _is_retryable_failure(matched_result):
         abort_controller.request_abort(source_run_id=run_id, source_label=label)
     return matched_result
 
@@ -197,7 +204,7 @@ def _run_parallel_eval_steps(
 
     if abort_controller is not None:
         for label, result in output.items():
-            if result.status != "success":
+            if _is_retryable_failure(result):
                 abort_controller.request_abort(
                     source_run_id=result.run_id,
                     source_label=label,

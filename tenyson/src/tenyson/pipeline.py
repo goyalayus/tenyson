@@ -23,6 +23,13 @@ PipelineStep = Union[StepTuple, ParallelStage]
 _FAILURE_PROMPT_LOCK = threading.Lock()
 
 
+def _is_terminal_nonfailure(result: JobResult) -> bool:
+    return str(getattr(result, "status", "") or "").lower() in {
+        "success",
+        "partial",
+    }
+
+
 def _report_update_data(label: str, result: JobResult) -> Dict[str, Any]:
     """Build placeholder update dict for report from step label and result."""
     wandb_link = (
@@ -263,7 +270,7 @@ def run_pipeline(
                     if report_enabled:
                         report.update(_report_update_data(label, result))
 
-                    if result.status == "success":
+                    if _is_terminal_nonfailure(result):
                         break
 
                     _red_print(
@@ -306,7 +313,7 @@ def run_pipeline(
             if report_enabled:
                 report.update(_report_update_data(label, result))
 
-            if result.status == "success":
+            if _is_terminal_nonfailure(result):
                 break
 
             # Failed: notify and optionally wait for user.

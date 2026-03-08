@@ -9,6 +9,9 @@ class JobResult:
     status: str
     total_time_seconds: float
     metrics: Dict[str, Any] = field(default_factory=dict)
+    stopped_early: bool = False
+    processed_samples: Optional[int] = None
+    expected_samples: Optional[int] = None
     hf_repo_id: Optional[str] = None
     hf_revision: Optional[str] = None
     wandb_url: Optional[str] = None

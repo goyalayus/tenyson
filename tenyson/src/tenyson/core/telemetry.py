@@ -210,6 +210,7 @@ def begin_run_attempt(
     client: TelemetryClient,
     experiment_id: str,
     run_id: str,
+    phase: Optional[str] = None,
 ) -> bool:
     """
     Start a fresh control epoch for a logical run.
@@ -222,7 +223,52 @@ def begin_run_attempt(
     """
     experiment_id = str(experiment_id)
     run_id = str(run_id)
+    phase_name = str(phase or "").strip().lower()
     now = datetime.now(timezone.utc)
+    reset_session = client.Session()
+    try:
+        reset_session.query(RunFailure).filter(
+            RunFailure.experiment_id == experiment_id
+        ).filter(RunFailure.run_id == run_id).delete(synchronize_session=False)
+        reset_session.query(RunMetadata).filter(
+            RunMetadata.experiment_id == experiment_id
+        ).filter(RunMetadata.run_id == run_id).delete(synchronize_session=False)
+        if phase_name:
+            reset_session.query(RunSummary).filter(
+                RunSummary.experiment_id == experiment_id
+            ).filter(RunSummary.run_id == run_id).filter(
+                RunSummary.phase == phase_name
+            ).delete(synchronize_session=False)
+            reset_session.query(RunResult).filter(
+                RunResult.experiment_id == experiment_id
+            ).filter(RunResult.run_id == run_id).filter(
+                RunResult.phase == phase_name
+            ).delete(synchronize_session=False)
+            if phase_name == "sft":
+                reset_session.query(SFTMetric).filter(
+                    SFTMetric.experiment_id == experiment_id
+                ).filter(SFTMetric.run_id == run_id).delete(synchronize_session=False)
+            elif phase_name == "rl":
+                reset_session.query(EpochMetric).filter(
+                    EpochMetric.experiment_id == experiment_id
+                ).filter(EpochMetric.run_id == run_id).delete(synchronize_session=False)
+                reset_session.query(Rollout).filter(
+                    Rollout.experiment_id == experiment_id
+                ).filter(Rollout.run_id == run_id).delete(synchronize_session=False)
+                reset_session.query(Generation).filter(
+                    Generation.experiment_id == experiment_id
+                ).filter(Generation.run_id == run_id).filter(
+                    Generation.phase == phase_name
+                ).delete(synchronize_session=False)
+            elif phase_name == "eval":
+                reset_session.query(Generation).filter(
+                    Generation.experiment_id == experiment_id
+                ).filter(Generation.run_id == run_id).filter(
+                    Generation.phase == phase_name
+                ).delete(synchronize_session=False)
+        reset_session.commit()
+    finally:
+        reset_session.close()
     session = client.Session()
     try:
         latest = (

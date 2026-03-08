@@ -182,7 +182,7 @@ class RLJob:
         telemetry_client = TelemetryClient(db_url=db_url)
 
         run_name = self.run_id
-        if begin_run_attempt(telemetry_client, experiment_id, run_name):
+        if begin_run_attempt(telemetry_client, experiment_id, run_name, phase="rl"):
             print(
                 "[RLJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,
