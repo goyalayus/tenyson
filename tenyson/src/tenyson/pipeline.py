@@ -4,6 +4,7 @@ resume from checkpoint, restart from scratch, or abort.
 """
 
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -17,6 +18,9 @@ from tenyson.reporting.builder import ReportBuilder
 StepTuple = Tuple[str, dict, type, Any]
 ParallelStage = Dict[str, Any]
 PipelineStep = Union[StepTuple, ParallelStage]
+
+
+_FAILURE_PROMPT_LOCK = threading.Lock()
 
 
 def _report_update_data(label: str, result: JobResult) -> Dict[str, Any]:
@@ -74,6 +78,7 @@ def _validate_parallel_stage(stage: ParallelStage) -> None:
 
 
 def _prompt_failure_action(
+    step_label: str,
     config: dict,
     job_type: str,
     on_failure: str,
@@ -85,32 +90,38 @@ def _prompt_failure_action(
     train_cfg = config.get("training", {})
     hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
     hf_revision = str(getattr(last_result, "hf_revision", "") or "").strip()
+    run_id = str(getattr(last_result, "run_id", "") or "").strip() or "unknown"
     can_resume = job_type in ("sft", "rl") and bool(hf_repo_id and hf_revision)
 
-    while True:
-        if can_resume:
+    with _FAILURE_PROMPT_LOCK:
+        while True:
             sys.stderr.write(
-                f"  [resume] Resume from HF checkpoint\n"
-                f"  [restart] Restart step from scratch\n"
+                "[TENYSON] Awaiting failure action for "
+                f'step "{step_label}" (run_id={run_id}, job_type={job_type}).\n'
             )
-        else:
-            sys.stderr.write(f"  [restart] Restart step from scratch\n")
-        sys.stderr.write("  [abort] Abort pipeline\n")
-        sys.stderr.write("Choice (resume/restart/abort): ")
-        sys.stderr.flush()
-        try:
-            choice = sys.stdin.readline().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            choice = "abort"
-        if choice == "abort":
-            return "abort"
-        if choice == "restart":
-            train_cfg.pop("resume_from_checkpoint", None)
-            return "restart"
-        if choice == "resume" and can_resume:
-            train_cfg["resume_from_checkpoint"] = f"{hf_repo_id}:{hf_revision}"
-            return "resume"
-        sys.stderr.write("  Invalid choice.\n")
+            if can_resume:
+                sys.stderr.write(
+                    f"  [resume] Resume from HF checkpoint\n"
+                    f"  [restart] Restart step from scratch\n"
+                )
+            else:
+                sys.stderr.write(f"  [restart] Restart step from scratch\n")
+            sys.stderr.write("  [abort] Abort pipeline\n")
+            sys.stderr.write("Choice (resume/restart/abort): ")
+            sys.stderr.flush()
+            try:
+                choice = sys.stdin.readline().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "abort"
+            if choice == "abort":
+                return "abort"
+            if choice == "restart":
+                train_cfg.pop("resume_from_checkpoint", None)
+                return "restart"
+            if choice == "resume" and can_resume:
+                train_cfg["resume_from_checkpoint"] = f"{hf_repo_id}:{hf_revision}"
+                return "resume"
+            sys.stderr.write("  Invalid choice.\n")
 
 
 def _run_branch_once(
@@ -271,6 +282,7 @@ def run_pipeline(
                     )
 
                     action = _prompt_failure_action(
+                        step_label=label,
                         config=config,
                         job_type=job_type,
                         on_failure=on_failure,
@@ -313,6 +325,7 @@ def run_pipeline(
             )
 
             action = _prompt_failure_action(
+                step_label=label,
                 config=config,
                 job_type=job_type,
                 on_failure=on_failure,
