@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
@@ -60,6 +61,8 @@ class Rollout(Base):
     experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
+    rollout_step = Column(Integer, index=True, nullable=True)
+    rollout_batch_id = Column(String, index=True, nullable=True)
     prompt_text = Column(String)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -74,6 +77,8 @@ class Generation(Base):
     experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
+    rollout_step = Column(Integer, index=True, nullable=True)
+    rollout_batch_id = Column(String, index=True, nullable=True)
     phase = Column(String, index=True)  # e.g. "rl" or "eval"
     prompt_text = Column(String)
     completion_text = Column(String)
@@ -210,25 +215,76 @@ class TelemetryClient:
         self.Session = sessionmaker(bind=self.engine)
 
     def _ensure_schema_columns(self) -> None:
+        self._ensure_table_columns(
+            "generations",
+            {
+                "reward_components_json": "TEXT",
+                "rollout_step": "INTEGER",
+                "rollout_batch_id": "TEXT",
+            },
+        )
+        self._ensure_table_columns(
+            "rollouts",
+            {
+                "rollout_step": "INTEGER",
+                "rollout_batch_id": "TEXT",
+            },
+        )
+
+    def _ensure_table_columns(self, table_name: str, columns: Dict[str, str]) -> None:
         inspector = inspect(self.engine)
-        if "generations" not in inspector.get_table_names():
+        if table_name not in inspector.get_table_names():
             return
-        generation_columns = {
-            column["name"] for column in inspector.get_columns("generations")
+        existing_columns = {
+            column["name"] for column in inspector.get_columns(table_name)
         }
-        if "reward_components_json" in generation_columns:
+        missing_columns = {
+            name: ddl for name, ddl in columns.items() if name not in existing_columns
+        }
+        if not missing_columns:
             return
-        try:
-            with self.engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "ALTER TABLE generations ADD COLUMN reward_components_json TEXT"
+        for column_name, ddl in missing_columns.items():
+            try:
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}")
                     )
-                )
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc).lower()
-            if "duplicate column" not in message and "already exists" not in message:
-                raise
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc).lower()
+                if (
+                    "duplicate column" not in message
+                    and "already exists" not in message
+                ):
+                    raise
+
+
+@dataclass(frozen=True)
+class RLRolloutWindow:
+    rollout_step: int
+    rollout_batch_id: str
+    generation_global_step: int
+
+
+class RLRolloutTracker:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._rollout_counter = 0
+        self._current_rollout: Optional[RLRolloutWindow] = None
+
+    def start_rollout(self, generation_global_step: int) -> RLRolloutWindow:
+        with self._lock:
+            self._rollout_counter += 1
+            rollout = RLRolloutWindow(
+                rollout_step=self._rollout_counter,
+                rollout_batch_id=str(uuid4()),
+                generation_global_step=int(generation_global_step),
+            )
+            self._current_rollout = rollout
+            return rollout
+
+    def current_rollout(self) -> Optional[RLRolloutWindow]:
+        with self._lock:
+            return self._current_rollout
 
 
 def begin_run_attempt(
@@ -536,51 +592,36 @@ def wait_for_run_result(
 
 class GRPOEpochTelemetryCallback(TrainerCallback):
     """
-    Logs per-epoch GRPO metrics (loss, KL) into the SQL database.
+    Placeholder callback for RL update metrics.
+
+    RL loss/KL telemetry is intentionally disabled for now because GRPO reuses
+    rollout batches on an internal clock that the callback surface does not expose
+    precisely enough to label update-side metrics without overclaiming accuracy.
     """
 
-    def __init__(self, run_id: str, experiment_id: str, client: TelemetryClient):
+    def __init__(
+        self,
+        run_id: str,
+        experiment_id: str,
+        client: TelemetryClient,
+        rollout_tracker: Optional[RLRolloutTracker] = None,
+    ):
         self.run_id = run_id
         self.experiment_id = experiment_id
         self.client = client
+        self.rollout_tracker = rollout_tracker
         self.current_step: Optional[int] = None
         self.current_epoch = 0
 
     def on_step_begin(
         self, args, state: TrainerState, control: TrainerControl, **kwargs
     ):
-        if self.current_step != state.global_step:
-            self.current_step = state.global_step
-            self.current_epoch = 0
+        return None
 
     def on_log(
         self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs
     ):
-        if not logs:
-            return
-        self.current_epoch += 1
-
-        loss_val = float(logs.get("loss", 0.0))
-        # TRL may log KL under different names; fall back if needed.
-        kl_val = float(
-            logs.get("kl", logs.get("kl_divergence", logs.get("approx_kl", 0.0)))
-        )
-
-        session = self.client.Session()
-        try:
-            metric = EpochMetric(
-                id=str(uuid4()),
-                experiment_id=self.experiment_id,
-                run_id=self.run_id,
-                global_step=int(state.global_step),
-                epoch_number=int(self.current_epoch),
-                loss=loss_val,
-                kl=kl_val,
-            )
-            session.add(metric)
-            session.commit()
-        finally:
-            session.close()
+        return None
 
 
 class SFTTelemetryCallback(TrainerCallback):

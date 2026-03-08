@@ -94,12 +94,14 @@ class _RewardTelemetryCollector:
         experiment_id: str,
         run_id: str,
         reward_component_names: Sequence[str],
+        rollout_tracker: Any,
     ) -> None:
         self.client = client
         self.experiment_id = experiment_id
         self.run_id = run_id
         self.reward_component_names = list(reward_component_names)
         self.reward_weights = [1.0 for _ in self.reward_component_names]
+        self.rollout_tracker = rollout_tracker
         self._pending_batches: Dict[tuple[int, int, int], Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
@@ -167,6 +169,7 @@ class _RewardTelemetryCollector:
         completions = batch["completions"]
         component_rewards = batch["components"]
         weights = list(self.reward_weights)
+        rollout_window = self.rollout_tracker.start_rollout(step)
 
         session = self.client.Session()
         try:
@@ -197,6 +200,8 @@ class _RewardTelemetryCollector:
                         experiment_id=self.experiment_id,
                         run_id=self.run_id,
                         global_step=step,
+                        rollout_step=rollout_window.rollout_step,
+                        rollout_batch_id=rollout_window.rollout_batch_id,
                         prompt_text=str(prompt),
                     )
                 )
@@ -206,6 +211,8 @@ class _RewardTelemetryCollector:
                         experiment_id=self.experiment_id,
                         run_id=self.run_id,
                         global_step=step,
+                        rollout_step=rollout_window.rollout_step,
+                        rollout_batch_id=rollout_window.rollout_batch_id,
                         phase="rl",
                         prompt_text=str(prompt),
                         completion_text=str(completion),
@@ -389,8 +396,8 @@ class RLJob:
         from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
             begin_run_attempt,
-            GRPOEpochTelemetryCallback,
             ManualStopTelemetryCallback,
+            RLRolloutTracker,
             record_run_result,
             record_run_summary,
             resolve_required_telemetry_context,
@@ -500,12 +507,8 @@ class RLJob:
 
         telemetry_cfg = self.config.get("telemetry", {})
         manual_stop_every = int(telemetry_cfg.get("manual_stop_check_every_n_steps", 1))
+        rollout_tracker = RLRolloutTracker()
         callbacks = list(callbacks) + [
-            GRPOEpochTelemetryCallback(
-                run_id=run_name,
-                experiment_id=experiment_id,
-                client=telemetry_client,
-            ),
             ManualStopTelemetryCallback(
                 run_id=run_name,
                 experiment_id=experiment_id,
@@ -533,6 +536,7 @@ class RLJob:
                 experiment_id=experiment_id,
                 run_id=run_name,
                 reward_component_names=reward_component_names,
+                rollout_tracker=rollout_tracker,
             )
             reward_funcs = [
                 _wrap_reward_func_for_telemetry(
