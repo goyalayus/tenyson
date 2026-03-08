@@ -2,6 +2,11 @@ import time
 from typing import Any, Dict, List, Sequence
 from uuid import uuid4
 
+from tenyson.core.hf_adapter import (
+    download_hf_lora_adapter,
+    resolve_hf_lora_runtime_kwargs,
+    strict_load_hf_lora_adapter_weights,
+)
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -26,8 +31,38 @@ class EvalJob:
         model_cfg = self.config.get("model", {})
         vllm_cfg = self.config.get("vllm", {})
 
+        init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+        init_adapter = None
+        lora_runtime_kwargs: Dict[str, Any] | None = None
+        if init_repo:
+            init_rev = model_cfg.get("init_adapter_revision", "main")
+            init_adapter = download_hf_lora_adapter(
+                repo_id=init_repo, revision=init_rev
+            )
+            lora_runtime_kwargs = resolve_hf_lora_runtime_kwargs(
+                init_adapter,
+                expected_r=model_cfg.get("lora_r") if "lora_r" in model_cfg else None,
+                expected_alpha=model_cfg.get("lora_alpha")
+                if "lora_alpha" in model_cfg
+                else None,
+                expected_target_modules=model_cfg.get("lora_target_modules")
+                if "lora_target_modules" in model_cfg
+                else None,
+            )
+            print(
+                "[EvalJob] Using init adapter "
+                f"{init_repo}@{init_adapter.resolved_revision} "
+                f"({init_adapter.weights_in_repo}).",
+                flush=True,
+            )
+
         model_name = model_cfg.get("name", "Qwen/Qwen3-4B")
         seq_len = model_cfg.get("max_seq_length", 4096)
+        max_lora_rank = (
+            int(lora_runtime_kwargs["r"])
+            if lora_runtime_kwargs is not None
+            else int(model_cfg.get("lora_r", 16))
+        )
 
         print(f"[EvalJob] Loading model {model_name}...", flush=True)
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -35,7 +70,7 @@ class EvalJob:
             max_seq_length=seq_len,
             load_in_4bit=model_cfg.get("load_in_4bit", True),
             fast_inference=vllm_cfg.get("enabled", True),
-            max_lora_rank=model_cfg.get("lora_r", 16),
+            max_lora_rank=max_lora_rank,
             gpu_memory_utilization=vllm_cfg.get("gpu_memory_utilization", 0.9),
         )
 
@@ -43,43 +78,23 @@ class EvalJob:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
 
-        init_repo = model_cfg.get("init_adapter_repo")
-        if init_repo:
-            print(f"[EvalJob] Loading LoRA adapter from {init_repo}...", flush=True)
-            init_rev = model_cfg.get("init_adapter_revision", "main")
+        if init_adapter is not None and lora_runtime_kwargs is not None:
             model = FastLanguageModel.get_peft_model(
                 model,
-                r=model_cfg.get("lora_r", 16),
-                target_modules=model_cfg.get(
-                    "lora_target_modules", ["up_proj", "gate_proj", "down_proj"]
-                ),
-                lora_alpha=model_cfg.get("lora_alpha", 32),
-                lora_dropout=0,
-                bias="none",
+                r=int(lora_runtime_kwargs["r"]),
+                target_modules=lora_runtime_kwargs["target_modules"],
+                lora_alpha=lora_runtime_kwargs["lora_alpha"],
+                lora_dropout=lora_runtime_kwargs["lora_dropout"],
+                bias=lora_runtime_kwargs["bias"],
                 use_gradient_checkpointing="unsloth",
             )
-
-            from safetensors.torch import load_file
-            from huggingface_hub import hf_hub_download
-
-            adapter_path = hf_hub_download(
-                repo_id=init_repo,
-                filename="adapter_model.safetensors",
-                revision=init_rev,
+            loaded_tensors = strict_load_hf_lora_adapter_weights(model, init_adapter)
+            print(
+                "[EvalJob] Successfully loaded init adapter "
+                f"from {init_repo}@{init_adapter.resolved_revision} "
+                f"({loaded_tensors} tensors).",
+                flush=True,
             )
-            adapter_state = load_file(adapter_path)
-
-            def _maybe_default(k: str) -> str:
-                if ".lora_A.weight" in k:
-                    return k.replace(".lora_A.weight", ".lora_A.default.weight")
-                if ".lora_B.weight" in k:
-                    return k.replace(".lora_B.weight", ".lora_B.default.weight")
-                return k
-
-            model_state = model.state_dict()
-            mapped = {(_maybe_default(k)): v for k, v in adapter_state.items()}
-            mapped_state = {k: v for k, v in mapped.items() if k in model_state}
-            model.load_state_dict(mapped_state, strict=False)
 
         print("[EvalJob] Switching model to inference mode...", flush=True)
         model.train(False)

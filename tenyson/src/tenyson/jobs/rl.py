@@ -3,6 +3,11 @@ import time
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from tenyson.core.hf_adapter import (
+    download_hf_lora_adapter,
+    resolve_hf_lora_runtime_kwargs,
+    strict_load_hf_lora_adapter_weights,
+)
 from tenyson.core.hf_checkpoint import (
     download_hf_resume_checkpoint,
     resolve_hf_repo_revision,
@@ -55,6 +60,41 @@ class RLJob:
         train_cfg = self.config.get("training", {})
         vllm_cfg = self.config.get("vllm", {})
 
+        init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+        init_adapter = None
+        lora_runtime_kwargs: Dict[str, Any] = {
+            "r": lora_cfg.get("r", 16),
+            "target_modules": lora_cfg.get(
+                "target_modules", ["up_proj", "gate_proj", "down_proj"]
+            ),
+            "lora_alpha": lora_cfg.get("alpha", 32),
+            "lora_dropout": lora_cfg.get("dropout", 0.0),
+            "bias": lora_cfg.get("bias", "none"),
+        }
+        if init_repo:
+            init_rev = model_cfg.get("init_adapter_revision", "main")
+            init_adapter = download_hf_lora_adapter(
+                repo_id=init_repo, revision=init_rev
+            )
+            lora_runtime_kwargs = resolve_hf_lora_runtime_kwargs(
+                init_adapter,
+                expected_r=lora_cfg.get("r") if "r" in lora_cfg else None,
+                expected_alpha=lora_cfg.get("alpha") if "alpha" in lora_cfg else None,
+                expected_dropout=lora_cfg.get("dropout")
+                if "dropout" in lora_cfg
+                else None,
+                expected_bias=lora_cfg.get("bias") if "bias" in lora_cfg else None,
+                expected_target_modules=lora_cfg.get("target_modules")
+                if "target_modules" in lora_cfg
+                else None,
+            )
+            print(
+                "[RLJob] Using init adapter "
+                f"{init_repo}@{init_adapter.resolved_revision} "
+                f"({init_adapter.weights_in_repo}).",
+                flush=True,
+            )
+
         model_name = model_cfg.get("name", "Qwen/Qwen3-4B")
         seq_len = model_cfg.get("max_seq_length", 4096)
         load_in_4bit = model_cfg.get("load_in_4bit", True)
@@ -66,7 +106,7 @@ class RLJob:
             max_seq_length=seq_len,
             load_in_4bit=load_in_4bit,
             fast_inference=fast_inference,
-            max_lora_rank=lora_cfg.get("r", 16),
+            max_lora_rank=int(lora_runtime_kwargs["r"]),
             gpu_memory_utilization=vllm_cfg.get("gpu_memory_utilization", 0.9),
         )
 
@@ -77,52 +117,25 @@ class RLJob:
         print("[RLJob] Applying LoRA...", flush=True)
         model = FastLanguageModel.get_peft_model(
             model,
-            r=lora_cfg.get("r", 16),
-            target_modules=lora_cfg.get(
-                "target_modules", ["up_proj", "gate_proj", "down_proj"]
-            ),
-            lora_alpha=lora_cfg.get("alpha", 32),
-            lora_dropout=lora_cfg.get("dropout", 0.0),
-            bias=lora_cfg.get("bias", "none"),
+            r=int(lora_runtime_kwargs["r"]),
+            target_modules=lora_runtime_kwargs["target_modules"],
+            lora_alpha=lora_runtime_kwargs["lora_alpha"],
+            lora_dropout=lora_runtime_kwargs["lora_dropout"],
+            bias=lora_runtime_kwargs["bias"],
             use_gradient_checkpointing=lora_cfg.get(
                 "gradient_checkpointing", "unsloth"
             ),
             random_state=train_cfg.get("seed", 3407),
         )
 
-        # Optional: init adapter loading.
-        init_repo = model_cfg.get("init_adapter_repo")
-        if init_repo:
-            from safetensors.torch import load_file as safetensors_load_file
-            from huggingface_hub import hf_hub_download
-
-            print(f"[RLJob] Loading initial adapter from {init_repo}...", flush=True)
-            init_rev = model_cfg.get("init_adapter_revision", "main")
-            try:
-                adapter_weights_path = hf_hub_download(
-                    repo_id=init_repo,
-                    filename="adapter_model.safetensors",
-                    revision=init_rev,
-                )
-                adapter_state = safetensors_load_file(adapter_weights_path)
-
-                def _maybe_default(k: str) -> str:
-                    if ".lora_A.weight" in k:
-                        return k.replace(".lora_A.weight", ".lora_A.default.weight")
-                    if ".lora_B.weight" in k:
-                        return k.replace(".lora_B.weight", ".lora_B.default.weight")
-                    return k
-
-                model_state = model.state_dict()
-                mapped = {(_maybe_default(k)): v for k, v in adapter_state.items()}
-                mapped_state = {k: v for k, v in mapped.items() if k in model_state}
-                model.load_state_dict(mapped_state, strict=False)
-                print("[RLJob] Successfully loaded init adapter.", flush=True)
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"[RLJob] Warning: Failed to load init adapter from {init_repo}: {exc}",
-                    flush=True,
-                )
+        if init_adapter is not None:
+            loaded_tensors = strict_load_hf_lora_adapter_weights(model, init_adapter)
+            print(
+                "[RLJob] Successfully loaded init adapter "
+                f"from {init_repo}@{init_adapter.resolved_revision} "
+                f"({loaded_tensors} tensors).",
+                flush=True,
+            )
 
         model.train()
         return model, tokenizer
@@ -275,6 +288,7 @@ class RLJob:
                     prompts: List[Any], completions: List[Any], **kwargs
                 ) -> List[float]:
                     rewards = base_func(prompts, completions, **kwargs)
+                    session = None
                     try:
                         session = client.Session()
                         # Best-effort global_step; fall back to 0 if not provided.
@@ -303,7 +317,8 @@ class RLJob:
                             session.add(generation)
                         session.commit()
                     finally:
-                        session.close()
+                        if session is not None:
+                            session.close()
                     return rewards
 
                 return wrapped
