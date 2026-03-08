@@ -15,6 +15,8 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -76,6 +78,7 @@ class Generation(Base):
     prompt_text = Column(String)
     completion_text = Column(String)
     reward = Column(Float, nullable=True)
+    reward_components_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -203,7 +206,29 @@ class TelemetryClient:
         _validate_shared_db_url(self.db_url)
         self.engine = create_engine(self.db_url)
         Base.metadata.create_all(self.engine)
+        self._ensure_schema_columns()
         self.Session = sessionmaker(bind=self.engine)
+
+    def _ensure_schema_columns(self) -> None:
+        inspector = inspect(self.engine)
+        if "generations" not in inspector.get_table_names():
+            return
+        generation_columns = {
+            column["name"] for column in inspector.get_columns("generations")
+        }
+        if "reward_components_json" in generation_columns:
+            return
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE generations ADD COLUMN reward_components_json TEXT"
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            if "duplicate column" not in message and "already exists" not in message:
+                raise
 
 
 def begin_run_attempt(

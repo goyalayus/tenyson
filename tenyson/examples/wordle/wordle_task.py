@@ -562,6 +562,9 @@ def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
             rewards.append(float(scored["reward_total"] - scored["reward_format"]))
         return rewards
 
+    setattr(reward_format_exact, "tenyson_reward_name", "format_exact")
+    setattr(reward_wordle_strict, "tenyson_reward_name", "wordle_strict")
+
     return [reward_format_exact, reward_wordle_strict]
 
 

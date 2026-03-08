@@ -1,6 +1,11 @@
+import asyncio
+import functools
+import json
+import math
 import os
+import threading
 import time
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from tenyson.core.hf_adapter import (
@@ -19,6 +24,50 @@ from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
+def _resolve_reward_component_name(reward_func: Callable[..., Any], index: int) -> str:
+    explicit_name = getattr(reward_func, "tenyson_reward_name", None)
+    if explicit_name is not None:
+        explicit_name = str(explicit_name).strip()
+        if explicit_name:
+            return explicit_name
+
+    func_name = str(getattr(reward_func, "__name__", "") or "").strip()
+    if func_name and func_name != "wrapped" and func_name != "<lambda>":
+        return func_name
+
+    qualname = str(getattr(reward_func, "__qualname__", "") or "").strip()
+    if qualname and "<lambda>" not in qualname:
+        return qualname.split(".")[-1]
+
+    return f"reward_component_{index + 1}"
+
+
+def _resolve_reward_component_names(
+    reward_funcs: Sequence[Callable[..., Any]],
+) -> List[str]:
+    names: List[str] = []
+    seen: set[str] = set()
+    for index, reward_func in enumerate(reward_funcs):
+        name = _resolve_reward_component_name(reward_func, index)
+        if name in seen:
+            raise ValueError(
+                "Reward function names must be unique for telemetry. Set "
+                "`tenyson_reward_name` on task reward functions to disambiguate them."
+            )
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _normalize_reward_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    numeric_value = float(value)
+    if math.isnan(numeric_value):
+        return None
+    return numeric_value
+
+
 def _resolve_reward_logging_step(kwargs: Dict[str, Any]) -> int:
     trainer_state = kwargs.get("trainer_state")
     if trainer_state is not None:
@@ -35,6 +84,182 @@ def _resolve_reward_logging_step(kwargs: Dict[str, Any]) -> int:
         return int(explicit_step)
 
     return 0
+
+
+class _RewardTelemetryCollector:
+    def __init__(
+        self,
+        *,
+        client: Any,
+        experiment_id: str,
+        run_id: str,
+        reward_component_names: Sequence[str],
+    ) -> None:
+        self.client = client
+        self.experiment_id = experiment_id
+        self.run_id = run_id
+        self.reward_component_names = list(reward_component_names)
+        self.reward_weights = [1.0 for _ in self.reward_component_names]
+        self._pending_batches: Dict[tuple[int, int, int], Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def set_reward_weights(self, reward_weights: Any) -> None:
+        if reward_weights is None:
+            self.reward_weights = [1.0 for _ in self.reward_component_names]
+            return
+        if hasattr(reward_weights, "tolist"):
+            reward_weights = reward_weights.tolist()
+        weights = [float(weight) for weight in reward_weights]
+        if len(weights) != len(self.reward_component_names):
+            raise ValueError(
+                "Reward weight count does not match reward function count for telemetry."
+            )
+        self.reward_weights = weights
+
+    def record_component(
+        self,
+        *,
+        component_name: str,
+        prompts: List[Any],
+        completions: List[Any],
+        rewards: Sequence[Any],
+        kwargs: Dict[str, Any],
+    ) -> None:
+        reward_values = [_normalize_reward_value(value) for value in rewards]
+        if len(reward_values) != len(prompts) or len(prompts) != len(completions):
+            raise ValueError(
+                "Reward telemetry expects prompts, completions, and rewards to have "
+                "the same length."
+            )
+
+        batch_key = (
+            _resolve_reward_logging_step(kwargs),
+            id(prompts),
+            id(completions),
+        )
+        completed_batch: Optional[Dict[str, Any]] = None
+        with self._lock:
+            batch = self._pending_batches.setdefault(
+                batch_key,
+                {
+                    "step": batch_key[0],
+                    "prompts": list(prompts),
+                    "completions": list(completions),
+                    "components": {},
+                },
+            )
+            if component_name in batch["components"]:
+                raise ValueError(
+                    f"Reward telemetry received duplicate component '{component_name}' for one batch."
+                )
+            batch["components"][component_name] = reward_values
+            if len(batch["components"]) == len(self.reward_component_names):
+                completed_batch = self._pending_batches.pop(batch_key)
+
+        if completed_batch is not None:
+            self._flush_completed_batch(completed_batch)
+
+    def _flush_completed_batch(self, batch: Dict[str, Any]) -> None:
+        from tenyson.core.telemetry import Generation, Rollout
+
+        step = int(batch["step"])
+        prompts = batch["prompts"]
+        completions = batch["completions"]
+        component_rewards = batch["components"]
+        weights = list(self.reward_weights)
+
+        session = self.client.Session()
+        try:
+            for index, (prompt, completion) in enumerate(zip(prompts, completions)):
+                weighted_components: Dict[str, Optional[float]] = {}
+                total_reward = 0.0
+                has_reward = False
+                for component_name, weight in zip(
+                    self.reward_component_names,
+                    weights,
+                    strict=True,
+                ):
+                    component_values = component_rewards[component_name]
+                    component_value = component_values[index]
+                    weighted_value = (
+                        None
+                        if component_value is None
+                        else float(component_value) * float(weight)
+                    )
+                    weighted_components[component_name] = weighted_value
+                    if weighted_value is not None:
+                        total_reward += weighted_value
+                        has_reward = True
+
+                session.add(
+                    Rollout(
+                        id=str(uuid4()),
+                        experiment_id=self.experiment_id,
+                        run_id=self.run_id,
+                        global_step=step,
+                        prompt_text=str(prompt),
+                    )
+                )
+                session.add(
+                    Generation(
+                        id=str(uuid4()),
+                        experiment_id=self.experiment_id,
+                        run_id=self.run_id,
+                        global_step=step,
+                        phase="rl",
+                        prompt_text=str(prompt),
+                        completion_text=str(completion),
+                        reward=(total_reward if has_reward else None),
+                        reward_components_json=json.dumps(
+                            weighted_components,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    )
+                )
+            session.commit()
+        finally:
+            session.close()
+
+
+def _wrap_reward_func_for_telemetry(
+    base_func: Callable[..., Any],
+    *,
+    component_name: str,
+    collector: _RewardTelemetryCollector,
+) -> Callable[..., Any]:
+    if asyncio.iscoroutinefunction(base_func):
+
+        @functools.wraps(base_func)
+        async def wrapped(
+            prompts: List[Any], completions: List[Any], **kwargs: Any
+        ) -> Any:
+            rewards = await base_func(prompts, completions, **kwargs)
+            collector.record_component(
+                component_name=component_name,
+                prompts=prompts,
+                completions=completions,
+                rewards=rewards,
+                kwargs=kwargs,
+            )
+            return rewards
+
+    else:
+
+        @functools.wraps(base_func)
+        def wrapped(prompts: List[Any], completions: List[Any], **kwargs: Any) -> Any:
+            rewards = base_func(prompts, completions, **kwargs)
+            collector.record_component(
+                component_name=component_name,
+                prompts=prompts,
+                completions=completions,
+                rewards=rewards,
+                kwargs=kwargs,
+            )
+            return rewards
+
+    setattr(wrapped, "tenyson_reward_name", component_name)
+    return wrapped
 
 
 class RLJob:
@@ -165,12 +390,10 @@ class RLJob:
         from tenyson.core.telemetry import (
             begin_run_attempt,
             GRPOEpochTelemetryCallback,
-            Generation,
             ManualStopTelemetryCallback,
             record_run_result,
             record_run_summary,
             resolve_required_telemetry_context,
-            Rollout,
             TelemetryClient,
             WandBUrlTelemetryCallback,
         )
@@ -302,54 +525,26 @@ class RLJob:
                 ),
             ]
 
-        # Wrap the first reward function to log per-prompt/per-completion rewards
-        # into the Generation / Rollout tables. We only wrap the first entry to
-        # avoid double-logging if users supply multiple reward functions.
+        reward_telemetry_collector = None
         if reward_funcs:
-
-            def make_wrapped(base_func, client: TelemetryClient, run_id: str):  # type: ignore[override]
-                def wrapped(
-                    prompts: List[Any], completions: List[Any], **kwargs
-                ) -> List[float]:
-                    rewards = base_func(prompts, completions, **kwargs)
-                    session = None
-                    try:
-                        session = client.Session()
-                        step = _resolve_reward_logging_step(kwargs)
-                        for prompt, completion, reward in zip(
-                            prompts, completions, rewards
-                        ):
-                            rollout = Rollout(
-                                id=str(uuid4()),
-                                experiment_id=experiment_id,
-                                run_id=run_id,
-                                global_step=step,
-                                prompt_text=str(prompt),
-                            )
-                            session.add(rollout)
-                            generation = Generation(
-                                id=str(uuid4()),
-                                experiment_id=experiment_id,
-                                run_id=run_id,
-                                global_step=step,
-                                phase="rl",
-                                prompt_text=str(prompt),
-                                completion_text=str(completion),
-                                reward=float(reward),
-                            )
-                            session.add(generation)
-                        session.commit()
-                    finally:
-                        if session is not None:
-                            session.close()
-                    return rewards
-
-                return wrapped
-
-            # Replace only the first reward function with the wrapped version.
+            reward_component_names = _resolve_reward_component_names(reward_funcs)
+            reward_telemetry_collector = _RewardTelemetryCollector(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                reward_component_names=reward_component_names,
+            )
             reward_funcs = [
-                make_wrapped(reward_funcs[0], telemetry_client, run_name),
-                *reward_funcs[1:],
+                _wrap_reward_func_for_telemetry(
+                    reward_func,
+                    component_name=component_name,
+                    collector=reward_telemetry_collector,
+                )
+                for reward_func, component_name in zip(
+                    reward_funcs,
+                    reward_component_names,
+                    strict=True,
+                )
             ]
 
         trainer = GRPOTrainer(
@@ -360,6 +555,10 @@ class RLJob:
             processing_class=tokenizer,
             callbacks=callbacks,
         )
+        if reward_telemetry_collector is not None:
+            reward_telemetry_collector.set_reward_weights(
+                getattr(trainer, "reward_weights", None)
+            )
 
         trainable_count = sum(
             p.numel() for p in trainer.model.parameters() if p.requires_grad
