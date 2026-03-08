@@ -392,36 +392,40 @@ def _validate_eval_exact_turns(turns: Any) -> List[int]:
     return sorted(list(set(parsed)))
 
 
+
+def _load_sft_train_eval_split(
+    config: Dict[str, Any],
+) -> Tuple[Dataset, Optional[Dataset]]:
+    from datasets import load_dataset
+
+    dataset_name = config.get("task", {}).get(
+        "sft_dataset", "goyalayus/wordle-reasoning-sft-prefix-keep-think"
+    )
+    ds = load_dataset(dataset_name, split="train")
+
+    val_size = config.get("training", {}).get("val_size", 0)
+    if val_size <= 0:
+        return ds, None
+
+    split_seed = int(config.get("training", {}).get("seed", 3407))
+    split = ds.train_test_split(test_size=val_size, seed=split_seed)
+    return split["train"], split["test"]
+
+
 # ==============================================================================
 # SFT PLUGIN HOOKS
 # ==============================================================================
 
 def get_sft_dataset(config: Dict[str, Any], tokenizer: Any) -> Dataset:
     """Returns the training dataset for SFT."""
-    from datasets import load_dataset
-    dataset_name = config.get("task", {}).get("sft_dataset", "goyalayus/wordle-reasoning-sft-prefix-keep-think")
-    
-    # Example logic: load a dataset with a 'messages' column
-    ds = load_dataset(dataset_name, split="train")
-    
-    # Val split if requested
-    val_size = config.get("training", {}).get("val_size", 0)
-    if val_size > 0:
-        ds = ds.train_test_split(test_size=val_size)["train"]
-        
-    return ds
+    train_dataset, _ = _load_sft_train_eval_split(config)
+    return train_dataset
 
 
-def get_sft_eval_dataset(config: Dict[str, Any], tokenizer: Any) -> Dataset:
+def get_sft_eval_dataset(config: Dict[str, Any], tokenizer: Any) -> Optional[Dataset]:
     """Returns the evaluation dataset for SFT."""
-    from datasets import load_dataset
-    dataset_name = config.get("task", {}).get("sft_dataset", "goyalayus/wordle-reasoning-sft-prefix-keep-think")
-    
-    ds = load_dataset(dataset_name, split="train")
-    val_size = config.get("training", {}).get("val_size", 0)
-    if val_size > 0:
-        return ds.train_test_split(test_size=val_size)["test"]
-    return None
+    _, eval_dataset = _load_sft_train_eval_split(config)
+    return eval_dataset
 
 
 def get_sft_formatting_func(config: Dict[str, Any], tokenizer: Any):
@@ -613,7 +617,7 @@ class WordleTask(TaskPlugin):
     def get_sft_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
         return get_sft_dataset(config, tokenizer)
 
-    def get_sft_eval_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
+    def get_sft_eval_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Optional[Dataset]:
         return get_sft_eval_dataset(config, tokenizer)
 
     def get_sft_formatting_func(self, config: Dict[str, Any], tokenizer: Any):
