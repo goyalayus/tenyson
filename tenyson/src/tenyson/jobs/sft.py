@@ -1,7 +1,9 @@
+import inspect
 import os
 import time
 from typing import Any, Dict
 
+from tenyson.core.hf_checkpoint import download_hf_resume_checkpoint
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -70,7 +72,7 @@ class SFTJob:
         require_gpu_provider_runtime()
         from transformers import EarlyStoppingCallback
         from trl import SFTConfig, SFTTrainer
-        from tenyson.core.hub_push import PeriodicHubPushCallback, ensure_hf_repo
+        from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
             ManualStopTelemetryCallback,
             record_run_result,
@@ -122,7 +124,7 @@ class SFTJob:
 
         formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
 
-        training_args = SFTConfig(
+        cfg_kwargs: Dict[str, Any] = dict(
             output_dir=output_dir,
             max_length=seq_len,
             max_steps=train_cfg.get("max_steps", 1000),
@@ -136,9 +138,12 @@ class SFTJob:
             lr_scheduler_type=train_cfg.get("lr_scheduler_type", "linear"),
             warmup_steps=train_cfg.get("warmup_steps", 10),
             logging_steps=train_cfg.get("logging_steps", 1),
-            save_strategy="no",
-            save_steps=train_cfg.get("save_steps", 100),
+            save_strategy="steps",
+            save_steps=hf_push_every_steps,
             save_total_limit=train_cfg.get("save_total_limit", 2),
+            push_to_hub=True,
+            hub_model_id=push_repo_id,
+            hub_strategy="checkpoint",
             optim=train_cfg.get("optim", "adamw_8bit"),
             report_to=train_cfg.get("report_to", "none"),
             run_name=run_name,
@@ -149,6 +154,26 @@ class SFTJob:
                 if not formatting_func
                 else None
             ),
+        )
+        accepted = set(inspect.signature(SFTConfig.__init__).parameters.keys())
+        required_hub_fields = {
+            "save_strategy",
+            "save_steps",
+            "push_to_hub",
+            "hub_model_id",
+            "hub_strategy",
+        }
+        missing_hub_fields = required_hub_fields - accepted
+        if missing_hub_fields:
+            raise RuntimeError(
+                "Installed SFTConfig does not expose required Hub checkpoint args "
+                f"for full-state push: {sorted(missing_hub_fields)}. "
+                "Upgrade TRL/Transformers runtime on the worker."
+            )
+        if "save_only_model" in accepted:
+            cfg_kwargs["save_only_model"] = False
+        training_args = SFTConfig(
+            **{k: v for k, v in cfg_kwargs.items() if k in accepted}
         )
 
         if eval_dataset is not None:
@@ -194,14 +219,6 @@ class SFTJob:
 
         callbacks = []
         ensure_hf_repo(push_repo_id)
-        callbacks.append(
-            PeriodicHubPushCallback(
-                repo_id=push_repo_id,
-                run_name=run_name,
-                push_every_steps=hf_push_every_steps,
-                tokenizer=tokenizer,
-            )
-        )
 
         callbacks.append(
             SFTTelemetryCallback(
@@ -254,22 +271,13 @@ class SFTJob:
         resume_ref = train_cfg.get("resume_from_checkpoint")
         if resume_ref:
             resume_ref = str(resume_ref).strip()
-            if ":" not in resume_ref:
-                raise ValueError(
-                    "training.resume_from_checkpoint must be of form 'repo_id:revision'. "
-                    f"Local checkpoint paths are not supported: {resume_ref}"
-                )
             try:
-                from huggingface_hub import snapshot_download
-
-                repo_id, revision = resume_ref.split(":", 1)
-                if not repo_id or not revision:
-                    raise ValueError("Both repo_id and revision are required.")
-                resume_path = snapshot_download(repo_id=repo_id, revision=revision)
+                resume_path = download_hf_resume_checkpoint(resume_ref)
             except Exception as e:  # noqa: BLE001
                 raise ValueError(
                     "training.resume_from_checkpoint must be a valid Hugging Face "
-                    f"reference 'repo_id:revision'; got {resume_ref}: {e}"
+                    "trainer checkpoint reference 'repo_id:revision'; "
+                    f"got {resume_ref}: {e}"
                 ) from e
             print(f"[SFTJob] Resuming from checkpoint: {resume_path}", flush=True)
 

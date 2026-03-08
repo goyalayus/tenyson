@@ -40,9 +40,9 @@ print(result.metrics, result.wandb_url)
 
 - **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
 - **GPU runner package setup**: cloud managers install runtime dependencies with `pip install unsloth vllm huggingface_hub safetensors pyyaml sqlalchemy 'psycopg[binary]' wandb` (we intentionally do not install `trl`/`transformers`/`datasets` directly because Unsloth pulls them transitively).
-- **HF push cadence (SFT/RL)**: set `training.hf_repo_base` (required) to enable periodic pushes to a stable repo id `<hf_repo_base>-<run_name>`. Set `training.hf_push_every_steps` (defaults to `training.save_steps`) to control cadence.
+- **HF push cadence (SFT/RL)**: set `training.hf_repo_base` (required) to push full trainer checkpoints to a stable repo id `<hf_repo_base>-<run_name>`. `training.hf_push_every_steps` controls checkpoint save+push cadence.
 - **Run naming contract**: `training.run_name` (SFT/RL) and `evaluation.run_name` (Eval) are mandatory and must be explicit (defaults like `sft_job`/`rl_job`/`eval_job` are rejected). Within one `run_pipeline(...)` execution, run names must be unique.
-- **Checkpoint mode**: SFT/RL are Hub-only. Local trainer checkpoints are disabled. Resume is supported only via `training.resume_from_checkpoint: "repo_id:revision"`.
+- **Checkpoint mode**: SFT/RL use Hub-managed trainer checkpoints (includes optimizer/scheduler/trainer state). Resume uses `training.resume_from_checkpoint: "repo_id:revision"` and automatically restores from `last-checkpoint` (or latest `checkpoint-*`) in that snapshot.
 - **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest Hub revision), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
 
 ## wordle research workflow (current example)
@@ -191,7 +191,7 @@ Semantics:
 
 - `metric_for_best_model = "eval_loss"` and `greater_is_better = false`;
 - improvement means the best `eval_loss` decreases by more than `early_stopping_min_delta`;
-- if `eval_loss` is constant or increasing for `early_stopping_patience` evaluations, training stops. Since checkpoints are Hub-only, latest pushed adapters are the recovery path.
+- if `eval_loss` is constant or increasing for `early_stopping_patience` evaluations, training stops. Since checkpoints are Hub-managed, latest pushed full trainer checkpoint on HF is the recovery path.
 
 ## runner cli
 

@@ -36,7 +36,7 @@ training:
   report_to: ["wandb"]
   # Stable repo per run lineage: <hf_repo_base>-<run_name>. Replace with your HF username.
   hf_repo_base: "username/wordle-lora"
-  # Push adapter/tokenizer to Hub every N optimizer steps.
+  # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 20
   val_size: 100
   # Early stopping based on eval_loss: stop if constant or increasing for N evals.

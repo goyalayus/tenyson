@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from tenyson.core.hf_checkpoint import download_hf_resume_checkpoint
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -123,7 +124,7 @@ class RLJob:
     def run(self) -> JobResult:
         require_gpu_provider_runtime()
         from trl import GRPOConfig, GRPOTrainer
-        from tenyson.core.hub_push import PeriodicHubPushCallback, ensure_hf_repo
+        from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
             GRPOEpochTelemetryCallback,
             Generation,
@@ -201,25 +202,37 @@ class RLJob:
             max_completion_length=train_cfg.get("max_completion_length", 2048),
             bf16=False,
             fp16=False,
-            save_steps=train_cfg.get("save_steps", 100),
-            save_strategy="no",
+            save_steps=hf_push_every_steps,
+            save_strategy="steps",
             save_total_limit=train_cfg.get("save_total_limit", 2),
+            push_to_hub=True,
+            hub_model_id=push_repo_id,
+            hub_strategy="checkpoint",
         )
 
         import inspect
 
         accepted = set(inspect.signature(GRPOConfig.__init__).parameters.keys())
+        required_hub_fields = {
+            "save_strategy",
+            "save_steps",
+            "push_to_hub",
+            "hub_model_id",
+            "hub_strategy",
+        }
+        missing_hub_fields = required_hub_fields - accepted
+        if missing_hub_fields:
+            raise RuntimeError(
+                "Installed GRPOConfig does not expose required Hub checkpoint args "
+                f"for full-state push: {sorted(missing_hub_fields)}. "
+                "Upgrade TRL/Transformers runtime on the worker."
+            )
+        if "save_only_model" in accepted:
+            cfg_kwargs["save_only_model"] = False
         grpo_args = GRPOConfig(**{k: v for k, v in cfg_kwargs.items() if k in accepted})
 
         callbacks = self.task.get_rl_callbacks(self.config, tokenizer, str(output_dir))
-        callbacks = list(callbacks) + [
-            PeriodicHubPushCallback(
-                repo_id=push_repo_id,
-                run_name=run_name,
-                push_every_steps=hf_push_every_steps,
-                tokenizer=tokenizer,
-            )
-        ]
+        callbacks = list(callbacks)
 
         telemetry_cfg = self.config.get("telemetry", {})
         manual_stop_every = int(
@@ -319,22 +332,13 @@ class RLJob:
         resume_ref = train_cfg.get("resume_from_checkpoint")
         if resume_ref:
             resume_ref = str(resume_ref).strip()
-            if ":" not in resume_ref:
-                raise ValueError(
-                    "training.resume_from_checkpoint must be of form 'repo_id:revision'. "
-                    f"Local checkpoint paths are not supported: {resume_ref}"
-                )
             try:
-                from huggingface_hub import snapshot_download
-
-                repo_id, revision = resume_ref.split(":", 1)
-                if not repo_id or not revision:
-                    raise ValueError("Both repo_id and revision are required.")
-                resume_path = snapshot_download(repo_id=repo_id, revision=revision)
+                resume_path = download_hf_resume_checkpoint(resume_ref)
             except Exception as e:  # noqa: BLE001
                 raise ValueError(
                     "training.resume_from_checkpoint must be a valid Hugging Face "
-                    f"reference 'repo_id:revision'; got {resume_ref}: {e}"
+                    "trainer checkpoint reference 'repo_id:revision'; "
+                    f"got {resume_ref}: {e}"
                 ) from e
             print(f"[RLJob] Resuming from checkpoint: {resume_path}", flush=True)
 
