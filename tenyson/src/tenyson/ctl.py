@@ -1,10 +1,8 @@
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
-from uuid import uuid4
 
-from tenyson.core.telemetry import RunControl, TelemetryClient
+from tenyson.core.control import request_stop
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
@@ -24,32 +22,12 @@ def _cmd_stop(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    client = TelemetryClient(db_url=db_url)
-    session = client.Session()
-    try:
-        query = (
-            session.query(RunControl)
-            .filter(RunControl.run_id == args.run_id)
-            .filter(RunControl.experiment_id == experiment_id)
-        )
-        control_row = query.order_by(RunControl.updated_at.desc()).first()
-        now = datetime.now(timezone.utc)
-        if control_row is None:
-            control_row = RunControl(
-                id=str(uuid4()),
-                experiment_id=experiment_id,
-                run_id=args.run_id,
-                stop_requested=True,
-                updated_at=now,
-            )
-            session.add(control_row)
-        else:
-            control_row.stop_requested = True
-            control_row.updated_at = now
-
-        session.commit()
-    finally:
-        session.close()
+    request_stop(
+        db_url=db_url,
+        run_id=args.run_id,
+        experiment_id=experiment_id,
+        create_if_missing=True,
+    )
 
     print(
         (

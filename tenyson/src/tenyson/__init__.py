@@ -7,7 +7,7 @@ from tenyson.cloud.modal import ModalManager
 from tenyson.cloud.manager import CloudManager
 from tenyson.reporting.builder import ReportBuilder
 from tenyson.loader import load_config, load_task, load_task_from_spec
-from tenyson.pipeline import run_pipeline, get_latest_checkpoint_dir
+from tenyson.pipeline import run_pipeline
 
 __all__ = [
     "SFTJob",
@@ -22,5 +22,4 @@ __all__ = [
     "load_task",
     "load_task_from_spec",
     "run_pipeline",
-    "get_latest_checkpoint_dir",
 ]
