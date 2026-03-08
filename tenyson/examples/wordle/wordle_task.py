@@ -47,7 +47,10 @@ TURN_LINE_RE = re.compile(r"Turn\s*([0-9]+):\s*\[([a-zA-Z]{5})\]\s*->\s*([GYX\s]
 def render_user_prompt(history_rows: Sequence[Tuple[str, str]]) -> str:
     turn_idx = len(history_rows) + 1
     attempts_left = max(0, 6 - turn_idx)
-    lines = [f"Turn {i}: [{guess}] -> {feedback}" for i, (guess, feedback) in enumerate(history_rows, start=1)]
+    lines = [
+        f"Turn {i}: [{guess}] -> {feedback}"
+        for i, (guess, feedback) in enumerate(history_rows, start=1)
+    ]
     history_block = "\n".join(lines)
     return (
         USER_PROMPT_PREFIX
@@ -61,12 +64,18 @@ def render_user_prompt(history_rows: Sequence[Tuple[str, str]]) -> str:
 
 def build_prompt_text(history_rows: Sequence[Tuple[str, str]]) -> str:
     # Force the model to begin its completion inside a <think> block.
-    return SYSTEM_PROMPT + "\n\n" + render_user_prompt(history_rows=history_rows) + "\n\n<think>"
+    return (
+        SYSTEM_PROMPT
+        + "\n\n"
+        + render_user_prompt(history_rows=history_rows)
+        + "\n\n<think>"
+    )
 
 
 # ==============================================================================
 # WORDLE LOGIC (FEEDBACK & CONSTRAINTS)
 # ==============================================================================
+
 
 def compute_feedback(secret: str, guess: str) -> str:
     result = ["X"] * 5
@@ -144,7 +153,9 @@ class AggregatedConstraints:
     max_counts: Dict[str, int]
 
 
-def aggregate_constraints(history_rows: Sequence[Tuple[str, str]]) -> AggregatedConstraints:
+def aggregate_constraints(
+    history_rows: Sequence[Tuple[str, str]],
+) -> AggregatedConstraints:
     green_positions: Dict[int, str] = {}
     yellow_banned_positions: Dict[str, set] = defaultdict(set)
     yellow_letters: set = set()
@@ -157,7 +168,9 @@ def aggregate_constraints(history_rows: Sequence[Tuple[str, str]]) -> Aggregated
         for i, ch in cs.green_positions.items():
             prev = green_positions.get(i)
             if prev is not None and prev != ch:
-                raise ValueError(f"Contradictory green constraints at pos {i}: {prev} vs {ch}")
+                raise ValueError(
+                    f"Contradictory green constraints at pos {i}: {prev} vs {ch}"
+                )
             green_positions[i] = ch
 
         for ch, posset in cs.yellow_banned_positions.items():
@@ -181,7 +194,9 @@ def aggregate_constraints(history_rows: Sequence[Tuple[str, str]]) -> Aggregated
     )
 
 
-def compute_sat_count(guess: str, ac: AggregatedConstraints) -> Tuple[int, Dict[str, int], Dict[str, int]]:
+def compute_sat_count(
+    guess: str, ac: AggregatedConstraints
+) -> Tuple[int, Dict[str, int], Dict[str, int]]:
     gcount = Counter(guess)
     green_guaranteed = Counter(ac.green_positions.values())
 
@@ -235,7 +250,13 @@ def _count_completion_tokens(completion_text: str, tokenizer: Any) -> int:
     return int(len(tokenizer.encode(completion_text, add_special_tokens=False)))
 
 
-def score_completion(prompt_text: str, completion_text: str, valid_set: set, task_cfg: Dict[str, Any], tokenizer: Any) -> Dict[str, Any]:
+def score_completion(
+    prompt_text: str,
+    completion_text: str,
+    valid_set: set,
+    task_cfg: Dict[str, Any],
+    tokenizer: Any,
+) -> Dict[str, Any]:
     history_rows = _parse_history_from_prompt(prompt_text)
     history_guesses = {g for g, _ in history_rows}
     history_len = max(1, len(history_rows))
@@ -245,7 +266,7 @@ def score_completion(prompt_text: str, completion_text: str, valid_set: set, tas
     dict_reward = float(rewards_cfg.get("dict", 0.2))
     repeat_penalty = float(rewards_cfg.get("repeat_penalty", -0.5))
     constraint_reward = float(rewards_cfg.get("constraint", 0.1))
-    
+
     max_output_tokens = int(rewards_cfg.get("max_output_tokens", 2048))
     overlength_penalty = float(rewards_cfg.get("overlength_penalty", -0.5))
 
@@ -276,14 +297,20 @@ def score_completion(prompt_text: str, completion_text: str, valid_set: set, tas
 
     ac = aggregate_constraints(history_rows)
     sat_count, totals, sats = compute_sat_count(guess, ac)
-    
+
     # Normalize by number of prior turns to reduce reward variance across prompts.
     reward_constraints = constraint_reward * float(sat_count) / float(history_len)
     reward_dict = dict_reward if (guess in valid_set) else 0.0
     is_repeat = int(guess in history_guesses)
     reward_repeat = repeat_penalty if is_repeat else 0.0
-    
-    reward_total = format_reward + reward_dict + reward_repeat + reward_constraints + reward_overlength
+
+    reward_total = (
+        format_reward
+        + reward_dict
+        + reward_repeat
+        + reward_constraints
+        + reward_overlength
+    )
 
     return {
         "strict_ok": True,
@@ -308,21 +335,28 @@ def score_completion(prompt_text: str, completion_text: str, valid_set: set, tas
 # DATASET GENERATION
 # ==============================================================================
 
+
 def get_wordlists(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     paths = config.get("task", {}).get("wordlists", {})
     base_dir = Path(__file__).parent / "wordlists"
-    
+
     sol_path = paths.get("solutions", str(base_dir / "wordle_solutions.txt"))
     allow_path = paths.get("allowed", str(base_dir / "wordle_allowed_guesses.txt"))
-    
+
     def load(p):
         with open(p) as f:
-            return [w.strip().lower() for w in f if len(w.strip()) == 5 and w.strip().isalpha()]
-    
+            return [
+                w.strip().lower()
+                for w in f
+                if len(w.strip()) == 5 and w.strip().isalpha()
+            ]
+
     return load(sol_path), load(allow_path)
 
 
-def sample_history_rows(valid_words: Sequence[str], secret: str, history_len: int, rng: random.Random) -> List[Tuple[str, str]]:
+def sample_history_rows(
+    valid_words: Sequence[str], secret: str, history_len: int, rng: random.Random
+) -> List[Tuple[str, str]]:
     history: List[Tuple[str, str]] = []
     used = set()
     for _ in range(history_len):
@@ -343,43 +377,51 @@ def sample_history_rows(valid_words: Sequence[str], secret: str, history_len: in
     return history
 
 
-def generate_synthetic_wordle_dataset(config: Dict[str, Any], seed: int, n_samples: int) -> Dataset:
+def generate_synthetic_wordle_dataset(
+    config: Dict[str, Any], seed: int, n_samples: int
+) -> Dataset:
     solutions, allowed = get_wordlists(config)
     valid_words = sorted(list(set(solutions) | set(allowed)))
-    
+
     rng = random.Random(seed)
     task_cfg = config.get("task", {})
     min_turns = task_cfg.get("min_history_turns", 1)
     max_turns = task_cfg.get("max_history_turns", 4)
-    
+
     rows = []
-    
+
     i = 0
     while len(rows) < n_samples:
         secret = rng.choice(solutions)
         history_len = rng.randint(min_turns, max_turns)
-        history_rows = sample_history_rows(valid_words=valid_words, secret=secret, history_len=history_len, rng=rng)
-        
+        history_rows = sample_history_rows(
+            valid_words=valid_words, secret=secret, history_len=history_len, rng=rng
+        )
+
         if len(history_rows) != history_len:
             continue
-            
+
         prompt_text = build_prompt_text(history_rows=history_rows)
-        
-        rows.append({
-            "id": i,
-            "secret": secret,
-            "history_len": history_len,
-            "history_rows": history_rows,
-            "prompt": prompt_text,
-        })
+
+        rows.append(
+            {
+                "id": i,
+                "secret": secret,
+                "history_len": history_len,
+                "history_rows": history_rows,
+                "prompt": prompt_text,
+            }
+        )
         i += 1
-        
+
     return Dataset.from_list(rows)
 
 
 def _validate_eval_exact_turns(turns: Any) -> List[int]:
     if not isinstance(turns, list) or not turns:
-        raise ValueError("task.eval_exact_turns must be a non-empty list of turns (1..5).")
+        raise ValueError(
+            "task.eval_exact_turns must be a non-empty list of turns (1..5)."
+        )
     parsed: List[int] = []
     for turn in turns:
         if not isinstance(turn, int):
@@ -387,10 +429,11 @@ def _validate_eval_exact_turns(turns: Any) -> List[int]:
                 f"task.eval_exact_turns must contain integers only, got {type(turn).__name__}."
             )
         if turn < 1 or turn > 5:
-            raise ValueError(f"task.eval_exact_turns values must be within 1..5, got {turn}.")
+            raise ValueError(
+                f"task.eval_exact_turns values must be within 1..5, got {turn}."
+            )
         parsed.append(turn)
     return sorted(list(set(parsed)))
-
 
 
 def _load_sft_train_eval_split(
@@ -416,6 +459,7 @@ def _load_sft_train_eval_split(
 # SFT PLUGIN HOOKS
 # ==============================================================================
 
+
 def get_sft_dataset(config: Dict[str, Any], tokenizer: Any) -> Dataset:
     """Returns the training dataset for SFT."""
     train_dataset, _ = _load_sft_train_eval_split(config)
@@ -430,16 +474,22 @@ def get_sft_eval_dataset(config: Dict[str, Any], tokenizer: Any) -> Optional[Dat
 
 def get_sft_formatting_func(config: Dict[str, Any], tokenizer: Any):
     """Applies the chat template during SFT."""
+
     def format_conversation(example):
         messages = example["messages"]
         if messages and isinstance(messages[0], list):
             return [
-                tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=False)
+                tokenizer.apply_chat_template(
+                    m, tokenize=False, add_generation_prompt=False
+                )
                 for m in messages
             ]
         return [
-            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
         ]
+
     return format_conversation
 
 
@@ -447,17 +497,19 @@ def get_sft_formatting_func(config: Dict[str, Any], tokenizer: Any):
 # RL PLUGIN HOOKS
 # ==============================================================================
 
+
 def get_rl_dataset(config: Dict[str, Any]) -> Dataset:
     """Returns the dataset for GRPO training (just prompts)."""
     task_cfg = config.get("task", {})
     n_samples = task_cfg.get("synthetic_samples", 1024)
     seed = config.get("training", {}).get("seed", 3407)
-    
+
     return generate_synthetic_wordle_dataset(config, seed, n_samples)
 
 
 def _extract_prompt_text(prompt_obj: Any) -> str:
-    if isinstance(prompt_obj, str): return prompt_obj
+    if isinstance(prompt_obj, str):
+        return prompt_obj
     if isinstance(prompt_obj, dict):
         c = prompt_obj.get("content")
         return c if isinstance(c, str) else json.dumps(prompt_obj)
@@ -465,7 +517,8 @@ def _extract_prompt_text(prompt_obj: Any) -> str:
 
 
 def _extract_completion_text(completion_obj: Any) -> str:
-    if isinstance(completion_obj, str): return completion_obj
+    if isinstance(completion_obj, str):
+        return completion_obj
     if isinstance(completion_obj, dict):
         c = completion_obj.get("content")
         return c if isinstance(c, str) else json.dumps(completion_obj)
@@ -474,29 +527,37 @@ def _extract_completion_text(completion_obj: Any) -> str:
 
 def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
     """Returns a list of callable reward functions for GRPO."""
-    
+
     task_cfg = config.get("task", {})
     rewards_cfg = task_cfg.get("rewards", {})
     format_reward = float(rewards_cfg.get("format", 0.2))
-    
+
     solutions, allowed = get_wordlists(config)
     valid_set = set(solutions) | set(allowed)
-    
-    def reward_format_exact(prompts: Sequence[Any], completions: Sequence[Any], **kwargs) -> List[float]:
+
+    def reward_format_exact(
+        prompts: Sequence[Any], completions: Sequence[Any], **kwargs
+    ) -> List[float]:
         rewards = []
         for comp in completions:
             text = _extract_completion_text(comp)
-            rewards.append(format_reward if parse_strict_guess(text) is not None else 0.0)
+            rewards.append(
+                format_reward if parse_strict_guess(text) is not None else 0.0
+            )
         return rewards
 
-    def reward_wordle_strict(prompts: Sequence[Any], completions: Sequence[Any], **kwargs) -> List[float]:
+    def reward_wordle_strict(
+        prompts: Sequence[Any], completions: Sequence[Any], **kwargs
+    ) -> List[float]:
         rewards = []
         for prompt_obj, comp_obj in zip(prompts, completions):
             prompt_text = _extract_prompt_text(prompt_obj)
             completion_text = _extract_completion_text(comp_obj)
-            
-            scored = score_completion(prompt_text, completion_text, valid_set, task_cfg, tokenizer)
-            
+
+            scored = score_completion(
+                prompt_text, completion_text, valid_set, task_cfg, tokenizer
+            )
+
             # The format reward is paid out in reward_format_exact, so we subtract it here to avoid double-counting
             rewards.append(float(scored["reward_total"] - scored["reward_format"]))
         return rewards
@@ -507,6 +568,7 @@ def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
 # ==============================================================================
 # EVALS PLUGIN HOOKS
 # ==============================================================================
+
 
 def get_eval_dataset(config: Dict[str, Any]) -> Dataset:
     """Returns the dataset for the Evals run."""
@@ -552,46 +614,52 @@ def get_eval_dataset(config: Dict[str, Any]) -> Dataset:
     return Dataset.from_list(rows[:n_samples])
 
 
-def compute_metrics(prompts: List[str], completions: List[str], dataset_rows: Dataset, config: Dict[str, Any], tokenizer: Any) -> Dict[str, Any]:
+def compute_metrics(
+    prompts: List[str],
+    completions: List[str],
+    dataset_rows: Dataset,
+    config: Dict[str, Any],
+    tokenizer: Any,
+) -> Dict[str, Any]:
     """Scores completions and returns an aggregated metric dictionary."""
     solutions, allowed = get_wordlists(config)
     valid_set = set(solutions) | set(allowed)
-    
+
     total = len(completions)
     format_ok = 0
     dict_ok = 0
     consistent = 0
-    
+
     detailed_results = []
-    
+
     for prompt, comp in zip(prompts, completions):
         guess = parse_strict_guess(comp)
-        
+
         row_res = {
             "prompt": prompt,
             "completion": comp,
             "parsed_guess": guess,
             "format_ok": False,
             "dict_ok": False,
-            "consistent": False
+            "consistent": False,
         }
-        
+
         if guess:
             format_ok += 1
             row_res["format_ok"] = True
-            
+
             if guess in valid_set:
                 dict_ok += 1
                 row_res["dict_ok"] = True
-                
+
             # Check constraint consistency
             history_rows = _parse_history_from_prompt(prompt)
             if history_rows:
                 ac = aggregate_constraints(history_rows)
                 sat_count, totals, _ = compute_sat_count(guess, ac)
-                
+
                 # Is consistent if all constraints are fully satisfied
-                is_consistent = (sat_count == sum(totals.values()))
+                is_consistent = sat_count == sum(totals.values())
                 if is_consistent:
                     consistent += 1
                     row_res["consistent"] = True
@@ -599,17 +667,17 @@ def compute_metrics(prompts: List[str], completions: List[str], dataset_rows: Da
                 # If no history, it's consistent by definition
                 consistent += 1
                 row_res["consistent"] = True
-                
+
         detailed_results.append(row_res)
-            
+
     return {
         "metrics": {
             "format_accuracy": format_ok / max(total, 1),
             "dict_accuracy": dict_ok / max(total, 1),
             "constraint_accuracy": consistent / max(total, 1),
-            "total_samples": total
+            "total_samples": total,
         },
-        "detailed_results": detailed_results
+        "detailed_results": detailed_results,
     }
 
 
@@ -617,7 +685,9 @@ class WordleTask(TaskPlugin):
     def get_sft_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
         return get_sft_dataset(config, tokenizer)
 
-    def get_sft_eval_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Optional[Dataset]:
+    def get_sft_eval_dataset(
+        self, config: Dict[str, Any], tokenizer: Any
+    ) -> Optional[Dataset]:
         return get_sft_eval_dataset(config, tokenizer)
 
     def get_sft_formatting_func(self, config: Dict[str, Any], tokenizer: Any):
