@@ -16,19 +16,28 @@ def _cmd_stop(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    experiment_id = str(args.experiment_id or "").strip()
+    if not experiment_id:
+        print(
+            "Error: --experiment-id is required (or set TENYSON_EXPERIMENT_ID).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     client = TelemetryClient(db_url=db_url)
     session = client.Session()
     try:
-        query = session.query(RunControl).filter(RunControl.run_id == args.run_id)
-        if args.experiment_id:
-            query = query.filter(RunControl.experiment_id == args.experiment_id)
+        query = (
+            session.query(RunControl)
+            .filter(RunControl.run_id == args.run_id)
+            .filter(RunControl.experiment_id == experiment_id)
+        )
         control_row = query.order_by(RunControl.updated_at.desc()).first()
         now = datetime.now(timezone.utc)
         if control_row is None:
             control_row = RunControl(
                 id=str(uuid4()),
-                experiment_id=args.experiment_id,
+                experiment_id=experiment_id,
                 run_id=args.run_id,
                 stop_requested=True,
                 updated_at=now,
@@ -45,7 +54,7 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     print(
         (
             f"[tenyson.ctl] Marked run_id={args.run_id}"
-            f"{f' experiment_id={args.experiment_id}' if args.experiment_id else ''}"
+            f" experiment_id={experiment_id}"
             f" as stop_requested in {db_url}"
         ),
         flush=True,
@@ -58,7 +67,7 @@ def main() -> None:
 
     stop_parser = subparsers.add_parser(
         "stop",
-        help="Request a graceful stop for a running SFT job.",
+        help="Request a graceful stop for a running job.",
     )
     stop_parser.add_argument(
         "--run-id",
@@ -74,8 +83,8 @@ def main() -> None:
         "--experiment-id",
         default=os.getenv("TENYSON_EXPERIMENT_ID"),
         help=(
-            "Optional experiment identifier. When provided, stop is scoped to "
-            "(experiment_id, run_id)."
+            "Experiment identifier for the target run. Required unless "
+            "TENYSON_EXPERIMENT_ID is set."
         ),
     )
     stop_parser.set_defaults(func=_cmd_stop)

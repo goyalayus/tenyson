@@ -119,11 +119,13 @@ telemetry:
   experiment_id: "wordle_research_2026_03_01"
 ```
 
-With telemetry enabled, you can mark a run for manual stop from another process:
+With telemetry enabled, you can mark a run for manual stop from another process.
+Use the same `experiment_id` as the running job:
 
 ```bash
 python -m tenyson.core.control \
   --run-id lora_sft_qwen3-4b \
+  --experiment-id wordle_research_2026_03_01 \
   --db-url postgresql+psycopg://user:password@db.example.com:5432/tenyson
 ```
 

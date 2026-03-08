@@ -18,14 +18,22 @@ def request_stop(
     """
     Set stop_requested = True for the given run_id in the RunControl table.
     """
+    experiment_id = str(experiment_id or "").strip()
+    if not experiment_id:
+        raise ValueError(
+            "experiment_id is required to request stop. "
+            "Provide --experiment-id or set TENYSON_EXPERIMENT_ID."
+        )
+
     client = TelemetryClient(db_url=db_url)
     session = client.Session()
     try:
-        query = session.query(RunControl).filter(RunControl.run_id == run_id)
-        if experiment_id:
-            query = query.filter(RunControl.experiment_id == experiment_id)
         control: Optional[RunControl] = (
-            query.order_by(RunControl.updated_at.desc()).first()
+            session.query(RunControl)
+            .filter(RunControl.run_id == run_id)
+            .filter(RunControl.experiment_id == experiment_id)
+            .order_by(RunControl.updated_at.desc())
+            .first()
         )
         if control is None and create_if_missing:
             control = RunControl(
@@ -51,7 +59,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--db-url",
         required=True,
-        help="SQLAlchemy database URL used for telemetry (e.g. sqlite:///tenyson.db).",
+        help=(
+            "SQLAlchemy database URL used for telemetry "
+            "(e.g. postgresql+psycopg://user:pass@host:5432/dbname)."
+        ),
     )
     parser.add_argument(
         "--run-id",
@@ -62,8 +73,8 @@ def _parse_args() -> argparse.Namespace:
         "--experiment-id",
         default=os.getenv("TENYSON_EXPERIMENT_ID"),
         help=(
-            "Optional experiment identifier. When provided, stop is scoped to "
-            "(experiment_id, run_id)."
+            "Experiment identifier for the target run. Required unless "
+            "TENYSON_EXPERIMENT_ID is set."
         ),
     )
     return parser.parse_args()
@@ -71,10 +82,15 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    experiment_id = str(args.experiment_id or "").strip()
+    if not experiment_id:
+        raise SystemExit(
+            "Error: --experiment-id is required (or set TENYSON_EXPERIMENT_ID)."
+        )
     request_stop(
         db_url=args.db_url,
         run_id=args.run_id,
-        experiment_id=args.experiment_id,
+        experiment_id=experiment_id,
         create_if_missing=True,
     )
 
