@@ -22,9 +22,7 @@ PipelineStep = Union[StepTuple, ParallelStage]
 def _report_update_data(label: str, result: JobResult) -> Dict[str, Any]:
     """Build placeholder update dict for report from step label and result."""
     wandb_link = (
-        f"[{label} run (WandB)]({result.wandb_url})"
-        if result.wandb_url
-        else "n/a"
+        f"[{label} run (WandB)]({result.wandb_url})" if result.wandb_url else "n/a"
     )
     data: Dict[str, Any] = {
         f"{label}_status": result.status,
@@ -51,8 +49,7 @@ def _run_step(
 def _validate_step_tuple(step: Any) -> None:
     if not isinstance(step, tuple) or len(step) != 4:
         raise TypeError(
-            "Each sequential step must be a 4-tuple: "
-            "(label, config, job_class, task)."
+            "Each sequential step must be a 4-tuple: (label, config, job_class, task)."
         )
     label, config, _job_class, _task = step
     if not isinstance(label, str):
@@ -86,7 +83,9 @@ def _prompt_failure_action(
         return "abort"
 
     train_cfg = config.get("training", {})
-    can_resume = job_type in ("sft", "rl") and bool(last_result.hf_repo_id)
+    hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
+    hf_revision = str(getattr(last_result, "hf_revision", "") or "").strip()
+    can_resume = job_type in ("sft", "rl") and bool(hf_repo_id and hf_revision)
 
     while True:
         if can_resume:
@@ -109,8 +108,7 @@ def _prompt_failure_action(
             train_cfg.pop("resume_from_checkpoint", None)
             return "restart"
         if choice == "resume" and can_resume:
-            revision = getattr(last_result, "hf_revision", None) or "main"
-            train_cfg["resume_from_checkpoint"] = f"{last_result.hf_repo_id}:{revision}"
+            train_cfg["resume_from_checkpoint"] = f"{hf_repo_id}:{hf_revision}"
             return "resume"
         sys.stderr.write("  Invalid choice.\n")
 
@@ -148,7 +146,9 @@ def _validate_pipeline_run_names(steps: List[PipelineStep]) -> None:
             label, config, job_class, _task = step
             _record(label, config, job_class)
 
-    duplicates = {run_name: labels for run_name, labels in sightings.items() if len(labels) > 1}
+    duplicates = {
+        run_name: labels for run_name, labels in sightings.items() if len(labels) > 1
+    }
     if duplicates:
         details = "; ".join(
             f"run_name='{run_name}' used by steps {labels}"
@@ -170,9 +170,7 @@ def run_pipeline(
     report_template_path: Optional[str] = None,
     report_output_path: Optional[str] = None,
     report_initial_data: Optional[Dict[str, Any]] = None,
-    before_step: Optional[
-        Callable[[str, int, dict, List[JobResult]], None]
-    ] = None,
+    before_step: Optional[Callable[[str, int, dict, List[JobResult]], None]] = None,
 ) -> List[JobResult]:
     """
     Run a sequence of steps.
@@ -238,7 +236,9 @@ def run_pipeline(
                         step_task,
                         cloud,
                     ): idx
-                    for idx, (label, config, job_class, step_task) in enumerate(branches)
+                    for idx, (label, config, job_class, step_task) in enumerate(
+                        branches
+                    )
                 }
                 for future in as_completed(future_map):
                     idx, result = future.result()
@@ -256,7 +256,7 @@ def run_pipeline(
                         break
 
                     _red_print(
-                        f"[TENYSON] Step \"{label}\" failed: "
+                        f'[TENYSON] Step "{label}" failed: '
                         f"{getattr(result, 'failure_reason', 'unknown')}"
                     )
                     experiment_id = resolve_experiment_id(config)
@@ -299,7 +299,7 @@ def run_pipeline(
 
             # Failed: notify and optionally wait for user.
             _red_print(
-                f"[TENYSON] Step \"{label}\" failed: {getattr(result, 'failure_reason', 'unknown')}"
+                f'[TENYSON] Step "{label}" failed: {getattr(result, "failure_reason", "unknown")}'
             )
             experiment_id = resolve_experiment_id(config)
             notify_failure(

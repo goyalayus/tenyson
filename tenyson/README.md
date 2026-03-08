@@ -42,8 +42,8 @@ print(result.metrics, result.wandb_url)
 - **GPU runner package setup**: cloud managers install runtime dependencies with `pip install unsloth vllm huggingface_hub safetensors pyyaml sqlalchemy 'psycopg[binary]' wandb` (we intentionally do not install `trl`/`transformers`/`datasets` directly because Unsloth pulls them transitively).
 - **HF push cadence (SFT/RL)**: set `training.hf_repo_base` (required) to push full trainer checkpoints to a stable repo id `<hf_repo_base>-<run_name>`. `training.hf_push_every_steps` controls checkpoint save+push cadence.
 - **Run naming contract**: `training.run_name` (SFT/RL) and `evaluation.run_name` (Eval) are mandatory and must be explicit (defaults like `sft_job`/`rl_job`/`eval_job` are rejected). Within one `run_pipeline(...)` execution, run names must be unique.
-- **Checkpoint mode**: SFT/RL use Hub-managed trainer checkpoints (includes optimizer/scheduler/trainer state). Resume uses `training.resume_from_checkpoint: "repo_id:revision"` and automatically restores from `last-checkpoint` (or latest `checkpoint-*`) in that snapshot.
-- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from latest Hub revision), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
+- **Checkpoint mode**: SFT/RL use Hub-managed trainer checkpoints (includes optimizer/scheduler/trainer state). Resume uses `training.resume_from_checkpoint: "repo_id:revision"`, resolves that ref to an immutable Hub commit SHA, and automatically restores from `last-checkpoint` (or latest `checkpoint-*`) in that frozen snapshot.
+- **Pipeline with human-in-the-loop**: Use `tenyson.pipeline.run_pipeline(steps, cloud, on_failure="wait", ...)`. A step can be either `(label, config, JobClass, task)` for sequential execution, or `{"label": "stage_name", "parallel": [step1, step2, ...]}` to run branches concurrently. When a step/branch fails, the pipeline prints the failure in red, optionally logs to a file/webhook/telemetry, then waits for you to choose: **resume** (from the recorded immutable Hub revision), **restart** (same step from scratch), or **abort**. Works with both AWS and Modal.
 
 ## wordle research workflow (current example)
 
@@ -155,7 +155,7 @@ When `eval_exact_turns` is set, eval dataset generation is restricted to those e
 
 `tenyson.jobs.result.JobResult` is the common return type from all jobs and cloud managers:
 
-- **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`. On failure, cloud managers also set `failure_reason`, `instance_id`, and `spot_interruption`.
+- **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`. When present, `hf_revision` is the exact immutable Hub commit SHA used for lineage/resume. On failure, cloud managers also set `failure_reason`, `instance_id`, and `spot_interruption`.
 - **Persistence**: `run_summaries` and `run_results` tables in telemetry DB are the canonical source of truth.
 
 `ReportBuilder` turns a markdown template into a final report with:

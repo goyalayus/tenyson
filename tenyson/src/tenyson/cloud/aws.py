@@ -12,8 +12,10 @@ from botocore.exceptions import ClientError
 
 from tenyson.cloud.base import BaseCloudManager, JobFailedError, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
+from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.core.run_config import materialize_run_config
+from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
@@ -232,7 +234,9 @@ class AWSManager(BaseCloudManager):
         print("[AWSManager] Syncing codebase to instance...")
         repo_root = os.getcwd()
         local_project_root = self._resolve_local_project_root(repo_root)
-        local_project_rel = os.path.relpath(local_project_root, Path(repo_root).resolve())
+        local_project_rel = os.path.relpath(
+            local_project_root, Path(repo_root).resolve()
+        )
         if local_project_rel == ".":
             remote_project_root = "~/workspace"
         else:
@@ -259,15 +263,37 @@ class AWSManager(BaseCloudManager):
         db_url, experiment_id = resolve_required_telemetry_context(job.config)
         telemetry_client = TelemetryClient(db_url=db_url)
 
+        def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
+            if job_type not in ("sft", "rl"):
+                return None, None
+            train_cfg = job.config.get("training", {})
+            hf_repo_base = str(train_cfg.get("hf_repo_base") or "").strip()
+            if not hf_repo_base:
+                return None, None
+            repo_id = unique_repo_id(hf_repo_base, run_name)
+            if not repo_id:
+                return None, None
+            try:
+                return repo_id, resolve_hf_resume_revision(repo_id)
+            except Exception:  # noqa: BLE001
+                return None, None
+
         def _finalize_failure(
             failure_reason: str,
             *,
             spot_interruption: bool = False,
+            include_resume_target: bool = False,
         ) -> JobResult:
+            hf_repo_id = None
+            hf_revision = None
+            if include_resume_target:
+                hf_repo_id, hf_revision = _resolve_failed_resume_target()
             result = JobResult(
                 run_id=run_name,
                 status="failed",
                 total_time_seconds=0.0,
+                hf_repo_id=hf_repo_id,
+                hf_revision=hf_revision,
                 failure_reason=failure_reason,
                 instance_id=instance.id,
                 spot_interruption=spot_interruption,
@@ -296,7 +322,9 @@ class AWSManager(BaseCloudManager):
         )
         config_rel_path = os.path.relpath(str(config_path), str(local_project_root))
 
-        sync_ok = self._rsync_to_host(public_ip, self.key_path, user, repo_root, "~/workspace")
+        sync_ok = self._rsync_to_host(
+            public_ip, self.key_path, user, repo_root, "~/workspace"
+        )
         if not sync_ok:
             if self.auto_terminate:
                 print(f"[AWSManager] Terminating instance {instance.id}...")
@@ -306,7 +334,9 @@ class AWSManager(BaseCloudManager):
                 "Remote run was not started."
             )
             result = _finalize_failure(failure_reason=failure_reason)
-            _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
+            _red_print(
+                f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})"
+            )
             return result
 
         # HF / W&B env vars.
@@ -350,7 +380,9 @@ class AWSManager(BaseCloudManager):
                     msg = state_reason.get("Message") or ""
                     if "Spot" in code or "Spot" in msg:
                         spot_interruption = True
-                        failure_reason = f"Spot instance interrupted: {code} {msg}".strip()
+                        failure_reason = (
+                            f"Spot instance interrupted: {code} {msg}".strip()
+                        )
                     else:
                         failure_reason = code or msg or failure_reason
             except Exception:  # noqa: S110
@@ -361,8 +393,11 @@ class AWSManager(BaseCloudManager):
             result = _finalize_failure(
                 failure_reason=failure_reason,
                 spot_interruption=spot_interruption,
+                include_resume_target=True,
             )
-            _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
+            _red_print(
+                f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})"
+            )
             return result
 
         if self.auto_terminate:
@@ -382,6 +417,11 @@ class AWSManager(BaseCloudManager):
                 "Remote run completed but canonical run result was not available in "
                 f"telemetry DB: {exc}"
             )
-            result = _finalize_failure(failure_reason=failure_reason)
-            _red_print(f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})")
+            result = _finalize_failure(
+                failure_reason=failure_reason,
+                include_resume_target=True,
+            )
+            _red_print(
+                f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})"
+            )
             return result

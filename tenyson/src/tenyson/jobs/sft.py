@@ -3,7 +3,10 @@ import os
 import time
 from typing import Any, Dict
 
-from tenyson.core.hf_checkpoint import download_hf_resume_checkpoint
+from tenyson.core.hf_checkpoint import (
+    download_hf_resume_checkpoint,
+    resolve_hf_repo_revision,
+)
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -97,9 +100,7 @@ class SFTJob:
                 "Tenyson stores checkpoints/adapters on Hugging Face only."
             )
         if not os.getenv("HF_TOKEN", "").strip():
-            raise ValueError(
-                "HF_TOKEN environment variable is required for SFT runs."
-            )
+            raise ValueError("HF_TOKEN environment variable is required for SFT runs.")
 
         push_repo_id = unique_repo_id(hf_repo_base, run_name)
         if not push_repo_id:
@@ -108,7 +109,9 @@ class SFTJob:
             train_cfg.get("hf_push_every_steps", train_cfg.get("save_steps", 100))
         )
         if hf_push_every_steps <= 0:
-            raise ValueError("training.hf_push_every_steps must be >= 1 when HF push is enabled.")
+            raise ValueError(
+                "training.hf_push_every_steps must be >= 1 when HF push is enabled."
+            )
 
         model, tokenizer, seq_len = self._build_model_and_tokenizer()
 
@@ -128,12 +131,8 @@ class SFTJob:
             output_dir=output_dir,
             max_length=seq_len,
             max_steps=train_cfg.get("max_steps", 1000),
-            per_device_train_batch_size=train_cfg.get(
-                "per_device_train_batch_size", 2
-            ),
-            gradient_accumulation_steps=train_cfg.get(
-                "gradient_accumulation_steps", 4
-            ),
+            per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", 2),
+            gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
             learning_rate=float(train_cfg.get("learning_rate", 2e-4)),
             lr_scheduler_type=train_cfg.get("lr_scheduler_type", "linear"),
             warmup_steps=train_cfg.get("warmup_steps", 10),
@@ -315,6 +314,8 @@ class SFTJob:
         except Exception:  # noqa: BLE001
             wandb_url = None
 
+        hf_revision = resolve_hf_repo_revision(push_repo_id) if push_repo_id else None
+
         result = JobResult(
             run_id=run_name,
             status="success",
@@ -322,7 +323,7 @@ class SFTJob:
             metrics=metrics,
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
-            hf_revision="main" if push_repo_id else None,
+            hf_revision=hf_revision,
         )
         record_run_summary(
             client=telemetry_client,

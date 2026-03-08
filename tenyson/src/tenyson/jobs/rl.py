@@ -3,7 +3,10 @@ import time
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from tenyson.core.hf_checkpoint import download_hf_resume_checkpoint
+from tenyson.core.hf_checkpoint import (
+    download_hf_resume_checkpoint,
+    resolve_hf_repo_revision,
+)
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -116,7 +119,10 @@ class RLJob:
                 model.load_state_dict(mapped_state, strict=False)
                 print("[RLJob] Successfully loaded init adapter.", flush=True)
             except Exception as exc:  # noqa: BLE001
-                print(f"[RLJob] Warning: Failed to load init adapter from {init_repo}: {exc}", flush=True)
+                print(
+                    f"[RLJob] Warning: Failed to load init adapter from {init_repo}: {exc}",
+                    flush=True,
+                )
 
         model.train()
         return model, tokenizer
@@ -151,9 +157,7 @@ class RLJob:
                 "Tenyson stores checkpoints/adapters on Hugging Face only."
             )
         if not os.getenv("HF_TOKEN", "").strip():
-            raise ValueError(
-                "HF_TOKEN environment variable is required for RL runs."
-            )
+            raise ValueError("HF_TOKEN environment variable is required for RL runs.")
 
         push_repo_id = unique_repo_id(hf_repo_base, run_name)
         if not push_repo_id:
@@ -162,7 +166,9 @@ class RLJob:
             train_cfg.get("hf_push_every_steps", train_cfg.get("save_steps", 100))
         )
         if hf_push_every_steps <= 0:
-            raise ValueError("training.hf_push_every_steps must be >= 1 when HF push is enabled.")
+            raise ValueError(
+                "training.hf_push_every_steps must be >= 1 when HF push is enabled."
+            )
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
 
         ensure_hf_repo(push_repo_id)
@@ -182,9 +188,7 @@ class RLJob:
             output_dir=str(os.path.join(output_dir, "trainer_out")),
             max_steps=train_cfg.get("max_steps", 1000),
             per_device_train_batch_size=train_cfg.get("per_device_batch_size", 1),
-            gradient_accumulation_steps=train_cfg.get(
-                "gradient_accumulation_steps", 4
-            ),
+            gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
             learning_rate=float(train_cfg.get("learning_rate", 5e-6)),
             temperature=float(vllm_cfg.get("temperature", 1.0))
             if vllm_cfg.get("enabled", False)
@@ -235,9 +239,7 @@ class RLJob:
         callbacks = list(callbacks)
 
         telemetry_cfg = self.config.get("telemetry", {})
-        manual_stop_every = int(
-            telemetry_cfg.get("manual_stop_check_every_n_steps", 1)
-        )
+        manual_stop_every = int(telemetry_cfg.get("manual_stop_check_every_n_steps", 1))
         callbacks = list(callbacks) + [
             GRPOEpochTelemetryCallback(
                 run_id=run_name,
@@ -268,9 +270,7 @@ class RLJob:
         # avoid double-logging if users supply multiple reward functions.
         if reward_funcs:
 
-            def make_wrapped(
-                base_func, client: TelemetryClient, run_id: str
-            ):  # type: ignore[override]
+            def make_wrapped(base_func, client: TelemetryClient, run_id: str):  # type: ignore[override]
                 def wrapped(
                     prompts: List[Any], completions: List[Any], **kwargs
                 ) -> List[float]:
@@ -372,6 +372,8 @@ class RLJob:
         except Exception:  # noqa: BLE001
             wandb_url = None
 
+        hf_revision = resolve_hf_repo_revision(push_repo_id) if push_repo_id else None
+
         result = JobResult(
             run_id=run_name,
             status="success",
@@ -379,7 +381,7 @@ class RLJob:
             metrics=metrics,
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
-            hf_revision="main" if push_repo_id else None,
+            hf_revision=hf_revision,
         )
         record_run_summary(
             client=telemetry_client,

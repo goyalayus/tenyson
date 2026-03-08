@@ -5,8 +5,10 @@ from typing import Any, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
+from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.core.run_config import materialize_run_config
+from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
@@ -38,7 +40,9 @@ class ModalManager(BaseCloudManager):
         root = os.path.abspath(".")
         candidates = [root, os.path.join(root, "tenyson")]
         for candidate in candidates:
-            if os.path.isfile(os.path.join(candidate, "pyproject.toml")) and os.path.isfile(
+            if os.path.isfile(
+                os.path.join(candidate, "pyproject.toml")
+            ) and os.path.isfile(
                 os.path.join(candidate, "src", "tenyson", "runner.py")
             ):
                 return os.path.abspath(candidate)
@@ -92,7 +96,9 @@ class ModalManager(BaseCloudManager):
             pass
 
         local_project_root = self._resolve_local_project_root()
-        repo_mount = modal.Mount.from_local_dir(local_project_root, remote_path="/workspace")
+        repo_mount = modal.Mount.from_local_dir(
+            local_project_root, remote_path="/workspace"
+        )
 
         @app.function(
             image=image,
@@ -154,6 +160,22 @@ class ModalManager(BaseCloudManager):
         run_name = resolve_required_run_name(job.config, job_type)
         db_url, experiment_id = resolve_required_telemetry_context(job.config)
         telemetry_client = TelemetryClient(db_url=db_url)
+
+        def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
+            if job_type not in ("sft", "rl"):
+                return None, None
+            train_cfg = job.config.get("training", {})
+            hf_repo_base = str(train_cfg.get("hf_repo_base") or "").strip()
+            if not hf_repo_base:
+                return None, None
+            repo_id = unique_repo_id(hf_repo_base, run_name)
+            if not repo_id:
+                return None, None
+            try:
+                return repo_id, resolve_hf_resume_revision(repo_id)
+            except Exception:  # noqa: BLE001
+                return None, None
+
         config_path = materialize_run_config(
             config=job.config,
             project_root=Path(local_project_root),
@@ -183,10 +205,13 @@ class ModalManager(BaseCloudManager):
                 task_spec,
             )
         except Exception as exc:  # noqa: BLE001
+            hf_repo_id, hf_revision = _resolve_failed_resume_target()
             result = JobResult(
                 run_id=run_name,
                 status="failed",
                 total_time_seconds=0.0,
+                hf_repo_id=hf_repo_id,
+                hf_revision=hf_revision,
                 failure_reason=str(exc),
                 instance_id=None,
                 spot_interruption=None,
@@ -221,10 +246,13 @@ class ModalManager(BaseCloudManager):
                 "Modal job completed but canonical run result was not available in "
                 f"telemetry DB: {exc}"
             )
+            hf_repo_id, hf_revision = _resolve_failed_resume_target()
             result = JobResult(
                 run_id=run_name,
                 status="failed",
                 total_time_seconds=0.0,
+                hf_repo_id=hf_repo_id,
+                hf_revision=hf_revision,
                 failure_reason=failure_reason,
                 instance_id=None,
                 spot_interruption=None,
