@@ -191,15 +191,21 @@ def _run_parallel_eval_steps(
     output: Dict[str, JobResult] = {}
     for label, config, _job_class, _task in eval_steps:
         run_id = config.get("evaluation", {}).get("run_name")
+        if not run_id:
+            raise RuntimeError(
+                f"Parallel eval step '{label}' is missing evaluation.run_name, so its result cannot be matched safely."
+            )
         matched = None
         for result in reversed(results):
-            if run_id and result.run_id == run_id:
+            if result.run_id == run_id:
                 matched = result
                 break
-        if matched is None and results:
-            matched = results[-1]
         if matched is None:
-            raise RuntimeError(f"Parallel eval step '{label}' did not return a result.")
+            returned_run_ids = [result.run_id for result in results]
+            raise RuntimeError(
+                f"Parallel eval step '{label}' expected run_id '{run_id}' but no exact result was returned. "
+                f"Returned run_ids: {returned_run_ids!r}"
+            )
         output[label] = matched
 
     if abort_controller is not None:
