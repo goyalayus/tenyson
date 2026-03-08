@@ -19,6 +19,24 @@ from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
+def _resolve_reward_logging_step(kwargs: Dict[str, Any]) -> int:
+    trainer_state = kwargs.get("trainer_state")
+    if trainer_state is not None:
+        trainer_state_step = None
+        if isinstance(trainer_state, dict):
+            trainer_state_step = trainer_state.get("global_step")
+        else:
+            trainer_state_step = getattr(trainer_state, "global_step", None)
+        if trainer_state_step is not None:
+            return int(trainer_state_step)
+
+    explicit_step = kwargs.get("global_step")
+    if explicit_step is not None:
+        return int(explicit_step)
+
+    return 0
+
+
 class RLJob:
     """
     GRPO RL job.
@@ -297,8 +315,7 @@ class RLJob:
                     session = None
                     try:
                         session = client.Session()
-                        # Best-effort global_step; fall back to 0 if not provided.
-                        step = int(kwargs.get("global_step", 0))
+                        step = _resolve_reward_logging_step(kwargs)
                         for prompt, completion, reward in zip(
                             prompts, completions, rewards
                         ):
