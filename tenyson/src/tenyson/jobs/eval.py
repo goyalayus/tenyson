@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
+from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.result import JobResult
 
 
@@ -17,7 +18,7 @@ class EvalJob:
     def __init__(self, config: Dict[str, Any], task: TaskPlugin):
         self.config = config
         self.task = task
-        self.run_id = self.config.get("evaluation", {}).get("run_name", "eval_job")
+        self.run_id = resolve_required_run_name(self.config, "eval")
 
     def _build_model_and_tokenizer(self):
         from unsloth import FastLanguageModel
@@ -114,7 +115,7 @@ class EvalJob:
 
         start = time.time()
         eval_cfg = self.config.get("evaluation", {})
-        run_name = eval_cfg.get("run_name", self.run_id)
+        run_name = self.run_id
 
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         client = TelemetryClient(db_url=db_url)

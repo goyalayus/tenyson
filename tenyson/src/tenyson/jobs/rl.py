@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
+from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
@@ -20,7 +21,7 @@ class RLJob:
     def __init__(self, config: Dict[str, Any], task: TaskPlugin):
         self.config = config
         self.task = task
-        self.run_id = self.config.get("training", {}).get("run_name", "rl_job")
+        self.run_id = resolve_required_run_name(self.config, "rl")
 
     def _build_vllm_sampling_params(self, tokenizer: Any):
         vllm_cfg = self.config.get("vllm", {})
@@ -141,7 +142,7 @@ class RLJob:
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client = TelemetryClient(db_url=db_url)
 
-        run_name = train_cfg.get("run_name", self.run_id)
+        run_name = self.run_id
         hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
         if not hf_repo_base:
             raise ValueError(

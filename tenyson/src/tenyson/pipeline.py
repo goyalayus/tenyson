@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from tenyson.cloud.base import _red_print
 from tenyson.core.notify import notify_failure
+from tenyson.core.run_name import resolve_required_run_name_for_job_class
 from tenyson.core.telemetry import resolve_experiment_id
 from tenyson.jobs.result import JobResult
 from tenyson.reporting.builder import ReportBuilder
@@ -125,6 +126,40 @@ def _run_branch_once(
     return branch_index, _run_step(label, config, job_class, task, cloud)
 
 
+def _validate_pipeline_run_names(steps: List[PipelineStep]) -> None:
+    """
+    Preflight: enforce explicit non-default run_name and uniqueness.
+    """
+    sightings: Dict[str, List[str]] = {}
+
+    def _record(label: str, config: dict, job_class: type) -> None:
+        _job_type, run_name = resolve_required_run_name_for_job_class(config, job_class)
+        sightings.setdefault(run_name, []).append(label)
+
+    for step in steps:
+        if _is_parallel_stage(step):
+            _validate_parallel_stage(step)
+            for branch in step["parallel"]:
+                _validate_step_tuple(branch)
+                label, config, job_class, _task = branch
+                _record(label, config, job_class)
+        else:
+            _validate_step_tuple(step)
+            label, config, job_class, _task = step
+            _record(label, config, job_class)
+
+    duplicates = {run_name: labels for run_name, labels in sightings.items() if len(labels) > 1}
+    if duplicates:
+        details = "; ".join(
+            f"run_name='{run_name}' used by steps {labels}"
+            for run_name, labels in duplicates.items()
+        )
+        raise ValueError(
+            "Duplicate run_name values detected in pipeline. "
+            f"Each step must use a unique run_name. {details}"
+        )
+
+
 def run_pipeline(
     steps: List[PipelineStep],
     cloud: Any,
@@ -162,6 +197,7 @@ def run_pipeline(
         raise ValueError(
             "report_initial_data is required when report_template_path and report_output_path are set"
         )
+    _validate_pipeline_run_names(steps)
 
     results: List[JobResult] = []
     job_type_from_class = {

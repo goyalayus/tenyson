@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
+from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
@@ -20,7 +21,7 @@ class SFTJob:
     def __init__(self, config: Dict[str, Any], task: TaskPlugin):
         self.config = config
         self.task = task
-        self.run_id = self.config.get("training", {}).get("run_name", "sft_job")
+        self.run_id = resolve_required_run_name(self.config, "sft")
 
     def _build_model_and_tokenizer(self) -> Any:
         # Import locally so library import doesn't require heavy deps unless used.
@@ -82,7 +83,7 @@ class SFTJob:
 
         start = time.time()
         train_cfg = self.config.get("training", {})
-        run_name = train_cfg.get("run_name", self.run_id)
+        run_name = self.run_id
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=db_url)
