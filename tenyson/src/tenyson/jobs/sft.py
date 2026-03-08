@@ -77,6 +77,7 @@ class SFTJob:
         from trl import SFTConfig, SFTTrainer
         from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
+            begin_run_attempt,
             ManualStopTelemetryCallback,
             record_run_result,
             record_run_summary,
@@ -92,6 +93,11 @@ class SFTJob:
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=db_url)
+        if begin_run_attempt(telemetry_client, experiment_id, run_name):
+            print(
+                "[SFTJob] Cleared stale manual stop request from a previous attempt.",
+                flush=True,
+            )
 
         hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
         if not hf_repo_base:

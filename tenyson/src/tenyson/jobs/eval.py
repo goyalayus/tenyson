@@ -120,6 +120,7 @@ class EvalJob:
     def run(self) -> JobResult:
         require_gpu_provider_runtime()
         from tenyson.core.telemetry import (
+            begin_run_attempt,
             Generation,
             record_run_result,
             record_run_summary,
@@ -134,6 +135,11 @@ class EvalJob:
 
         db_url, experiment_id = resolve_required_telemetry_context(self.config)
         client = TelemetryClient(db_url=db_url)
+        if begin_run_attempt(client, experiment_id, run_name):
+            print(
+                "[EvalJob] Cleared stale manual stop request from a previous attempt.",
+                flush=True,
+            )
 
         model, tokenizer = self._build_model_and_tokenizer()
 

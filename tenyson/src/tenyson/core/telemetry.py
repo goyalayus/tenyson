@@ -6,7 +6,16 @@ import time
 from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, create_engine
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
+)
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
@@ -197,6 +206,48 @@ class TelemetryClient:
         self.Session = sessionmaker(bind=self.engine)
 
 
+def begin_run_attempt(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+) -> bool:
+    """
+    Start a fresh control epoch for a logical run.
+
+    This inserts a new RunControl row with stop_requested=False so a stale stop
+    from a previous attempt does not immediately terminate a restarted run. The
+    latest row continues to be the source of truth for later stop requests.
+
+    Returns True when the newest previous control row had stop_requested=True.
+    """
+    experiment_id = str(experiment_id)
+    run_id = str(run_id)
+    now = datetime.now(timezone.utc)
+    session = client.Session()
+    try:
+        latest = (
+            session.query(RunControl)
+            .filter(RunControl.run_id == run_id)
+            .filter(RunControl.experiment_id == experiment_id)
+            .order_by(RunControl.updated_at.desc())
+            .first()
+        )
+        cleared_stale_stop = bool(latest and latest.stop_requested)
+        session.add(
+            RunControl(
+                id=str(uuid4()),
+                experiment_id=experiment_id,
+                run_id=run_id,
+                stop_requested=False,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        return cleared_stale_stop
+    finally:
+        session.close()
+
+
 def resolve_experiment_id(config: Dict[str, Any]) -> Optional[str]:
     """
     Resolve experiment_id from config first, then TENYSON_EXPERIMENT_ID env var.
@@ -209,7 +260,9 @@ def resolve_experiment_id(config: Dict[str, Any]) -> Optional[str]:
     return from_env or None
 
 
-def resolve_telemetry_context(config: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+def resolve_telemetry_context(
+    config: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Return (db_url, experiment_id). If db_url is set, experiment_id is required.
     """
@@ -277,7 +330,9 @@ def record_run_summary(
 
         existing.status = str(getattr(result, "status", "unknown"))
         total_time = getattr(result, "total_time_seconds", None)
-        existing.total_time_seconds = float(total_time) if total_time is not None else None
+        existing.total_time_seconds = (
+            float(total_time) if total_time is not None else None
+        )
         existing.metrics_json = json.dumps(metrics, ensure_ascii=False, default=str)
         existing.hf_repo_id = getattr(result, "hf_repo_id", None)
         existing.hf_revision = getattr(result, "hf_revision", None)
@@ -366,7 +421,9 @@ def get_run_result(
             return None
 
         results_payload = json.loads(row.results_json) if row.results_json else {}
-        job_result_payload = json.loads(row.job_result_json) if row.job_result_json else {}
+        job_result_payload = (
+            json.loads(row.job_result_json) if row.job_result_json else {}
+        )
         if not isinstance(results_payload, dict):
             results_payload = {"value": results_payload}
         if not isinstance(job_result_payload, dict):
@@ -510,9 +567,7 @@ class ManualStopTelemetryCallback(TrainerCallback):
         self.client = client
         self.check_every_n_steps = max(1, int(check_every_n_steps))
 
-    def on_step_end(
-        self, args, state: TrainerState, control: TrainerControl, **kwargs
-    ):
+    def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
         # Optionally throttle checks; default is every step for responsiveness.
         if state.global_step % self.check_every_n_steps != 0:
             return control
@@ -555,6 +610,7 @@ class WandBUrlTelemetryCallback(TrainerCallback):
             return
         try:
             import wandb  # type: ignore[import-not-found]
+
             run = getattr(wandb, "run", None)
             if run is None:
                 return
@@ -591,7 +647,9 @@ class WandBUrlTelemetryCallback(TrainerCallback):
         finally:
             session.close()
 
-    def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+    def on_train_begin(
+        self, args, state: TrainerState, control: TrainerControl, **kwargs
+    ):
         self._maybe_write_url()
         return control
 
