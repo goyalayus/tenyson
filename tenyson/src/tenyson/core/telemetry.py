@@ -678,6 +678,8 @@ class ManualStopTelemetryCallback(TrainerCallback):
         self.experiment_id = experiment_id
         self.client = client
         self.check_every_n_steps = max(1, int(check_every_n_steps))
+        self.stop_requested = False
+        self.stop_step: Optional[int] = None
 
     def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
         # Optionally throttle checks; default is every step for responsiveness.
@@ -696,6 +698,8 @@ class ManualStopTelemetryCallback(TrainerCallback):
                     f"{self.run_id} at step {state.global_step}",
                     flush=True,
                 )
+                self.stop_requested = True
+                self.stop_step = int(state.global_step)
                 control.should_training_stop = True
                 control.should_save = True
         finally:

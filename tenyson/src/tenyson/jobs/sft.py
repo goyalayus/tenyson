@@ -6,6 +6,7 @@ from typing import Any, Dict
 from tenyson.core.hf_checkpoint import (
     download_hf_resume_checkpoint,
     resolve_hf_repo_revision,
+    resolve_hf_resume_revision,
 )
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
@@ -232,13 +233,12 @@ class SFTJob:
                 client=telemetry_client,
             )
         )
-        callbacks.append(
-            ManualStopTelemetryCallback(
-                run_id=run_name,
-                experiment_id=experiment_id,
-                client=telemetry_client,
-            )
+        manual_stop_callback = ManualStopTelemetryCallback(
+            run_id=run_name,
+            experiment_id=experiment_id,
+            client=telemetry_client,
         )
+        callbacks.append(manual_stop_callback)
         report_to = train_cfg.get("report_to", "none")
         if report_to == "wandb" or (
             isinstance(report_to, list) and "wandb" in report_to
@@ -320,16 +320,37 @@ class SFTJob:
         except Exception:  # noqa: BLE001
             wandb_url = None
 
-        hf_revision = resolve_hf_repo_revision(push_repo_id) if push_repo_id else None
+        stop_requested = bool(getattr(manual_stop_callback, "stop_requested", False))
+        stop_step = getattr(manual_stop_callback, "stop_step", None)
+        if stop_requested:
+            try:
+                hf_revision = (
+                    resolve_hf_resume_revision(push_repo_id) if push_repo_id else None
+                )
+            except Exception:  # noqa: BLE001
+                hf_revision = None
+        else:
+            hf_revision = (
+                resolve_hf_repo_revision(push_repo_id) if push_repo_id else None
+            )
+
+        status = "stopped" if stop_requested else "success"
+        failure_reason = (
+            f"Manual stop requested at step {stop_step}."
+            if stop_requested and stop_step is not None
+            else ("Manual stop requested." if stop_requested else None)
+        )
 
         result = JobResult(
             run_id=run_name,
-            status="success",
+            status=status,
             total_time_seconds=total_time,
             metrics=metrics,
+            stopped_early=stop_requested,
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
             hf_revision=hf_revision,
+            failure_reason=failure_reason,
         )
         record_run_summary(
             client=telemetry_client,
