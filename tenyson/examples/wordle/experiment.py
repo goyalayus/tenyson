@@ -221,11 +221,16 @@ def _run_parallel_eval_steps(
 
 def _require_adapter(result: JobResult, stage_name: str) -> Tuple[str, str]:
     repo = getattr(result, "hf_repo_id", None)
-    rev = getattr(result, "hf_revision", None) or "main"
     if not repo:
         raise RuntimeError(
             f"{stage_name} finished without hf_repo_id. "
             "Set training.hf_repo_base to a valid Hugging Face namespace/repo prefix."
+        )
+    rev = getattr(result, "hf_revision", None)
+    if not rev:
+        raise RuntimeError(
+            f"{stage_name} finished without hf_revision. "
+            "This run cannot seed later stages safely because its exact adapter revision is unknown."
         )
     return repo, rev
 
