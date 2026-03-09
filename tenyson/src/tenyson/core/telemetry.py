@@ -113,7 +113,7 @@ class SFTMetric(Base):
     experiment_id = Column(String, index=True)
     run_id = Column(String, index=True)
     global_step = Column(Integer, index=True)
-    loss = Column(Float)
+    loss = Column(Float, nullable=True)
     eval_loss = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -652,7 +652,7 @@ class SFTTelemetryCallback(TrainerCallback):
                 experiment_id=self.experiment_id,
                 run_id=self.run_id,
                 global_step=int(state.global_step),
-                loss=float(loss_val) if loss_val is not None else 0.0,
+                loss=float(loss_val) if loss_val is not None else None,
                 eval_loss=float(eval_loss_val) if eval_loss_val is not None else None,
             )
             session.add(metric)
