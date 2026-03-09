@@ -9,9 +9,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from tenyson.cloud.base import _red_print
+from tenyson.core.control import request_stop
 from tenyson.core.notify import notify_failure
 from tenyson.core.run_name import resolve_required_run_name_for_job_class
-from tenyson.core.telemetry import resolve_experiment_id
+from tenyson.core.telemetry import resolve_experiment_id, resolve_telemetry_context
 from tenyson.jobs.result import JobResult
 from tenyson.reporting.builder import ReportBuilder
 
@@ -142,6 +143,53 @@ def _run_branch_once(
     return branch_index, _run_step(label, config, job_class, task, cloud)
 
 
+def _abort_parallel_stage_runs(
+    branches: List[StepTuple],
+    *,
+    source_run_id: Optional[str],
+) -> None:
+    source_run_id = str(source_run_id or "").strip()
+    seen_run_ids: set[str] = set()
+    for label, config, job_class, _task in branches:
+        try:
+            _job_type, run_id = resolve_required_run_name_for_job_class(
+                config, job_class
+            )
+        except Exception:
+            continue
+
+        run_id = str(run_id).strip()
+        if not run_id or run_id == source_run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+
+        try:
+            db_url, experiment_id = resolve_telemetry_context(config)
+        except Exception as exc:  # noqa: BLE001
+            _red_print(
+                f'[TENYSON] Warning: failed to resolve stop target for parallel branch "{label}": {exc}'
+            )
+            continue
+        if not db_url or not experiment_id:
+            continue
+
+        try:
+            request_stop(
+                db_url=db_url,
+                run_id=run_id,
+                experiment_id=experiment_id,
+                create_if_missing=True,
+            )
+            _red_print(
+                f'[TENYSON] Requested stop for parallel sibling "{label}" (run_id={run_id}).'
+            )
+        except Exception as exc:  # noqa: BLE001
+            _red_print(
+                f'[TENYSON] Warning: failed to stop parallel sibling "{label}" '
+                f"(run_id={run_id}): {exc}"
+            )
+
+
 def _validate_pipeline_run_names(steps: List[PipelineStep]) -> None:
     """
     Preflight: enforce explicit non-default run_name and uniqueness.
@@ -242,8 +290,9 @@ def run_pipeline(
                 for label, config, _job_class, _task in branches:
                     before_step(label, step_index, config, prior_results)
 
-            branch_outcomes: Dict[int, JobResult] = {}
-            with ThreadPoolExecutor(max_workers=len(branches)) as executor:
+            abort_parallel_stage = False
+            executor = ThreadPoolExecutor(max_workers=len(branches))
+            try:
                 future_map = {
                     executor.submit(
                         _run_branch_once,
@@ -259,45 +308,56 @@ def run_pipeline(
                     )
                 }
                 for future in as_completed(future_map):
-                    idx, result = future.result()
-                    branch_outcomes[idx] = result
+                    idx = future_map[future]
+                    completed_idx, result = future.result()
+                    if completed_idx != idx:
+                        idx = completed_idx
+                    label, config, job_class, step_task = branches[idx]
+                    job_type = job_type_from_class.get(job_class.__name__, "sft")
 
-            for idx, (label, config, job_class, step_task) in enumerate(branches):
-                job_type = job_type_from_class.get(job_class.__name__, "sft")
-                result = branch_outcomes[idx]
-                while True:
-                    results.append(result)
-                    if report_enabled:
-                        report.update(_report_update_data(label, result))
+                    while True:
+                        results.append(result)
+                        if report_enabled:
+                            report.update(_report_update_data(label, result))
 
-                    if _is_terminal_nonfailure(result):
-                        break
+                        if _is_terminal_nonfailure(result):
+                            break
 
-                    _red_print(
-                        f'[TENYSON] Step "{label}" failed: '
-                        f"{getattr(result, 'failure_reason', 'unknown')}"
-                    )
-                    experiment_id = resolve_experiment_id(config)
-                    notify_failure(
-                        step_label=label,
-                        result=result,
-                        failure_log_dir=failure_log_dir,
-                        failure_webhook_url=failure_webhook_url,
-                        db_url=db_url,
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                    )
+                        _red_print(
+                            f'[TENYSON] Step "{label}" failed: '
+                            f"{getattr(result, 'failure_reason', 'unknown')}"
+                        )
+                        experiment_id = resolve_experiment_id(config)
+                        notify_failure(
+                            step_label=label,
+                            result=result,
+                            failure_log_dir=failure_log_dir,
+                            failure_webhook_url=failure_webhook_url,
+                            db_url=db_url,
+                            experiment_id=experiment_id,
+                            phase=job_type,
+                        )
 
-                    action = _prompt_failure_action(
-                        step_label=label,
-                        config=config,
-                        job_type=job_type,
-                        on_failure=on_failure,
-                        last_result=result,
-                    )
-                    if action == "abort":
-                        return results
-                    result = _run_step(label, config, job_class, step_task, cloud)
+                        action = _prompt_failure_action(
+                            step_label=label,
+                            config=config,
+                            job_type=job_type,
+                            on_failure=on_failure,
+                            last_result=result,
+                        )
+                        if action == "abort":
+                            abort_parallel_stage = True
+                            _abort_parallel_stage_runs(
+                                branches,
+                                source_run_id=getattr(result, "run_id", None),
+                            )
+                            return results
+                        result = _run_step(label, config, job_class, step_task, cloud)
+            finally:
+                executor.shutdown(
+                    wait=not abort_parallel_stage,
+                    cancel_futures=abort_parallel_stage,
+                )
             continue
 
         _validate_step_tuple(step)
