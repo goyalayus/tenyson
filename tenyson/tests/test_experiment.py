@@ -1,9 +1,16 @@
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import tenyson.experiment as experiment_module
-from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
+from tenyson.experiment import (
+    AdapterRef,
+    ConfigTemplates,
+    ExperimentAborted,
+    ExperimentSession,
+)
 from tenyson.jobs.result import JobResult
 
 
@@ -43,6 +50,7 @@ class ExperimentSessionTests(unittest.TestCase):
             task=object(),
             templates=templates,
             cloud_factory=lambda: object(),
+            shared_overrides={"training": {"hf_repo_base": "org/base"}},
         )
 
         stage = session.rl(
@@ -50,10 +58,7 @@ class ExperimentSessionTests(unittest.TestCase):
             adapter=AdapterRef(repo_id="repo/id", revision="sha123"),
             run_name="wordle_rl_mixed",
             output_dir="./outputs/mixed/rl",
-            overrides={
-                "training": {"hf_repo_base": "org/base"},
-                "task": {"max_history_turns": 5},
-            },
+            overrides={"task": {"max_history_turns": 5}},
         )
 
         self.assertEqual(
@@ -81,6 +86,28 @@ class ExperimentSessionTests(unittest.TestCase):
             },
         )
         self.assertEqual(templates.clone("rl"), base_rl_template)
+
+    def test_config_templates_from_directory_uses_default_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            (config_dir / "sft_config.yaml").write_text(
+                "training:\n  epochs: 1\n",
+                encoding="utf-8",
+            )
+            (config_dir / "rl_config.yaml").write_text(
+                "training:\n  epochs: 2\n",
+                encoding="utf-8",
+            )
+            (config_dir / "eval_config.yaml").write_text(
+                "evaluation:\n  batch_size: 4\n",
+                encoding="utf-8",
+            )
+
+            templates = ConfigTemplates.from_directory(config_dir)
+
+        self.assertEqual(templates.clone("sft")["training"]["epochs"], 1)
+        self.assertEqual(templates.clone("rl")["training"]["epochs"], 2)
+        self.assertEqual(templates.clone("eval")["evaluation"]["batch_size"], 4)
 
     def test_run_stage_requires_exact_run_id(self) -> None:
         session = ExperimentSession(
@@ -139,6 +166,53 @@ class ExperimentSessionTests(unittest.TestCase):
             results["curr_eval_after_t3_turn3"].run_id,
             "wordle_curr_eval_after_t3_turn3",
         )
+
+    def test_branch_raises_after_abort_and_keeps_stage_result(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+        branch = session.branch(cloud=object())
+        stage = branch.sft("sft_main", run_name="wordle_sft_main")
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            return [_result("wordle_sft_main", status="failed")]
+
+        with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
+            with self.assertRaises(ExperimentAborted):
+                branch.run(stage)
+
+        self.assertEqual(branch.result("sft_main").status, "failed")
+
+    def test_run_branches_returns_each_branch_result_map(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            _label, config, _job_class, _task = steps[0]
+            training = config.get("training", {})
+            evaluation = config.get("evaluation", {})
+            run_id = training.get("run_name") or evaluation.get("run_name")
+            return [_result(run_id)]
+
+        with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
+            branch_results = session.run_branches(
+                {
+                    "left": lambda branch: branch.run(
+                        branch.sft("left_stage", run_name="left_run")
+                    ),
+                    "right": lambda branch: branch.run(
+                        branch.sft("right_stage", run_name="right_run")
+                    ),
+                }
+            )
+
+        self.assertEqual(branch_results["left"]["left_stage"].run_id, "left_run")
+        self.assertEqual(branch_results["right"]["right_stage"].run_id, "right_run")
 
 
 if __name__ == "__main__":

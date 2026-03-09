@@ -5,10 +5,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
-import boto3
-from botocore.exceptions import ClientError
+try:
+    import boto3  # type: ignore[import-not-found]
+    from botocore.exceptions import ClientError
+except ImportError:  # pragma: no cover - optional dependency guard
+    boto3 = None
+
+    class ClientError(Exception):
+        pass
+
 
 from tenyson.cloud.base import BaseCloudManager, JobFailedError, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
@@ -54,9 +61,48 @@ class AWSManager(BaseCloudManager):
         self.use_spot = use_spot
         self.spot_max_price = spot_max_price
 
+    @classmethod
+    def from_env(cls, **overrides: Any) -> "AWSManager":
+        config: Dict[str, Any] = {
+            "instance_type": os.getenv("TENYSON_AWS_INSTANCE_TYPE", "g5.2xlarge"),
+            "region": os.getenv("TENYSON_AWS_REGION", "us-east-1"),
+            "key_name": os.getenv("TENYSON_AWS_KEY_NAME"),
+            "key_path": os.getenv("TENYSON_AWS_KEY_PATH"),
+            "security_group": os.getenv("TENYSON_AWS_SECURITY_GROUP"),
+            "subnet": os.getenv("TENYSON_AWS_SUBNET") or None,
+            "profile": os.getenv("AWS_PROFILE") or None,
+            "auto_terminate": True,
+            "use_spot": False,
+            "spot_max_price": os.getenv("TENYSON_AWS_SPOT_MAX_PRICE") or None,
+        }
+        config.update(
+            {key: value for key, value in overrides.items() if value is not None}
+        )
+
+        required_env = {
+            "TENYSON_AWS_KEY_NAME": config["key_name"],
+            "TENYSON_AWS_KEY_PATH": config["key_path"],
+            "TENYSON_AWS_SECURITY_GROUP": config["security_group"],
+        }
+        missing = [name for name, value in required_env.items() if not value]
+        if missing:
+            raise ValueError(
+                "Missing required AWS environment variables for this experiment: "
+                + ", ".join(missing)
+            )
+        return cls(**config)
+
+    @classmethod
+    def factory_from_env(cls, **overrides: Any) -> Callable[[], "AWSManager"]:
+        return lambda: cls.from_env(**overrides)
+
     # ---- Helpers -----------------------------------------------------
 
     def _get_session(self):
+        if boto3 is None:
+            raise ImportError(
+                "boto3 is required for AWSManager. Install boto3 to run AWS experiments."
+            )
         return boto3.Session(profile_name=self.profile, region_name=self.region)
 
     def _get_latest_dlami(self, ec2_client) -> str:

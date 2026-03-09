@@ -1,7 +1,9 @@
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import wandb
+
+from tenyson.jobs.result import JobResult
 
 
 class ReportBuilder:
@@ -28,9 +30,145 @@ class ReportBuilder:
         for key, value in data.items():
             self.values[key] = str(value)
 
+    @staticmethod
+    def _format_value(
+        value: Any,
+        *,
+        precision: Optional[int] = None,
+        missing: str = "n/a",
+    ) -> str:
+        if value is None:
+            return missing
+        if precision is not None and isinstance(value, (int, float)):
+            return f"{float(value):.{precision}f}"
+        return str(value)
+
+    @staticmethod
+    def _format_wandb_link(
+        run_url: Optional[str],
+        *,
+        text: str = "run",
+        missing: str = "n/a",
+    ) -> str:
+        if not run_url:
+            return missing
+        return f"[{text}]({run_url})"
+
+    @classmethod
+    def result_placeholder_data(
+        cls,
+        label: str,
+        result: JobResult,
+        *,
+        metric_precision: Optional[int] = None,
+        wandb_text: str = "run",
+        missing: str = "n/a",
+    ) -> Dict[str, str]:
+        data: Dict[str, str] = {
+            f"{label}_status": cls._format_value(result.status, missing=missing),
+            f"{label}_wandb_link": cls._format_wandb_link(
+                result.wandb_url,
+                text=wandb_text,
+                missing=missing,
+            ),
+        }
+        for metric_name, metric_value in result.metrics.items():
+            data[f"{label}_{metric_name}"] = cls._format_value(
+                metric_value,
+                precision=metric_precision,
+                missing=missing,
+            )
+        return data
+
+    @classmethod
+    def metric_delta_value(
+        cls,
+        left: Optional[JobResult],
+        right: Optional[JobResult],
+        metric_name: str,
+        *,
+        precision: int = 4,
+        missing: str = "n/a",
+    ) -> str:
+        if left is None or right is None:
+            return missing
+        left_value = left.metrics.get(metric_name)
+        right_value = right.metrics.get(metric_name)
+        if not isinstance(left_value, (int, float)) or not isinstance(
+            right_value, (int, float)
+        ):
+            return missing
+        return cls._format_value(
+            float(left_value) - float(right_value),
+            precision=precision,
+            missing=missing,
+        )
+
     def fill(self, data: Dict[str, Any]) -> None:
         self._store_values(data)
         self._render()
+
+    def fill_result(
+        self,
+        label: str,
+        result: JobResult,
+        *,
+        metric_precision: Optional[int] = 4,
+        wandb_text: str = "run",
+        missing: str = "n/a",
+    ) -> None:
+        self.fill(
+            self.result_placeholder_data(
+                label,
+                result,
+                metric_precision=metric_precision,
+                wandb_text=wandb_text,
+                missing=missing,
+            )
+        )
+
+    def fill_results(
+        self,
+        results: Mapping[str, JobResult],
+        *,
+        metric_precision: Optional[int] = 4,
+        wandb_text: str = "run",
+        missing: str = "n/a",
+    ) -> None:
+        data: Dict[str, str] = {}
+        for label, result in results.items():
+            data.update(
+                self.result_placeholder_data(
+                    label,
+                    result,
+                    metric_precision=metric_precision,
+                    wandb_text=wandb_text,
+                    missing=missing,
+                )
+            )
+        self.fill(data)
+
+    def fill_metric_delta(
+        self,
+        placeholder: str,
+        left: Optional[JobResult],
+        right: Optional[JobResult],
+        metric_name: str,
+        *,
+        precision: int = 4,
+        missing: str = "n/a",
+    ) -> None:
+        self.fill(
+            {
+                placeholder: self.metric_delta_value(
+                    left,
+                    right,
+                    metric_name,
+                    precision=precision,
+                    missing=missing,
+                )
+            }
+        )
 
     def update(self, data: Dict[str, Any]) -> None:
         """

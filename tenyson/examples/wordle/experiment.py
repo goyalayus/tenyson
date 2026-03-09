@@ -1,119 +1,26 @@
-from copy import deepcopy
 import os
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 from tenyson.cloud.aws import AWSManager
-from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
-from tenyson.jobs.result import JobResult
+from tenyson.experiment import (
+    AdapterRef,
+    ConfigTemplates,
+    ExperimentAborted,
+    ExperimentBranch,
+    ExperimentSession,
+)
 from tenyson.loader import load_task
 from tenyson.reporting.builder import ReportBuilder
 
 
-def _cloud_kwargs() -> Dict[str, Any]:
-    return {
-        "instance_type": os.getenv("TENYSON_AWS_INSTANCE_TYPE", "g5.2xlarge"),
-        "region": os.getenv("TENYSON_AWS_REGION", "us-east-1"),
-        "key_name": os.getenv("TENYSON_AWS_KEY_NAME"),
-        "key_path": os.getenv("TENYSON_AWS_KEY_PATH"),
-        "security_group": os.getenv("TENYSON_AWS_SECURITY_GROUP"),
-        "subnet": os.getenv("TENYSON_AWS_SUBNET") or None,
-        "profile": os.getenv("AWS_PROFILE") or None,
-        "auto_terminate": True,
-        "use_spot": True,
-        "spot_max_price": os.getenv("TENYSON_AWS_SPOT_MAX_PRICE") or None,
-    }
+REPORT_METRICS = (
+    "constraint_accuracy",
+    "dict_accuracy",
+    "format_accuracy",
+)
 
 
-def _build_cloud(kwargs: Dict[str, Any]) -> AWSManager:
-    return AWSManager(**kwargs)
-
-
-def _with_hf_repo_override(
-    overrides: Dict[str, Any], hf_repo_base_override: Optional[str]
-) -> Dict[str, Any]:
-    merged = deepcopy(overrides)
-    if hf_repo_base_override:
-        merged.setdefault("training", {})["hf_repo_base"] = hf_repo_base_override
-    return merged
-
-
-def _build_templates(base_dir: Path) -> ConfigTemplates:
-    return ConfigTemplates.from_paths(
-        sft=base_dir / "configs" / "sft_config.yaml",
-        rl=base_dir / "configs" / "rl_config.yaml",
-        eval=base_dir / "configs" / "eval_config.yaml",
-    )
-
-
-def _print_abort_message() -> None:
-    print("[WORDLE] Experiment aborted by user. Stopping without final report.")
-
-
-def _run_mixed_branch(
-    session: ExperimentSession,
-    *,
-    adapter: AdapterRef,
-    hf_repo_base_override: Optional[str],
-) -> Dict[str, JobResult]:
-    cloud = session.create_cloud()
-    results: Dict[str, JobResult] = {}
-
-    mixed_rl = session.rl(
-        "mixed_rl",
-        run_name="wordle_rl_mixed",
-        output_dir="./outputs/wordle_research/mixed/rl",
-        adapter=adapter,
-        overrides=_with_hf_repo_override(
-            {
-                "task": {
-                    "min_history_turns": 1,
-                    "max_history_turns": 5,
-                }
-            },
-            hf_repo_base_override,
-        ),
-    )
-    results["mixed_rl"] = session.run_stage(mixed_rl, cloud=cloud)
-    if session.aborted:
-        return results
-
-    mixed_adapter = session.require_adapter(results["mixed_rl"], "mixed_rl")
-    mixed_final_eval = session.eval(
-        "mixed_final_eval",
-        run_name="wordle_mixed_final_eval",
-        output_dir="./outputs/wordle_research/mixed/eval_final_mixed",
-        adapter=mixed_adapter,
-        overrides={
-            "task": {
-                "min_history_turns": 1,
-                "max_history_turns": 5,
-            }
-        },
-    )
-    results["mixed_final_eval"] = session.run_stage(mixed_final_eval, cloud=cloud)
-    return results
-
-
-def _format_metric(result: Optional[JobResult], key: str) -> str:
-    if result is None:
-        return "n/a"
-    value = result.metrics.get(key)
-    if value is None:
-        return "n/a"
-    if isinstance(value, (int, float)):
-        return f"{float(value):.4f}"
-    return str(value)
-
-
-def _wandb_link(result: Optional[JobResult]) -> str:
-    if result is None or not result.wandb_url:
-        return "n/a"
-    return f"[run]({result.wandb_url})"
-
-
-def _curriculum_eval_turns(stage_turn: int) -> List[int]:
+def _curriculum_eval_turns(stage_turn: int) -> list[int]:
     if stage_turn == 2:
         return [2]
     if stage_turn == 3:
@@ -125,46 +32,64 @@ def _curriculum_eval_turns(stage_turn: int) -> List[int]:
     raise ValueError(f"Unsupported curriculum stage turn: {stage_turn}")
 
 
-def _run_curriculum_branch(
-    session: ExperimentSession,
-    *,
-    adapter: AdapterRef,
-    hf_repo_base_override: Optional[str],
-) -> Dict[str, JobResult]:
-    cloud = session.create_cloud()
-    results: Dict[str, JobResult] = {}
+def _run_mixed_branch(branch: ExperimentBranch, *, adapter: AdapterRef) -> None:
+    branch.run(
+        branch.rl(
+            "mixed_rl",
+            run_name="wordle_rl_mixed",
+            output_dir="./outputs/wordle_research/mixed/rl",
+            adapter=adapter,
+            overrides={
+                "task": {
+                    "min_history_turns": 1,
+                    "max_history_turns": 5,
+                }
+            },
+        )
+    )
+    mixed_adapter = branch.require_adapter("mixed_rl")
+    branch.run(
+        branch.eval(
+            "mixed_final_eval",
+            run_name="wordle_mixed_final_eval",
+            output_dir="./outputs/wordle_research/mixed/eval_final_mixed",
+            adapter=mixed_adapter,
+            overrides={
+                "task": {
+                    "min_history_turns": 1,
+                    "max_history_turns": 5,
+                }
+            },
+        )
+    )
+
+
+def _run_curriculum_branch(branch: ExperimentBranch, *, adapter: AdapterRef) -> None:
     current_adapter = adapter
 
     for stage_turn in [2, 3, 4, 5]:
-        if session.aborted:
-            return results
         rl_key = f"curr_rl_t{stage_turn}"
-        rl_stage = session.rl(
-            rl_key,
-            run_name=f"wordle_curriculum_rl_t{stage_turn}",
-            output_dir=f"./outputs/wordle_research/curriculum/rl_t{stage_turn}",
-            adapter=current_adapter,
-            overrides=_with_hf_repo_override(
-                {
+        branch.run(
+            branch.rl(
+                rl_key,
+                run_name=f"wordle_curriculum_rl_t{stage_turn}",
+                output_dir=f"./outputs/wordle_research/curriculum/rl_t{stage_turn}",
+                adapter=current_adapter,
+                overrides={
                     "task": {
                         "min_history_turns": stage_turn,
                         "max_history_turns": stage_turn,
                     }
                 },
-                hf_repo_base_override,
-            ),
+            )
         )
-        results[rl_key] = session.run_stage(rl_stage, cloud=cloud)
-        if session.aborted:
-            return results
-        current_adapter = session.require_adapter(results[rl_key], rl_key)
+        current_adapter = branch.require_adapter(rl_key)
 
-        eval_turns = _curriculum_eval_turns(stage_turn)
         eval_stages = []
-        for turn in eval_turns:
+        for turn in _curriculum_eval_turns(stage_turn):
             eval_key = f"curr_eval_after_t{stage_turn}_turn{turn}"
             eval_stages.append(
-                session.eval(
+                branch.eval(
                     eval_key,
                     run_name=f"wordle_curr_eval_after_t{stage_turn}_turn{turn}",
                     output_dir=f"./outputs/wordle_research/curriculum/eval_after_t{stage_turn}_turn{turn}",
@@ -180,227 +105,106 @@ def _run_curriculum_branch(
             )
 
         if len(eval_stages) == 1:
-            eval_stage = eval_stages[0]
-            results[eval_stage.id] = session.run_stage(eval_stage, cloud=cloud)
+            branch.run(eval_stages[0])
         else:
-            parallel_results = session.run_parallel(
+            branch.run_parallel(
                 label=f"curr_eval_after_t{stage_turn}",
                 stages=eval_stages,
-                cloud=cloud,
             )
-            results.update(parallel_results)
 
-        if session.aborted:
-            return results
-
-    curr_final_eval = session.eval(
-        "curr_final_eval",
-        run_name="wordle_curriculum_final_eval",
-        output_dir="./outputs/wordle_research/curriculum/eval_final_mixed",
-        adapter=current_adapter,
-        overrides={
-            "task": {
-                "min_history_turns": 1,
-                "max_history_turns": 5,
-            }
-        },
-    )
-    results["curr_final_eval"] = session.run_stage(curr_final_eval, cloud=cloud)
-    return results
-
-
-def _compute_delta(a: Optional[JobResult], b: Optional[JobResult], key: str) -> str:
-    if a is None or b is None:
-        return "n/a"
-    va = a.metrics.get(key)
-    vb = b.metrics.get(key)
-    if not isinstance(va, (int, float)) or not isinstance(vb, (int, float)):
-        return "n/a"
-    return f"{float(va) - float(vb):.4f}"
-
-
-def _build_report_data(
-    sft_result: JobResult,
-    baseline_eval_result: JobResult,
-    mixed_results: Dict[str, JobResult],
-    curriculum_results: Dict[str, JobResult],
-) -> Dict[str, str]:
-    data: Dict[str, str] = {
-        "sft_status": sft_result.status,
-        "sft_wandb_link": _wandb_link(sft_result),
-        "baseline_eval_status": baseline_eval_result.status,
-        "baseline_eval_constraint_accuracy": _format_metric(
-            baseline_eval_result, "constraint_accuracy"
-        ),
-        "baseline_eval_dict_accuracy": _format_metric(
-            baseline_eval_result, "dict_accuracy"
-        ),
-        "baseline_eval_format_accuracy": _format_metric(
-            baseline_eval_result, "format_accuracy"
-        ),
-    }
-
-    mixed_rl = mixed_results.get("mixed_rl")
-    mixed_final_eval = mixed_results.get("mixed_final_eval")
-    data.update(
-        {
-            "mixed_rl_status": mixed_rl.status if mixed_rl else "n/a",
-            "mixed_rl_wandb_link": _wandb_link(mixed_rl),
-            "mixed_final_eval_status": mixed_final_eval.status
-            if mixed_final_eval
-            else "n/a",
-            "mixed_final_constraint_accuracy": _format_metric(
-                mixed_final_eval, "constraint_accuracy"
-            ),
-            "mixed_final_dict_accuracy": _format_metric(
-                mixed_final_eval, "dict_accuracy"
-            ),
-            "mixed_final_format_accuracy": _format_metric(
-                mixed_final_eval, "format_accuracy"
-            ),
-        }
-    )
-
-    for turn in [2, 3, 4, 5]:
-        rl_key = f"curr_rl_t{turn}"
-        rl_result = curriculum_results.get(rl_key)
-        data[f"{rl_key}_status"] = rl_result.status if rl_result else "n/a"
-        data[f"{rl_key}_wandb_link"] = _wandb_link(rl_result)
-
-    curriculum_eval_keys = [
-        "curr_eval_after_t2_turn2",
-        "curr_eval_after_t3_turn2",
-        "curr_eval_after_t3_turn3",
-        "curr_eval_after_t4_turn3",
-        "curr_eval_after_t4_turn4",
-        "curr_eval_after_t5_turn4",
-        "curr_eval_after_t5_turn5",
-    ]
-    for key in curriculum_eval_keys:
-        eval_result = curriculum_results.get(key)
-        data[f"{key}_status"] = eval_result.status if eval_result else "n/a"
-        data[f"{key}_constraint_accuracy"] = _format_metric(
-            eval_result, "constraint_accuracy"
+    branch.run(
+        branch.eval(
+            "curr_final_eval",
+            run_name="wordle_curriculum_final_eval",
+            output_dir="./outputs/wordle_research/curriculum/eval_final_mixed",
+            adapter=current_adapter,
+            overrides={
+                "task": {
+                    "min_history_turns": 1,
+                    "max_history_turns": 5,
+                }
+            },
         )
-        data[f"{key}_dict_accuracy"] = _format_metric(eval_result, "dict_accuracy")
-        data[f"{key}_format_accuracy"] = _format_metric(eval_result, "format_accuracy")
-
-    curr_final_eval = curriculum_results.get("curr_final_eval")
-    data.update(
-        {
-            "curr_final_eval_status": curr_final_eval.status
-            if curr_final_eval
-            else "n/a",
-            "curr_final_constraint_accuracy": _format_metric(
-                curr_final_eval, "constraint_accuracy"
-            ),
-            "curr_final_dict_accuracy": _format_metric(
-                curr_final_eval, "dict_accuracy"
-            ),
-            "curr_final_format_accuracy": _format_metric(
-                curr_final_eval, "format_accuracy"
-            ),
-            "delta_final_constraint_accuracy": _compute_delta(
-                mixed_final_eval, curr_final_eval, "constraint_accuracy"
-            ),
-            "delta_final_dict_accuracy": _compute_delta(
-                mixed_final_eval, curr_final_eval, "dict_accuracy"
-            ),
-            "delta_final_format_accuracy": _compute_delta(
-                mixed_final_eval, curr_final_eval, "format_accuracy"
-            ),
-        }
     )
-
-    return data
 
 
 def main() -> None:
     base_dir = Path(__file__).parent
     task = load_task(str(Path(__file__).with_name("wordle_task.py")))
 
-    cloud_kwargs = _cloud_kwargs()
-    required_aws = {
-        "TENYSON_AWS_KEY_NAME": cloud_kwargs["key_name"],
-        "TENYSON_AWS_KEY_PATH": cloud_kwargs["key_path"],
-        "TENYSON_AWS_SECURITY_GROUP": cloud_kwargs["security_group"],
-    }
-    missing = [k for k, v in required_aws.items() if not v]
-    if missing:
-        raise ValueError(
-            "Missing required AWS environment variables for this experiment: "
-            + ", ".join(missing)
-        )
-
-    hf_repo_base_override = os.getenv("TENYSON_HF_REPO_BASE")
+    hf_repo_base = os.getenv("TENYSON_HF_REPO_BASE")
+    shared_overrides = (
+        {"training": {"hf_repo_base": hf_repo_base}} if hf_repo_base else None
+    )
     session = ExperimentSession(
         task=task,
-        templates=_build_templates(base_dir),
-        cloud_factory=lambda: _build_cloud(cloud_kwargs),
+        templates=ConfigTemplates.from_directory(base_dir / "configs"),
+        cloud_factory=AWSManager.factory_from_env(
+            auto_terminate=True,
+            use_spot=True,
+        ),
         on_failure="wait",
+        shared_overrides=shared_overrides,
     )
-    primary_cloud = session.create_cloud()
+    primary_branch = session.branch(cloud=session.create_cloud())
 
-    sft_stage = session.sft(
-        "sft_main",
-        run_name="wordle_sft_main",
-        output_dir="./outputs/wordle_research/sft",
-        overrides=_with_hf_repo_override({}, hf_repo_base_override),
-    )
-    sft_result = session.run_stage(sft_stage, cloud=primary_cloud)
-    if session.aborted:
-        _print_abort_message()
-        return
-    sft_adapter = session.require_adapter(sft_result, "sft_main")
-
-    baseline_eval_stage = session.eval(
-        "eval_baseline_mixed",
-        run_name="wordle_eval_baseline_mixed",
-        output_dir="./outputs/wordle_research/eval_baseline_mixed",
-        adapter=sft_adapter,
-        overrides={
-            "task": {
-                "min_history_turns": 1,
-                "max_history_turns": 5,
+    try:
+        primary_branch.run(
+            primary_branch.sft(
+                "sft_main",
+                run_name="wordle_sft_main",
+                output_dir="./outputs/wordle_research/sft",
+            )
+        )
+        sft_adapter = primary_branch.require_adapter("sft_main")
+        primary_branch.run(
+            primary_branch.eval(
+                "eval_baseline_mixed",
+                run_name="wordle_eval_baseline_mixed",
+                output_dir="./outputs/wordle_research/eval_baseline_mixed",
+                adapter=sft_adapter,
+                overrides={
+                    "task": {
+                        "min_history_turns": 1,
+                        "max_history_turns": 5,
+                    }
+                },
+            )
+        )
+        branch_results = session.run_branches(
+            {
+                "mixed": lambda branch: _run_mixed_branch(branch, adapter=sft_adapter),
+                "curriculum": lambda branch: _run_curriculum_branch(
+                    branch,
+                    adapter=sft_adapter,
+                ),
             }
-        },
-    )
-    baseline_eval_result = session.run_stage(baseline_eval_stage, cloud=primary_cloud)
-    if session.aborted:
-        _print_abort_message()
+        )
+    except ExperimentAborted as exc:
+        print(exc)
         return
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        mixed_future = executor.submit(
-            _run_mixed_branch,
-            session,
-            adapter=sft_adapter,
-            hf_repo_base_override=hf_repo_base_override,
-        )
-        curriculum_future = executor.submit(
-            _run_curriculum_branch,
-            session,
-            adapter=sft_adapter,
-            hf_repo_base_override=hf_repo_base_override,
-        )
-        mixed_results = mixed_future.result()
-        curriculum_results = curriculum_future.result()
-
-    if session.aborted:
-        _print_abort_message()
-        return
-
-    report_data = _build_report_data(
-        sft_result=sft_result,
-        baseline_eval_result=baseline_eval_result,
-        mixed_results=mixed_results,
-        curriculum_results=curriculum_results,
+    mixed_results = branch_results["mixed"]
+    curriculum_results = branch_results["curriculum"]
+    all_results = ExperimentSession.combine_results(
+        primary_branch.results(),
+        mixed_results,
+        curriculum_results,
     )
+
     report = ReportBuilder(
         template_path=str(base_dir / "report_template.md"),
         output_path=str(base_dir / "final_report.md"),
     )
-    report.fill(report_data)
+    report.fill_results(all_results, metric_precision=4, wandb_text="run")
+    for metric_name in REPORT_METRICS:
+        report.fill_metric_delta(
+            f"delta_final_{metric_name}",
+            mixed_results.get("mixed_final_eval"),
+            curriculum_results.get("curr_final_eval"),
+            metric_name,
+            precision=4,
+        )
     report.generate()
 
 

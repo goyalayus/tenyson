@@ -12,6 +12,8 @@ __all__ = [
     "ModalManager",
     "CloudManager",
     "AdapterRef",
+    "ExperimentAborted",
+    "ExperimentBranch",
     "ConfigTemplates",
     "ExperimentSession",
     "StageSpec",
@@ -31,6 +33,8 @@ _EXPORTS = {
     "ModalManager": ("tenyson.cloud.modal", "ModalManager"),
     "CloudManager": ("tenyson.cloud.manager", "CloudManager"),
     "AdapterRef": ("tenyson.experiment", "AdapterRef"),
+    "ExperimentAborted": ("tenyson.experiment", "ExperimentAborted"),
+    "ExperimentBranch": ("tenyson.experiment", "ExperimentBranch"),
     "ConfigTemplates": ("tenyson.experiment", "ConfigTemplates"),
     "ExperimentSession": ("tenyson.experiment", "ExperimentSession"),
     "StageSpec": ("tenyson.experiment", "StageSpec"),
@@ -48,6 +52,8 @@ if TYPE_CHECKING:
     from tenyson.experiment import (
         AdapterRef,
         ConfigTemplates,
+        ExperimentAborted,
+        ExperimentBranch,
         ExperimentSession,
         StageSpec,
     )

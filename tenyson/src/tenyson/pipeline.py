@@ -33,17 +33,12 @@ def _is_terminal_nonfailure(result: JobResult) -> bool:
 
 def _report_update_data(label: str, result: JobResult) -> Dict[str, Any]:
     """Build placeholder update dict for report from step label and result."""
-    wandb_link = (
-        f"[{label} run (WandB)]({result.wandb_url})" if result.wandb_url else "n/a"
+    return ReportBuilder.result_placeholder_data(
+        label,
+        result,
+        metric_precision=None,
+        wandb_text=f"{label} run (WandB)",
     )
-    data: Dict[str, Any] = {
-        f"{label}_status": result.status,
-        f"{label}_wandb_link": wandb_link,
-    }
-    if result.metrics:
-        for k, v in result.metrics.items():
-            data[f"{label}_{k}"] = v if isinstance(v, str) else str(v)
-    return data
 
 
 def _run_step(

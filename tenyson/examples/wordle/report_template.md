@@ -1,20 +1,20 @@
 # Wordle Research Experiment Report
 
 ## Stage 1: SFT + Baseline Eval
-- SFT status: `{sft_status}`
-- SFT WandB: `{sft_wandb_link}`
-- Baseline mixed eval status: `{baseline_eval_status}`
-- Baseline constraint_accuracy: `{baseline_eval_constraint_accuracy}`
-- Baseline dict_accuracy: `{baseline_eval_dict_accuracy}`
-- Baseline format_accuracy: `{baseline_eval_format_accuracy}`
+- SFT status: `{sft_main_status}`
+- SFT WandB: `{sft_main_wandb_link}`
+- Baseline mixed eval status: `{eval_baseline_mixed_status}`
+- Baseline constraint_accuracy: `{eval_baseline_mixed_constraint_accuracy}`
+- Baseline dict_accuracy: `{eval_baseline_mixed_dict_accuracy}`
+- Baseline format_accuracy: `{eval_baseline_mixed_format_accuracy}`
 
 ## Branch A: Mixed RL (turns 1..5)
 - Mixed RL status: `{mixed_rl_status}`
 - Mixed RL WandB: `{mixed_rl_wandb_link}`
 - Mixed final mixed-eval status: `{mixed_final_eval_status}`
-- Mixed final constraint_accuracy: `{mixed_final_constraint_accuracy}`
-- Mixed final dict_accuracy: `{mixed_final_dict_accuracy}`
-- Mixed final format_accuracy: `{mixed_final_format_accuracy}`
+- Mixed final constraint_accuracy: `{mixed_final_eval_constraint_accuracy}`
+- Mixed final dict_accuracy: `{mixed_final_eval_dict_accuracy}`
+- Mixed final format_accuracy: `{mixed_final_eval_format_accuracy}`
 
 ## Branch B: Curriculum RL (2 -> 3 -> 4 -> 5)
 - RL turn-2 status: `{curr_rl_t2_status}` | WandB: `{curr_rl_t2_wandb_link}`
@@ -47,9 +47,9 @@
 
 ## Final Mixed Eval Comparison (turns 1..5)
 - Curriculum final mixed-eval status: `{curr_final_eval_status}`
-- Curriculum final constraint_accuracy: `{curr_final_constraint_accuracy}`
-- Curriculum final dict_accuracy: `{curr_final_dict_accuracy}`
-- Curriculum final format_accuracy: `{curr_final_format_accuracy}`
+- Curriculum final constraint_accuracy: `{curr_final_eval_constraint_accuracy}`
+- Curriculum final dict_accuracy: `{curr_final_eval_dict_accuracy}`
+- Curriculum final format_accuracy: `{curr_final_eval_format_accuracy}`
 
 ### Mixed - Curriculum Delta
 - constraint_accuracy delta: `{delta_final_constraint_accuracy}`

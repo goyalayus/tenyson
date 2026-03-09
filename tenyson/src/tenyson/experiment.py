@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,11 @@ from tenyson.loader import load_config
 from tenyson.pipeline import run_pipeline
 
 
+_DEFAULT_ABORT_MESSAGE = (
+    "[TENYSON] Experiment aborted. Skipping remaining stages and final outputs."
+)
+
+
 def _deep_merge(base: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
     for key, value in overrides.items():
         if isinstance(value, Mapping) and isinstance(base.get(key), dict):
@@ -30,6 +36,10 @@ def _is_retryable_failure(result: JobResult) -> bool:
         "success",
         "partial",
     }
+
+
+class ExperimentAborted(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,22 @@ class ConfigTemplates:
     def from_paths(cls, **named_paths: str | Path) -> "ConfigTemplates":
         templates = {name: load_config(str(path)) for name, path in named_paths.items()}
         return cls(templates)
+
+    @classmethod
+    def from_directory(
+        cls,
+        config_dir: str | Path,
+        *,
+        sft: str = "sft_config.yaml",
+        rl: str = "rl_config.yaml",
+        eval: str = "eval_config.yaml",
+    ) -> "ConfigTemplates":
+        config_root = Path(config_dir)
+        return cls.from_paths(
+            sft=config_root / sft,
+            rl=config_root / rl,
+            eval=config_root / eval,
+        )
 
     def clone(self, name: str) -> Dict[str, Any]:
         if name not in self._templates:
@@ -154,6 +180,62 @@ def _resolve_stage_run_name(stage: StageSpec) -> str:
     return run_id
 
 
+class ExperimentBranch:
+    def __init__(
+        self, session: "ExperimentSession", *, cloud: Optional[Any] = None
+    ) -> None:
+        self.session = session
+        self._cloud = cloud
+        self._results: Dict[str, JobResult] = {}
+
+    def sft(self, stage_id: str, **kwargs: Any) -> StageSpec:
+        return self.session.sft(stage_id, **kwargs)
+
+    def rl(self, stage_id: str, **kwargs: Any) -> StageSpec:
+        return self.session.rl(stage_id, **kwargs)
+
+    def eval(self, stage_id: str, **kwargs: Any) -> StageSpec:
+        return self.session.eval(stage_id, **kwargs)
+
+    def run(self, stage: StageSpec) -> JobResult:
+        result = self.session.run_stage(stage, cloud=self._resolve_cloud())
+        self._store_result(stage.id, result)
+        self.session.raise_if_aborted()
+        return result
+
+    def run_parallel(
+        self,
+        label: str,
+        stages: Sequence[StageSpec],
+    ) -> Dict[str, JobResult]:
+        results = self.session.run_parallel(label, stages, cloud=self._resolve_cloud())
+        for stage in stages:
+            self._store_result(stage.id, results[stage.id])
+        self.session.raise_if_aborted()
+        return results
+
+    def result(self, stage_id: str) -> JobResult:
+        if stage_id not in self._results:
+            raise KeyError(f'No result recorded for stage "{stage_id}".')
+        return self._results[stage_id]
+
+    def require_adapter(self, stage_id: str) -> AdapterRef:
+        return self.session.require_adapter(self.result(stage_id), stage_id)
+
+    def results(self) -> Dict[str, JobResult]:
+        return dict(self._results)
+
+    def _resolve_cloud(self) -> Any:
+        if self._cloud is None:
+            self._cloud = self.session.create_cloud()
+        return self._cloud
+
+    def _store_result(self, stage_id: str, result: JobResult) -> None:
+        if stage_id in self._results:
+            raise ValueError(f'Duplicate branch result for stage "{stage_id}".')
+        self._results[stage_id] = result
+
+
 class ExperimentSession:
     def __init__(
         self,
@@ -162,11 +244,15 @@ class ExperimentSession:
         templates: ConfigTemplates,
         cloud_factory: Optional[Callable[[], Any]] = None,
         on_failure: str = "wait",
+        shared_overrides: Optional[Mapping[str, Any]] = None,
+        abort_message: str = _DEFAULT_ABORT_MESSAGE,
     ) -> None:
         self.task = task
         self.templates = templates
         self.cloud_factory = cloud_factory
         self.on_failure = on_failure
+        self.shared_overrides = deepcopy(shared_overrides) if shared_overrides else None
+        self.abort_message = abort_message
         self._abort_controller = _ExperimentAbortController()
 
     @property
@@ -177,6 +263,54 @@ class ExperimentSession:
         if self.cloud_factory is None:
             raise RuntimeError("This experiment session has no cloud_factory.")
         return self.cloud_factory()
+
+    def branch(self, *, cloud: Optional[Any] = None) -> ExperimentBranch:
+        self.raise_if_aborted()
+        return ExperimentBranch(self, cloud=cloud)
+
+    def raise_if_aborted(self) -> None:
+        if self.aborted:
+            raise ExperimentAborted(self.abort_message)
+
+    def run_branches(
+        self,
+        branches: Mapping[str, Callable[[ExperimentBranch], None]],
+    ) -> Dict[str, Dict[str, JobResult]]:
+        self.raise_if_aborted()
+        if not branches:
+            return {}
+
+        def _run_branch(
+            runner: Callable[[ExperimentBranch], None],
+        ) -> Dict[str, JobResult]:
+            branch = self.branch()
+            runner(branch)
+            return branch.results()
+
+        completed: Dict[str, Dict[str, JobResult]] = {}
+        with ThreadPoolExecutor(max_workers=len(branches)) as executor:
+            future_to_label = {
+                executor.submit(_run_branch, runner): label
+                for label, runner in branches.items()
+            }
+            for future in as_completed(future_to_label):
+                label = future_to_label[future]
+                completed[label] = future.result()
+        return {label: completed[label] for label in branches}
+
+    @staticmethod
+    def combine_results(
+        *result_groups: Mapping[str, JobResult],
+    ) -> Dict[str, JobResult]:
+        combined: Dict[str, JobResult] = {}
+        for group in result_groups:
+            for stage_id, result in group.items():
+                if stage_id in combined:
+                    raise ValueError(
+                        f'Duplicate stage id "{stage_id}" while combining experiment results.'
+                    )
+                combined[stage_id] = result
+        return combined
 
     def sft(
         self,
@@ -241,6 +375,7 @@ class ExperimentSession:
         )
 
     def run_stage(self, stage: StageSpec, *, cloud: Optional[Any] = None) -> JobResult:
+        self.raise_if_aborted()
         run_id = _resolve_stage_run_name(stage)
         active_run_id = self._abort_controller.register_stage(stage)
         try:
@@ -278,6 +413,10 @@ class ExperimentSession:
         *,
         cloud: Optional[Any] = None,
     ) -> Dict[str, JobResult]:
+        self.raise_if_aborted()
+        if not stages:
+            return {}
+
         active_run_ids = [
             active_run_id
             for active_run_id in (
@@ -355,6 +494,8 @@ class ExperimentSession:
         run_section: str,
     ) -> StageSpec:
         config = self.templates.clone(base)
+        if self.shared_overrides:
+            _deep_merge(config, self.shared_overrides)
         if overrides:
             _deep_merge(config, overrides)
 
