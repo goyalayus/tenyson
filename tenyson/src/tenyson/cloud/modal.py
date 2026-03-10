@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import os
+import sys
 from typing import Any, Callable, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
@@ -60,6 +61,16 @@ class ModalManager(BaseCloudManager):
     def factory_from_env(cls, **overrides: Any) -> Callable[[], "ModalManager"]:
         return lambda: cls.from_env(**overrides)
 
+    def _resolve_modal_gpu_request(self) -> str:
+        gpu_name = str(self.gpu or "").strip().upper()
+        gpu_map = {
+            "A10G": "A10G",
+            "A100": "A100-40GB",
+            "A100-80GB": "A100-80GB",
+            "H100": "H100",
+        }
+        return gpu_map.get(gpu_name, "A100-40GB")
+
     def _resolve_local_project_root(self) -> str:
         """
         Resolve the local project root that contains src-layout package files.
@@ -106,31 +117,35 @@ class ModalManager(BaseCloudManager):
             ) from exc
 
         app = modal.App("tenyson-job-runner")
+        local_python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
         image = (
-            modal.Image.debian_slim(python_version="3.11")
+            modal.Image.debian_slim(python_version=local_python_version)
             .run_commands(runtime_pip_install_command())
             .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
         )
 
         secrets: List[Any] = []
-        try:
-            secrets.append(modal.Secret.from_name("huggingface-secret"))
-        except modal.exception.NotFoundError:
-            pass
-        try:
-            secrets.append(modal.Secret.from_name("wandb-secret"))
-        except modal.exception.NotFoundError:
-            pass
+        runtime_secret_env: Dict[str, str] = {}
+        hf_token = str(os.getenv("HF_TOKEN") or "").strip()
+        wandb_api_key = str(os.getenv("WANDB_API_KEY") or "").strip()
+        if hf_token:
+            runtime_secret_env["HF_TOKEN"] = hf_token
+        if wandb_api_key:
+            runtime_secret_env["WANDB_API_KEY"] = wandb_api_key
+        if runtime_secret_env:
+            secrets.append(modal.Secret.from_dict(runtime_secret_env))
 
         local_project_root = self._resolve_local_project_root()
         image = image.add_local_dir(local_project_root, "/workspace")
+        gpu_request = self._resolve_modal_gpu_request()
 
         @app.function(
             image=image,
-            gpu=None,
+            gpu=gpu_request,
             timeout=self.timeout,
             secrets=secrets,
+            serialized=True,
         )
         def run_remote(job_type: str, config_rel_path: str, task_spec: str) -> None:
             import os
@@ -154,10 +169,24 @@ class ModalManager(BaseCloudManager):
             print(f"[ModalManager] Running on Modal: {' '.join(cmd)}", flush=True)
             import subprocess
 
-            result = subprocess.run(cmd, env=os.environ.copy(), check=False)
+            result = subprocess.run(
+                cmd,
+                env=os.environ.copy(),
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            if result.stdout:
+                print(result.stdout, end="", flush=True)
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr, flush=True)
             if result.returncode != 0:
+                details = (result.stderr or result.stdout or "").strip()
+                if len(details) > 1000:
+                    details = details[-1000:]
                 raise RuntimeError(
-                    f"Tenyson job failed inside Modal with code {result.returncode}"
+                    "Tenyson job failed inside Modal with code "
+                    f"{result.returncode}. {details}"
                 )
 
         from pathlib import Path
@@ -211,26 +240,14 @@ class ModalManager(BaseCloudManager):
         config_rel_path = os.path.relpath(str(config_path), local_project_root)
 
         if self.profile:
-            import os
-
             os.environ["MODAL_PROFILE"] = self.profile
-
-        gpu_map: Dict[str, Any] = {
-            "A10G": modal.gpu.A10G(),
-            "A100": modal.gpu.A100(),
-            "A100-80GB": modal.gpu.A100(size="80GB"),
-            "H100": modal.gpu.H100(),
-        }
-        gpu_request = gpu_map.get(self.gpu, modal.gpu.A100())
 
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
             try:
-                run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
-                    job_type,
-                    config_rel_path,
-                    task_spec,
-                )
+                with modal.enable_output():
+                    with app.run():
+                        run_remote.remote(job_type, config_rel_path, task_spec)
             except Exception as exc:  # noqa: BLE001
                 hf_repo_id, hf_revision = _resolve_failed_resume_target()
                 result = JobResult(
