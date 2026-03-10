@@ -3,18 +3,25 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from tenyson.cloud.base import _red_print
 from tenyson.core.control import request_stop
-from tenyson.core.telemetry import resolve_telemetry_context
+from tenyson.core.telemetry import (
+    TelemetryClient,
+    get_run_metadata_wandb_url,
+    resolve_telemetry_context,
+)
 from tenyson.jobs.eval import EvalJob
 from tenyson.jobs.result import JobResult
 from tenyson.jobs.rl import RLJob
 from tenyson.jobs.sft import SFTJob
 from tenyson.loader import load_config
 from tenyson.pipeline import run_pipeline
+from tenyson.reporting.builder import ReportBuilder
 
 
 _DEFAULT_ABORT_MESSAGE = (
@@ -180,6 +187,139 @@ def _resolve_stage_run_name(stage: StageSpec) -> str:
     return run_id
 
 
+@dataclass
+class _ReportWatch:
+    stop_event: threading.Event
+    thread: threading.Thread
+
+
+class _ExperimentReportController:
+    def __init__(
+        self,
+        report: ReportBuilder,
+        *,
+        metric_precision: Optional[int] = 4,
+        wandb_text: str = "run",
+        missing: str = "n/a",
+        poll_interval_seconds: float = 2.0,
+    ) -> None:
+        self.report = report
+        self.metric_precision = metric_precision
+        self.wandb_text = wandb_text
+        self.missing = missing
+        self.poll_interval_seconds = max(0.1, float(poll_interval_seconds))
+        self._lock = threading.Lock()
+        self._watches: Dict[str, _ReportWatch] = {}
+        self._clients: Dict[str, TelemetryClient] = {}
+
+    def _client_for(self, db_url: str) -> TelemetryClient:
+        with self._lock:
+            client = self._clients.get(db_url)
+            if client is None:
+                client = TelemetryClient(db_url=db_url)
+                self._clients[db_url] = client
+            return client
+
+    def start_stage(self, stage: StageSpec) -> None:
+        stage_id = str(stage.id)
+        self.report.update(
+            {
+                f"{stage_id}_status": "running",
+                f"{stage_id}_wandb_link": self.missing,
+            }
+        )
+
+        db_url, experiment_id = resolve_telemetry_context(stage.config)
+        if not db_url or not experiment_id:
+            return
+
+        self.stop_stage(stage_id)
+        run_id = _resolve_stage_run_name(stage)
+        min_attempt_updated_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        stop_event = threading.Event()
+        watcher = threading.Thread(
+            target=self._poll_wandb_url,
+            args=(
+                stage_id,
+                run_id,
+                str(db_url),
+                str(experiment_id),
+                min_attempt_updated_at,
+                stop_event,
+            ),
+            daemon=True,
+            name=f"tenyson-report-{stage_id}",
+        )
+        with self._lock:
+            self._watches[stage_id] = _ReportWatch(
+                stop_event=stop_event,
+                thread=watcher,
+            )
+        watcher.start()
+
+    def _poll_wandb_url(
+        self,
+        stage_id: str,
+        run_id: str,
+        db_url: str,
+        experiment_id: str,
+        min_attempt_updated_at: datetime,
+        stop_event: threading.Event,
+    ) -> None:
+        warned = False
+        while not stop_event.is_set():
+            try:
+                client = self._client_for(db_url)
+                run_url = get_run_metadata_wandb_url(
+                    client=client,
+                    experiment_id=experiment_id,
+                    run_id=run_id,
+                    min_attempt_updated_at=min_attempt_updated_at,
+                )
+                if run_url:
+                    self.report.update_wandb_link(
+                        stage_id,
+                        run_url,
+                        text=self.wandb_text,
+                        missing=self.missing,
+                    )
+                    return
+                warned = False
+            except Exception as exc:  # noqa: BLE001
+                if not warned:
+                    _red_print(
+                        f'[TENYSON] Warning: live report WandB polling failed for '
+                        f'stage "{stage_id}" (run_id={run_id}): {exc}'
+                    )
+                    warned = True
+            if stop_event.wait(self.poll_interval_seconds):
+                return
+
+    def stop_stage(self, stage_id: str) -> None:
+        watch = None
+        with self._lock:
+            watch = self._watches.pop(stage_id, None)
+        if watch is not None:
+            watch.stop_event.set()
+
+    def finish_stage(self, stage_id: str, result: JobResult) -> None:
+        self.stop_stage(stage_id)
+        self.report.update_result(
+            stage_id,
+            result,
+            metric_precision=self.metric_precision,
+            wandb_text=self.wandb_text,
+            missing=self.missing,
+        )
+
+    def close(self) -> None:
+        with self._lock:
+            watches = list(self._watches.values())
+            self._watches.clear()
+        for watch in watches:
+            watch.stop_event.set()
+
+
 class ExperimentBranch:
     def __init__(
         self, session: "ExperimentSession", *, cloud: Optional[Any] = None
@@ -256,6 +396,11 @@ class ExperimentSession:
         shared_overrides: Optional[Mapping[str, Any]] = None,
         abort_message: str = _DEFAULT_ABORT_MESSAGE,
         parallel: bool = True,
+        report_builder: Optional[ReportBuilder] = None,
+        report_metric_precision: Optional[int] = 4,
+        report_wandb_text: str = "run",
+        report_missing: str = "n/a",
+        report_poll_interval_seconds: float = 2.0,
     ) -> None:
         self.task = task
         self.templates = templates
@@ -265,6 +410,17 @@ class ExperimentSession:
         self.abort_message = abort_message
         self.parallel = parallel
         self._abort_controller = _ExperimentAbortController()
+        self._report_controller = (
+            _ExperimentReportController(
+                report_builder,
+                metric_precision=report_metric_precision,
+                wandb_text=report_wandb_text,
+                missing=report_missing,
+                poll_interval_seconds=report_poll_interval_seconds,
+            )
+            if report_builder is not None
+            else None
+        )
 
     @property
     def aborted(self) -> bool:
@@ -282,6 +438,10 @@ class ExperimentSession:
     def raise_if_aborted(self) -> None:
         if self.aborted:
             raise ExperimentAborted(self.abort_message)
+
+    def close(self) -> None:
+        if self._report_controller is not None:
+            self._report_controller.close()
 
     def run_branches(
         self,
@@ -395,6 +555,9 @@ class ExperimentSession:
         self.raise_if_aborted()
         run_id = _resolve_stage_run_name(stage)
         active_run_id = self._abort_controller.register_stage(stage)
+        matched_result = None
+        if self._report_controller is not None:
+            self._report_controller.start_stage(stage)
         try:
             cloud_instance = cloud if cloud is not None else self.create_cloud()
             results = run_pipeline(
@@ -415,6 +578,11 @@ class ExperimentSession:
                 )
         finally:
             self._abort_controller.unregister_run(active_run_id)
+            if matched_result is None and self._report_controller is not None:
+                self._report_controller.stop_stage(stage.id)
+
+        if self._report_controller is not None:
+            self._report_controller.finish_stage(stage.id, matched_result)
 
         if _is_retryable_failure(matched_result):
             self._abort_controller.request_abort(
@@ -441,6 +609,10 @@ class ExperimentSession:
             )
             if active_run_id
         ]
+        if self._report_controller is not None:
+            for stage in stages:
+                self._report_controller.start_stage(stage)
+        results = None
         try:
             cloud_instance = cloud if cloud is not None else self.create_cloud()
             results = run_pipeline(
@@ -456,22 +628,33 @@ class ExperimentSession:
         finally:
             for active_run_id in active_run_ids:
                 self._abort_controller.unregister_run(active_run_id)
+            if results is None and self._report_controller is not None:
+                for stage in stages:
+                    self._report_controller.stop_stage(stage.id)
 
         output: Dict[str, JobResult] = {}
-        for stage in stages:
-            run_id = _resolve_stage_run_name(stage)
-            matched_result = None
-            for result in reversed(results):
-                if result.run_id == run_id:
-                    matched_result = result
-                    break
-            if matched_result is None:
-                returned_run_ids = [result.run_id for result in results]
-                raise RuntimeError(
-                    f'Parallel stage "{label}" expected run_id "{run_id}" for stage "{stage.id}" '
-                    f"but no exact result was returned. Returned run_ids: {returned_run_ids!r}"
-                )
-            output[stage.id] = matched_result
+        try:
+            for stage in stages:
+                run_id = _resolve_stage_run_name(stage)
+                matched_result = None
+                for result in reversed(results):
+                    if result.run_id == run_id:
+                        matched_result = result
+                        break
+                if matched_result is None:
+                    returned_run_ids = [result.run_id for result in results]
+                    raise RuntimeError(
+                        f'Parallel stage "{label}" expected run_id "{run_id}" for stage "{stage.id}" '
+                        f"but no exact result was returned. Returned run_ids: {returned_run_ids!r}"
+                    )
+                output[stage.id] = matched_result
+                if self._report_controller is not None:
+                    self._report_controller.finish_stage(stage.id, matched_result)
+        except Exception:
+            if self._report_controller is not None:
+                for stage in stages:
+                    self._report_controller.stop_stage(stage.id)
+            raise
 
         for stage in stages:
             result = output[stage.id]

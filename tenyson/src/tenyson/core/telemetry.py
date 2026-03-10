@@ -583,6 +583,63 @@ def get_run_result(
         session.close()
 
 
+def get_run_metadata_wandb_url(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    *,
+    min_attempt_updated_at: Optional[datetime] = None,
+) -> Optional[str]:
+    """
+    Read the latest WandB URL for a run from run_metadata, if available.
+    """
+    def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    session = client.Session()
+    try:
+        control_row = (
+            session.query(RunControl)
+            .filter(RunControl.experiment_id == experiment_id)
+            .filter(RunControl.run_id == str(run_id))
+            .order_by(RunControl.updated_at.desc())
+            .first()
+        )
+        control_updated_at = _as_utc(getattr(control_row, "updated_at", None))
+        if min_attempt_updated_at is not None:
+            if (
+                control_row is None
+                or control_updated_at is None
+                or control_updated_at < _as_utc(min_attempt_updated_at)
+            ):
+                return None
+
+        row = (
+            session.query(RunMetadata)
+            .filter(RunMetadata.experiment_id == experiment_id)
+            .filter(RunMetadata.run_id == str(run_id))
+            .order_by(RunMetadata.updated_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        metadata_updated_at = _as_utc(getattr(row, "updated_at", None))
+        if (
+            metadata_updated_at is not None
+            and control_updated_at is not None
+            and metadata_updated_at < control_updated_at
+        ):
+            return None
+        url = getattr(row, "wandb_url", None)
+        return str(url) if url else None
+    finally:
+        session.close()
+
+
 def wait_for_run_result(
     client: TelemetryClient,
     experiment_id: str,

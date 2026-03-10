@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 from typing import Any, Dict, Mapping, Optional
 
 from tenyson.jobs.result import JobResult
@@ -16,6 +17,7 @@ class ReportBuilder:
         self.template = self.template_path.read_text(encoding="utf-8")
         self.content = self.template
         self.values: Dict[str, str] = {}
+        self._lock = threading.RLock()
 
     def _render(self) -> str:
         content = self.template
@@ -103,8 +105,9 @@ class ReportBuilder:
         )
 
     def fill(self, data: Dict[str, Any]) -> None:
-        self._store_values(data)
-        self._render()
+        with self._lock:
+            self._store_values(data)
+            self._render()
 
     def fill_result(
         self,
@@ -168,14 +171,52 @@ class ReportBuilder:
             }
         )
 
+    def update_result(
+        self,
+        label: str,
+        result: JobResult,
+        *,
+        metric_precision: Optional[int] = 4,
+        wandb_text: str = "run",
+        missing: str = "n/a",
+    ) -> None:
+        self.update(
+            self.result_placeholder_data(
+                label,
+                result,
+                metric_precision=metric_precision,
+                wandb_text=wandb_text,
+                missing=missing,
+            )
+        )
+
+    def update_wandb_link(
+        self,
+        label: str,
+        run_url: Optional[str],
+        *,
+        text: str = "run",
+        missing: str = "n/a",
+    ) -> None:
+        self.update(
+            {
+                f"{label}_wandb_link": self._format_wandb_link(
+                    run_url,
+                    text=text,
+                    missing=missing,
+                )
+            }
+        )
+
     def update(self, data: Dict[str, Any]) -> None:
         """
         Incremental update: merge the latest values and re-render the report from the
         original template so retries can overwrite earlier failed values.
         """
-        self._store_values(data)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_text(self._render(), encoding="utf-8")
+        with self._lock:
+            self._store_values(data)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.output_path.write_text(self._render(), encoding="utf-8")
 
     def attach_wandb_scalar_link(
         self,
@@ -186,9 +227,10 @@ class ReportBuilder:
         """
         Replace a placeholder with a markdown link to a WandB run + metric.
         """
-        link = f"[{metric_name}]({run_url})"
-        self.values[placeholder] = link
-        self._render()
+        with self._lock:
+            link = f"[{metric_name}]({run_url})"
+            self.values[placeholder] = link
+            self._render()
 
     def attach_wandb_latest_value(
         self,
@@ -212,9 +254,11 @@ class ReportBuilder:
             if metric_name in row:
                 latest = row[metric_name]
         if latest is not None:
-            self.values[placeholder] = str(latest)
-            self._render()
+            with self._lock:
+                self.values[placeholder] = str(latest)
+                self._render()
 
     def generate(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_text(self._render(), encoding="utf-8")
+        with self._lock:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.output_path.write_text(self._render(), encoding="utf-8")

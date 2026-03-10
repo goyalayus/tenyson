@@ -79,6 +79,11 @@ REPORT_METRICS = (
 def main() -> None:
     base_dir = Path(__file__).parent
     task = load_task(str(Path(__file__).with_name("wordle_task.py")))
+    report = ReportBuilder(
+        template_path=str(base_dir / "report_template.md"),
+        output_path=str(base_dir / "final_report.md"),
+    )
+    report.generate()
 
     hf_repo_base = os.getenv("TENYSON_HF_REPO_BASE")
     telemetry_db_url = os.getenv("TENYSON_DB_URL")
@@ -119,6 +124,9 @@ def main() -> None:
         on_failure=on_failure,
         shared_overrides=shared_overrides,
         parallel=not disable_parallel,
+        report_builder=report,
+        report_metric_precision=4,
+        report_wandb_text="run",
     )
     primary_branch = session.branch(cloud=session.create_cloud())
 
@@ -362,6 +370,8 @@ def main() -> None:
     except ExperimentAborted as exc:
         print(exc)
         return
+    finally:
+        session.close()
 
     mixed_results = branch_results["mixed"]
     curriculum_results = branch_results["curriculum"]
@@ -371,10 +381,6 @@ def main() -> None:
         curriculum_results,
     )
 
-    report = ReportBuilder(
-        template_path=str(base_dir / "report_template.md"),
-        output_path=str(base_dir / "final_report.md"),
-    )
     report.fill_results(all_results, metric_precision=4, wandb_text="run")
     for metric_name in REPORT_METRICS:
         report.fill_metric_delta(

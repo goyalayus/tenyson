@@ -1,5 +1,6 @@
 import copy
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from tenyson.experiment import (
     ExperimentSession,
 )
 from tenyson.jobs.result import JobResult
+from tenyson.reporting.builder import ReportBuilder
 
 
 def _templates() -> ConfigTemplates:
@@ -213,6 +215,99 @@ class ExperimentSessionTests(unittest.TestCase):
 
         self.assertEqual(branch_results["left"]["left_stage"].run_id, "left_run")
         self.assertEqual(branch_results["right"]["right_stage"].run_id, "right_run")
+
+    def test_run_stage_updates_report_when_result_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "template.md"
+            output_path = Path(tmpdir) / "report.md"
+            template_path.write_text(
+                "status={sft_main_status}\nwandb={sft_main_wandb_link}\n",
+                encoding="utf-8",
+            )
+            report = ReportBuilder(
+                template_path=str(template_path),
+                output_path=str(output_path),
+            )
+            report.generate()
+
+            session = ExperimentSession(
+                task=object(),
+                templates=_templates(),
+                cloud_factory=lambda: object(),
+                report_builder=report,
+            )
+            stage = session.sft("sft_main", run_name="wordle_sft_main")
+
+            def fake_run_pipeline(steps, cloud, on_failure):
+                return [
+                    JobResult(
+                        run_id="wordle_sft_main",
+                        status="success",
+                        total_time_seconds=1.0,
+                        wandb_url="https://wandb.example/run",
+                    )
+                ]
+
+            with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
+                session.run_stage(stage, cloud=object())
+
+            session.close()
+            content = output_path.read_text(encoding="utf-8")
+
+        self.assertIn("status=success", content)
+        self.assertIn("wandb=[run](https://wandb.example/run)", content)
+
+    def test_report_controller_writes_wandb_link_from_telemetry_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "template.md"
+            output_path = Path(tmpdir) / "report.md"
+            template_path.write_text(
+                "status={sft_main_status}\nwandb={sft_main_wandb_link}\n",
+                encoding="utf-8",
+            )
+            report = ReportBuilder(
+                template_path=str(template_path),
+                output_path=str(output_path),
+            )
+            report.generate()
+
+            controller = experiment_module._ExperimentReportController(
+                report,
+                poll_interval_seconds=0.01,
+            )
+            stage = experiment_module.StageSpec(
+                id="sft_main",
+                config={
+                    "training": {"run_name": "wordle_sft_main"},
+                    "telemetry": {
+                        "db_url": "postgresql+psycopg://example",
+                        "experiment_id": "wordle_exp",
+                    },
+                },
+                job_class=object,
+                task=object(),
+            )
+
+            with patch.object(
+                experiment_module,
+                "TelemetryClient",
+                return_value=object(),
+            ), patch.object(
+                experiment_module,
+                "get_run_metadata_wandb_url",
+                return_value="https://wandb.example/live",
+            ):
+                controller.start_stage(stage)
+                content = output_path.read_text(encoding="utf-8")
+                for _ in range(20):
+                    if "wandb=[run](https://wandb.example/live)" in content:
+                        break
+                    time.sleep(0.02)
+                    content = output_path.read_text(encoding="utf-8")
+                controller.close()
+
+        self.assertIn("status=running", content)
+        self.assertIn("wandb=[run](https://wandb.example/live)", content)
 
 
 if __name__ == "__main__":
