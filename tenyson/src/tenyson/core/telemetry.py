@@ -21,6 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
 
 try:
     from transformers.trainer_callback import (
@@ -227,7 +228,11 @@ class TelemetryClient:
 
     def __post_init__(self) -> None:
         _validate_shared_db_url(self.db_url)
-        self.engine = create_engine(self.db_url)
+        self.engine = create_engine(
+            self.db_url,
+            pool_pre_ping=True,
+            pool_recycle=300,
+        )
         Base.metadata.create_all(self.engine)
         self._ensure_schema_columns()
         self.Session = sessionmaker(bind=self.engine)
@@ -720,6 +725,13 @@ class ManualStopTelemetryCallback(TrainerCallback):
                 self.stop_step = int(state.global_step)
                 control.should_training_stop = True
                 control.should_save = True
+        except SQLAlchemyError as exc:
+            session.rollback()
+            print(
+                "[ManualStopTelemetryCallback] Warning: stop polling failed; "
+                f"continuing training. {exc}",
+                flush=True,
+            )
         finally:
             session.close()
 
