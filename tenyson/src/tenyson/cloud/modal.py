@@ -4,6 +4,7 @@ import os
 from typing import Any, Callable, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
+from tenyson.cloud.rds_access import prepare_modal_rds_access
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core.run_name import resolve_required_run_name
@@ -123,16 +124,13 @@ class ModalManager(BaseCloudManager):
             pass
 
         local_project_root = self._resolve_local_project_root()
-        repo_mount = modal.Mount.from_local_dir(
-            local_project_root, remote_path="/workspace"
-        )
+        image = image.add_local_dir(local_project_root, "/workspace")
 
         @app.function(
             image=image,
             gpu=None,
             timeout=self.timeout,
             secrets=secrets,
-            mounts=[repo_mount],
         )
         def run_remote(job_type: str, config_rel_path: str, task_spec: str) -> None:
             import os
@@ -186,6 +184,7 @@ class ModalManager(BaseCloudManager):
 
         run_name = resolve_required_run_name(job.config, job_type)
         db_url, experiment_id = resolve_required_telemetry_context(job.config)
+        cleanup_modal_rds_ingress = prepare_modal_rds_access()
         telemetry_client = TelemetryClient(db_url=db_url)
 
         def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
@@ -224,79 +223,82 @@ class ModalManager(BaseCloudManager):
         }
         gpu_request = gpu_map.get(self.gpu, modal.gpu.A100())
 
-        # Run synchronously; on failure return failed JobResult instead of raising.
         try:
-            run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
-                job_type,
-                config_rel_path,
-                task_spec,
-            )
-        except Exception as exc:  # noqa: BLE001
-            hf_repo_id, hf_revision = _resolve_failed_resume_target()
-            result = JobResult(
-                run_id=run_name,
-                status="failed",
-                total_time_seconds=0.0,
-                hf_repo_id=hf_repo_id,
-                hf_revision=hf_revision,
-                failure_reason=str(exc),
-                instance_id=None,
-                spot_interruption=None,
-            )
-            record_run_summary(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                phase=job_type,
-                result=result,
-            )
-            record_run_result(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                run_id=run_name,
-                phase=job_type,
-                results_payload=result,
-                job_result_payload=result,
-            )
-            _red_print(f"[TENYSON] Step failed (Modal): {exc}")
-            return result
+            # Run synchronously; on failure return failed JobResult instead of raising.
+            try:
+                run_remote.with_options(gpu=gpu_request, timeout=self.timeout).remote(
+                    job_type,
+                    config_rel_path,
+                    task_spec,
+                )
+            except Exception as exc:  # noqa: BLE001
+                hf_repo_id, hf_revision = _resolve_failed_resume_target()
+                result = JobResult(
+                    run_id=run_name,
+                    status="failed",
+                    total_time_seconds=0.0,
+                    hf_repo_id=hf_repo_id,
+                    hf_revision=hf_revision,
+                    failure_reason=str(exc),
+                    instance_id=None,
+                    spot_interruption=None,
+                )
+                record_run_summary(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    result=result,
+                )
+                record_run_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    results_payload=result,
+                    job_result_payload=result,
+                )
+                _red_print(f"[TENYSON] Step failed (Modal): {exc}")
+                return result
 
-        try:
-            _results_payload, job_result_payload = wait_for_run_result(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                run_id=run_name,
-                phase=job_type,
-            )
-            return JobResult.from_dict(job_result_payload)
-        except Exception as exc:  # noqa: BLE001
-            failure_reason = (
-                "Modal job completed but canonical run result was not available in "
-                f"telemetry DB: {exc}"
-            )
-            hf_repo_id, hf_revision = _resolve_failed_resume_target()
-            result = JobResult(
-                run_id=run_name,
-                status="failed",
-                total_time_seconds=0.0,
-                hf_repo_id=hf_repo_id,
-                hf_revision=hf_revision,
-                failure_reason=failure_reason,
-                instance_id=None,
-                spot_interruption=None,
-            )
-            record_run_summary(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                phase=job_type,
-                result=result,
-            )
-            record_run_result(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                run_id=run_name,
-                phase=job_type,
-                results_payload=result,
-                job_result_payload=result,
-            )
-            _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
-            return result
+            try:
+                _results_payload, job_result_payload = wait_for_run_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                )
+                return JobResult.from_dict(job_result_payload)
+            except Exception as exc:  # noqa: BLE001
+                failure_reason = (
+                    "Modal job completed but canonical run result was not available in "
+                    f"telemetry DB: {exc}"
+                )
+                hf_repo_id, hf_revision = _resolve_failed_resume_target()
+                result = JobResult(
+                    run_id=run_name,
+                    status="failed",
+                    total_time_seconds=0.0,
+                    hf_repo_id=hf_repo_id,
+                    hf_revision=hf_revision,
+                    failure_reason=failure_reason,
+                    instance_id=None,
+                    spot_interruption=None,
+                )
+                record_run_summary(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    result=result,
+                )
+                record_run_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    results_payload=result,
+                    job_result_payload=result,
+                )
+                _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
+                return result
+        finally:
+            cleanup_modal_rds_ingress()

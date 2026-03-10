@@ -65,12 +65,17 @@ All runs keep canonical metrics/results in the telemetry DB (plus adapters on HF
 
 No cloud provider credential env vars are required by the script itself when using
 Modal defaults (`A100` GPU). Ensure `modal` is authenticated in your shell.
+If you enable automatic RDS ingress sync via `TENYSON_RDS_SECURITY_GROUP`, AWS
+credentials (for example `AWS_PROFILE`) are required on the controller host.
 
 Optional:
 
 - `TENYSON_MODAL_GPU` (default: `A100`)
 - `TENYSON_MODAL_TIMEOUT` (default: `86400`)
 - `TENYSON_MODAL_PROFILE` (or `MODAL_PROFILE`)
+- `TENYSON_RDS_SECURITY_GROUP` (for automatic telemetry DB ingress sync)
+- `TENYSON_SYNC_RDS_LOCAL_IP` (default: `true`)
+- `TENYSON_MODAL_RDS_CIDR` (default: `0.0.0.0/0`)
 - `TENYSON_HF_REPO_BASE` (override HF repo base for SFT/RL pushes)
 - `HF_TOKEN` (required for SFT/RL jobs)
 - `WANDB_API_KEY`
@@ -83,8 +88,8 @@ python examples/wordle/experiment.py
 ```
 
 The experiment entrypoint auto-adds `src/` to `PYTHONPATH` and auto-installs
-missing local controller dependencies (`modal`, `psycopg[binary]`, `sqlalchemy`,
-`datasets`, `pyyaml`, `huggingface_hub`) on first run.
+missing local controller dependencies (`modal`, `boto3`, `psycopg[binary]`,
+`sqlalchemy`, `datasets`, `pyyaml`, `huggingface_hub`) on first run.
 Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` to disable this behavior.
 
 ## telemetry

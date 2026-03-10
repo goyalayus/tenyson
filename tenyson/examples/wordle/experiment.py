@@ -6,6 +6,7 @@ import sys
 
 
 _LOCAL_BOOTSTRAP_PACKAGES = {
+    "boto3": "boto3",
     "datasets": "datasets",
     "huggingface_hub": "huggingface_hub",
     "modal": "modal",
