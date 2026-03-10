@@ -19,7 +19,7 @@ Local execution is intentionally disabled: jobs must run through supported GPU p
 from pathlib import Path
 import yaml
 
-from tenyson.cloud.aws import AWSManager
+from tenyson.cloud.modal import ModalManager
 from tenyson.jobs.sft import SFTJob
 from tenyson.loader import load_task
 
@@ -28,11 +28,9 @@ with open("examples/wordle/configs/sft_config.yaml", "r", encoding="utf-8") as f
 
 task = load_task(str(Path("examples/wordle/wordle_task.py").resolve()))
 job = SFTJob(config=cfg, task=task)
-cloud = AWSManager(
-    instance_type="g5.2xlarge",
-    key_name="my-key-name",
-    key_path="~/.ssh/my-key.pem",
-    security_group="sg-...",
+cloud = ModalManager(
+    gpu="A100",
+    timeout=86400,
 )
 result = cloud.run(job)  # result is the remote JobResult
 print(result.metrics, result.wandb_url)
@@ -65,17 +63,14 @@ All runs keep canonical metrics/results in the telemetry DB (plus adapters on HF
 
 ### required environment variables for `examples/wordle/experiment.py`
 
-- `TENYSON_AWS_KEY_NAME`
-- `TENYSON_AWS_KEY_PATH`
-- `TENYSON_AWS_SECURITY_GROUP`
+No cloud provider credential env vars are required by the script itself when using
+Modal defaults (`A100` GPU). Ensure `modal` is authenticated in your shell.
 
 Optional:
 
-- `TENYSON_AWS_REGION` (default: `us-east-1`)
-- `TENYSON_AWS_INSTANCE_TYPE` (default: `g5.2xlarge`)
-- `TENYSON_AWS_SUBNET`
-- `TENYSON_AWS_SPOT_MAX_PRICE`
-- `AWS_PROFILE`
+- `TENYSON_MODAL_GPU` (default: `A100`)
+- `TENYSON_MODAL_TIMEOUT` (default: `86400`)
+- `TENYSON_MODAL_PROFILE` (or `MODAL_PROFILE`)
 - `TENYSON_HF_REPO_BASE` (override HF repo base for SFT/RL pushes)
 - `HF_TOKEN` (required for SFT/RL jobs)
 - `WANDB_API_KEY`
@@ -87,7 +82,7 @@ python examples/wordle/experiment.py
 ```
 
 The experiment entrypoint auto-adds `src/` to `PYTHONPATH` and auto-installs
-missing local controller dependencies (`boto3`, `psycopg[binary]`, `sqlalchemy`,
+missing local controller dependencies (`modal`, `psycopg[binary]`, `sqlalchemy`,
 `datasets`, `pyyaml`, `huggingface_hub`) on first run.
 Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` to disable this behavior.
 

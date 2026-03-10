@@ -6,9 +6,9 @@ import sys
 
 
 _LOCAL_BOOTSTRAP_PACKAGES = {
-    "boto3": "boto3",
     "datasets": "datasets",
     "huggingface_hub": "huggingface_hub",
+    "modal": "modal",
     "psycopg": "psycopg[binary]",
     "sqlalchemy": "sqlalchemy",
     "yaml": "pyyaml",
@@ -24,7 +24,7 @@ def _bootstrap_local_environment() -> None:
     Ensure this script can run from a fresh checkout without manual local setup.
 
     - Adds the local src/ directory to PYTHONPATH for src-layout imports.
-    - Installs missing controller-side dependencies (AWS + telemetry + task loading).
+    - Installs missing controller-side dependencies (Modal + telemetry + task loading).
     """
     repo_root = Path(__file__).resolve().parents[2]
     src_dir = repo_root / "src"
@@ -58,7 +58,7 @@ def _bootstrap_local_environment() -> None:
 
 _bootstrap_local_environment()
 
-from tenyson.cloud.aws import AWSManager
+from tenyson.cloud.modal import ModalManager
 from tenyson.experiment import (
     ConfigTemplates,
     ExperimentAborted,
@@ -83,12 +83,9 @@ def main() -> None:
     telemetry_db_url = os.getenv("TENYSON_DB_URL")
     experiment_id = os.getenv("TENYSON_EXPERIMENT_ID")
     on_failure = os.getenv("TENYSON_ON_FAILURE", "abort").strip().lower() or "abort"
-    use_spot = os.getenv("TENYSON_AWS_USE_SPOT", "true").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
+    modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
+    modal_profile = os.getenv("TENYSON_MODAL_PROFILE") or os.getenv("MODAL_PROFILE")
     disable_parallel = os.getenv(
         "TENYSON_DISABLE_PARALLEL", "false"
     ).strip().lower() in {
@@ -112,9 +109,11 @@ def main() -> None:
     session = ExperimentSession(
         task=task,
         templates=ConfigTemplates.from_directory(base_dir / "configs"),
-        cloud_factory=AWSManager.factory_from_env(
+        cloud_factory=ModalManager.factory_from_env(
             auto_terminate=True,
-            use_spot=use_spot,
+            gpu=modal_gpu,
+            timeout=modal_timeout,
+            profile=modal_profile,
         ),
         on_failure=on_failure,
         shared_overrides=shared_overrides,

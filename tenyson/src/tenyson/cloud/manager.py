@@ -2,7 +2,7 @@ from tenyson.cloud.aws import AWSManager
 from tenyson.cloud.modal import ModalManager
 
 
-def CloudManager(provider: str = "aws", **kwargs):
+def CloudManager(provider: str = "modal", **kwargs):
     provider = provider.lower().strip()
     if provider == "aws":
         return AWSManager(**kwargs)

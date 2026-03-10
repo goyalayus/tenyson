@@ -1,7 +1,7 @@
 import importlib
 import inspect
 import os
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
@@ -31,6 +31,33 @@ class ModalManager(BaseCloudManager):
         self.gpu = gpu
         self.timeout = timeout
         self.profile = profile
+
+    @classmethod
+    def from_env(cls, **overrides: Any) -> "ModalManager":
+        timeout_value = os.getenv("TENYSON_MODAL_TIMEOUT", "86400").strip()
+        try:
+            timeout = int(timeout_value)
+        except ValueError as exc:
+            raise ValueError(
+                "TENYSON_MODAL_TIMEOUT must be an integer number of seconds."
+            ) from exc
+
+        config: Dict[str, Any] = {
+            "gpu": os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100",
+            "timeout": timeout,
+            "profile": (
+                os.getenv("TENYSON_MODAL_PROFILE") or os.getenv("MODAL_PROFILE") or None
+            ),
+            "auto_terminate": True,
+        }
+        config.update(
+            {key: value for key, value in overrides.items() if value is not None}
+        )
+        return cls(**config)
+
+    @classmethod
+    def factory_from_env(cls, **overrides: Any) -> Callable[[], "ModalManager"]:
+        return lambda: cls.from_env(**overrides)
 
     def _resolve_local_project_root(self) -> str:
         """
