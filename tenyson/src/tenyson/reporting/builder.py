@@ -1,8 +1,6 @@
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-import wandb
-
 from tenyson.jobs.result import JobResult
 
 
@@ -197,13 +195,16 @@ class ReportBuilder:
         placeholder: str,
         run_path: str,
         metric_name: str,
-        api: Optional[wandb.Api] = None,
+        api: Optional[Any] = None,
     ) -> None:
         """
         Replace a placeholder with the latest scalar value for a metric
         from a WandB run specified as 'entity/project/run_id'.
         """
-        api = api or wandb.Api()
+        if api is None:
+            import wandb
+
+            api = wandb.Api()
         run = api.run(run_path)
         history = run.history(keys=[metric_name], pandas=False)
         latest = None

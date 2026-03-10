@@ -39,7 +39,7 @@ print(result.metrics, result.wandb_url)
 ```
 
 - **AWS Spot instances**: Pass `use_spot=True` (and optionally `spot_max_price`) to `AWSManager`. On remote failure (e.g. Spot interruption), the manager does not raise; it returns a `JobResult` with `status="failed"`, `failure_reason`, `instance_id`, and `spot_interruption`, and prints a failure message in red to the terminal. The same behaviour applies to **Modal**: on exception the manager returns a failed `JobResult` and prints in red.
-- **GPU runner package setup**: cloud managers install runtime dependencies with `pip install unsloth vllm huggingface_hub safetensors pyyaml sqlalchemy 'psycopg[binary]' wandb` (we intentionally do not install `trl`/`transformers`/`datasets` directly because Unsloth pulls them transitively).
+- **GPU runner package setup**: cloud managers install runtime dependencies with `python3 -m pip install unsloth vllm huggingface_hub pyyaml sqlalchemy 'psycopg[binary]' wandb` (we intentionally do not install `trl`/`transformers`/`datasets` directly because Unsloth pulls them transitively).
 - **HF push cadence (SFT/RL)**: set `training.hf_repo_base` (required) to push full trainer checkpoints to a stable repo id `<hf_repo_base>-<run_name>`. `training.hf_push_every_steps` controls checkpoint save+push cadence.
 - **Run naming contract**: `training.run_name` (SFT/RL) and `evaluation.run_name` (Eval) are mandatory and must be explicit (defaults like `sft_job`/`rl_job`/`eval_job` are rejected). Within one `run_pipeline(...)` execution, run names must be unique.
 - **Checkpoint mode**: SFT/RL use Hub-managed trainer checkpoints (includes optimizer/scheduler/trainer state). Resume uses `training.resume_from_checkpoint: "repo_id:revision"`, resolves that ref to an immutable Hub commit SHA, and automatically restores from `last-checkpoint` (or latest `checkpoint-*`) in that frozen snapshot.
@@ -85,6 +85,11 @@ Run from project root (`tenyson/`):
 ```bash
 python examples/wordle/experiment.py
 ```
+
+The experiment entrypoint auto-adds `src/` to `PYTHONPATH` and auto-installs
+missing local controller dependencies (`boto3`, `psycopg[binary]`, `sqlalchemy`,
+`datasets`, `pyyaml`, `huggingface_hub`) on first run.
+Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` to disable this behavior.
 
 ## telemetry
 

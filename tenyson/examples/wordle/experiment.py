@@ -1,5 +1,62 @@
+import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
+
+
+_LOCAL_BOOTSTRAP_PACKAGES = {
+    "boto3": "boto3",
+    "datasets": "datasets",
+    "huggingface_hub": "huggingface_hub",
+    "psycopg": "psycopg[binary]",
+    "sqlalchemy": "sqlalchemy",
+    "yaml": "pyyaml",
+}
+
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bootstrap_local_environment() -> None:
+    """
+    Ensure this script can run from a fresh checkout without manual local setup.
+
+    - Adds the local src/ directory to PYTHONPATH for src-layout imports.
+    - Installs missing controller-side dependencies (AWS + telemetry + task loading).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    src_dir = repo_root / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+    if _is_truthy(os.getenv("TENYSON_SKIP_LOCAL_BOOTSTRAP", "false")):
+        return
+
+    missing_packages = [
+        package
+        for module_name, package in _LOCAL_BOOTSTRAP_PACKAGES.items()
+        if importlib.util.find_spec(module_name) is None
+    ]
+    if not missing_packages:
+        return
+
+    print(
+        "[TENYSON] Installing missing local dependencies: "
+        + ", ".join(missing_packages),
+        flush=True,
+    )
+    install_cmd = [sys.executable, "-m", "pip", "install", *missing_packages]
+    result = subprocess.run(install_cmd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Automatic local dependency bootstrap failed. "
+            "Re-run after installing the missing packages manually."
+        )
+
+
+_bootstrap_local_environment()
 
 from tenyson.cloud.aws import AWSManager
 from tenyson.experiment import (

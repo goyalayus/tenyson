@@ -21,7 +21,25 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
-from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
+
+try:
+    from transformers.trainer_callback import (
+        TrainerCallback,
+        TrainerControl,
+        TrainerState,
+    )
+except ImportError:  # pragma: no cover - local controller path fallback
+    # Local controller processes may import telemetry without a full training stack.
+    # Remote GPU workers still use the real Transformers callback classes.
+    class TrainerCallback:  # type: ignore[no-redef]
+        pass
+
+    class TrainerControl:  # type: ignore[no-redef]
+        should_training_stop: bool = False
+        should_save: bool = False
+
+    class TrainerState:  # type: ignore[no-redef]
+        global_step: int = 0
 
 Base = declarative_base()
 
