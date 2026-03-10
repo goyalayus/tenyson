@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
-from .telemetry import RunControl, TelemetryClient
+from .telemetry import LiveRunInfo, RunControl, TelemetryClient, list_live_run_heartbeats
 
 
 def request_stop(
@@ -14,7 +14,7 @@ def request_stop(
     run_id: str,
     experiment_id: Optional[str] = None,
     create_if_missing: bool = True,
-) -> None:
+) -> bool:
     """
     Set stop_requested = True for the given run_id in the RunControl table.
     """
@@ -47,9 +47,35 @@ def request_stop(
         elif control is not None:
             control.stop_requested = True
             control.updated_at = datetime.now(timezone.utc)
+        else:
+            return False
         session.commit()
+        return True
     finally:
         session.close()
+
+
+def list_live_runs(
+    db_url: str,
+    experiment_id: str,
+    *,
+    max_age_seconds: int = 90,
+) -> List[LiveRunInfo]:
+    """
+    Return currently-live runs for an experiment based on recent heartbeats.
+    """
+    experiment_id = str(experiment_id or "").strip()
+    if not experiment_id:
+        raise ValueError(
+            "experiment_id is required to list live runs. "
+            "Provide --experiment-id or set TENYSON_EXPERIMENT_ID."
+        )
+    client = TelemetryClient(db_url=db_url)
+    return list_live_run_heartbeats(
+        client=client,
+        experiment_id=experiment_id,
+        max_age_seconds=max_age_seconds,
+    )
 
 
 def _parse_args() -> argparse.Namespace:

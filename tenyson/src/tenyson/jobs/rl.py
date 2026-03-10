@@ -439,12 +439,14 @@ class RLJob:
         from trl import GRPOConfig, GRPOTrainer
         from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
+            start_run_heartbeat,
             begin_run_attempt,
             ManualStopTelemetryCallback,
             RLRolloutTracker,
             record_run_result,
             record_run_summary,
             resolve_required_telemetry_context,
+            RunHeartbeatTelemetryCallback,
             TelemetryClient,
             WandBUrlTelemetryCallback,
         )
@@ -459,6 +461,19 @@ class RLJob:
         if begin_run_attempt(telemetry_client, experiment_id, run_name, phase="rl"):
             print(
                 "[RLJob] Cleared stale manual stop request from a previous attempt.",
+                flush=True,
+            )
+        try:
+            start_run_heartbeat(
+                telemetry_client,
+                experiment_id,
+                run_name,
+                "rl",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[RLJob] Warning: initial heartbeat registration failed; "
+                f"continuing training. {exc}",
                 flush=True,
             )
         hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
@@ -559,7 +574,15 @@ class RLJob:
             client=telemetry_client,
             check_every_n_steps=manual_stop_every,
         )
-        callbacks = list(callbacks) + [manual_stop_callback]
+        callbacks = list(callbacks) + [
+            manual_stop_callback,
+            RunHeartbeatTelemetryCallback(
+                run_id=run_name,
+                experiment_id=experiment_id,
+                phase="rl",
+                client=telemetry_client,
+            ),
+        ]
         report_to = train_cfg.get("report_to", ["none"])
         if report_to == "wandb" or (
             isinstance(report_to, list) and "wandb" in report_to

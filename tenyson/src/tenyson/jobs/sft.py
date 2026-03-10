@@ -76,11 +76,13 @@ class SFTJob:
         require_gpu_provider_runtime()
         from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
+            start_run_heartbeat,
             begin_run_attempt,
             ManualStopTelemetryCallback,
             record_run_result,
             record_run_summary,
             resolve_required_telemetry_context,
+            RunHeartbeatTelemetryCallback,
             SFTTelemetryCallback,
             TelemetryClient,
             WandBUrlTelemetryCallback,
@@ -95,6 +97,19 @@ class SFTJob:
         if begin_run_attempt(telemetry_client, experiment_id, run_name, phase="sft"):
             print(
                 "[SFTJob] Cleared stale manual stop request from a previous attempt.",
+                flush=True,
+            )
+        try:
+            start_run_heartbeat(
+                telemetry_client,
+                experiment_id,
+                run_name,
+                "sft",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[SFTJob] Warning: initial heartbeat registration failed; "
+                f"continuing training. {exc}",
                 flush=True,
             )
 
@@ -253,6 +268,14 @@ class SFTJob:
             client=telemetry_client,
         )
         callbacks.append(manual_stop_callback)
+        callbacks.append(
+            RunHeartbeatTelemetryCallback(
+                run_id=run_name,
+                experiment_id=experiment_id,
+                phase="sft",
+                client=telemetry_client,
+            )
+        )
         report_to = train_cfg.get("report_to", "none")
         if report_to == "wandb" or (
             isinstance(report_to, list) and "wandb" in report_to

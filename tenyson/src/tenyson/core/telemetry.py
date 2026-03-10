@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -203,6 +203,23 @@ class RunSummary(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class RunHeartbeat(Base):
+    """
+    Tracks whether a run is currently alive, based on periodic worker heartbeats.
+    """
+
+    __tablename__ = "run_heartbeats"
+    id = Column(String, primary_key=True)
+    experiment_id = Column(String, index=True)
+    run_id = Column(String, index=True)
+    phase = Column(String, index=True)
+    provider = Column(String, nullable=True)
+    status = Column(String, index=True, nullable=False, default="running")
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class RunResult(Base):
     """
     Canonical per-job payloads keyed by (experiment_id, run_id, phase).
@@ -233,7 +250,16 @@ class TelemetryClient:
             pool_pre_ping=True,
             pool_recycle=300,
         )
-        Base.metadata.create_all(self.engine)
+        try:
+            Base.metadata.create_all(self.engine)
+        except SQLAlchemyError as exc:
+            message = str(exc).lower()
+            if (
+                "already exists" not in message
+                and "duplicate key value violates unique constraint" not in message
+                and "pg_type_typname_nsp_index" not in message
+            ):
+                raise
         self._ensure_schema_columns()
         self.Session = sessionmaker(bind=self.engine)
 
@@ -308,6 +334,168 @@ class RLRolloutTracker:
     def current_rollout(self) -> Optional[RLRolloutWindow]:
         with self._lock:
             return self._current_rollout
+
+
+@dataclass(frozen=True)
+class LiveRunInfo:
+    run_id: str
+    phase: str
+    provider: Optional[str]
+    status: str
+    is_active: bool
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+
+
+def _normalize_timestamp(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _heartbeat_provider(provider: Optional[str] = None) -> Optional[str]:
+    resolved = str(provider or os.getenv("TENYSON_GPU_PROVIDER") or "").strip()
+    return resolved or None
+
+
+def _upsert_run_heartbeat(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    *,
+    status: str,
+    is_active: bool,
+    provider: Optional[str] = None,
+    reset_created_at: bool = False,
+) -> None:
+    now = datetime.now(timezone.utc)
+    provider_name = _heartbeat_provider(provider)
+    session = client.Session()
+    try:
+        heartbeat = (
+            session.query(RunHeartbeat)
+            .filter(RunHeartbeat.experiment_id == str(experiment_id))
+            .filter(RunHeartbeat.run_id == str(run_id))
+            .filter(RunHeartbeat.phase == str(phase))
+            .order_by(RunHeartbeat.updated_at.desc())
+            .first()
+        )
+        if heartbeat is None:
+            heartbeat = RunHeartbeat(
+                id=str(uuid4()),
+                experiment_id=str(experiment_id),
+                run_id=str(run_id),
+                phase=str(phase),
+                created_at=now,
+            )
+            session.add(heartbeat)
+        elif reset_created_at:
+            heartbeat.created_at = now
+
+        heartbeat.provider = provider_name
+        heartbeat.status = str(status)
+        heartbeat.is_active = bool(is_active)
+        heartbeat.updated_at = now
+        session.commit()
+    finally:
+        session.close()
+
+
+def start_run_heartbeat(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    *,
+    provider: Optional[str] = None,
+) -> None:
+    _upsert_run_heartbeat(
+        client,
+        experiment_id,
+        run_id,
+        phase,
+        status="running",
+        is_active=True,
+        provider=provider,
+        reset_created_at=True,
+    )
+
+
+def beat_run_heartbeat(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    *,
+    provider: Optional[str] = None,
+) -> None:
+    _upsert_run_heartbeat(
+        client,
+        experiment_id,
+        run_id,
+        phase,
+        status="running",
+        is_active=True,
+        provider=provider,
+        reset_created_at=False,
+    )
+
+
+def finish_run_heartbeat(
+    client: TelemetryClient,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    *,
+    status: str,
+    provider: Optional[str] = None,
+) -> None:
+    _upsert_run_heartbeat(
+        client,
+        experiment_id,
+        run_id,
+        phase,
+        status=status,
+        is_active=False,
+        provider=provider,
+        reset_created_at=False,
+    )
+
+
+def list_live_run_heartbeats(
+    client: TelemetryClient,
+    experiment_id: str,
+    *,
+    max_age_seconds: int = 90,
+) -> List[LiveRunInfo]:
+    deadline = datetime.now(timezone.utc) - timedelta(seconds=max(1, int(max_age_seconds)))
+    session = client.Session()
+    try:
+        rows = (
+            session.query(RunHeartbeat)
+            .filter(RunHeartbeat.experiment_id == str(experiment_id))
+            .filter(RunHeartbeat.is_active.is_(True))
+            .filter(RunHeartbeat.updated_at >= deadline)
+            .order_by(RunHeartbeat.updated_at.desc())
+            .all()
+        )
+        return [
+            LiveRunInfo(
+                run_id=str(row.run_id),
+                phase=str(row.phase),
+                provider=getattr(row, "provider", None),
+                status=str(getattr(row, "status", "running") or "running"),
+                is_active=bool(getattr(row, "is_active", False)),
+                created_at=_normalize_timestamp(getattr(row, "created_at", None)),
+                updated_at=_normalize_timestamp(getattr(row, "updated_at", None)),
+            )
+            for row in rows
+        ]
+    finally:
+        session.close()
 
 
 def begin_run_attempt(
@@ -491,6 +679,28 @@ def record_run_summary(
         existing.instance_id = getattr(result, "instance_id", None)
         existing.spot_interruption = getattr(result, "spot_interruption", None)
         existing.updated_at = now
+
+        heartbeat = (
+            session.query(RunHeartbeat)
+            .filter(RunHeartbeat.experiment_id == experiment_id)
+            .filter(RunHeartbeat.run_id == run_id)
+            .filter(RunHeartbeat.phase == phase)
+            .order_by(RunHeartbeat.updated_at.desc())
+            .first()
+        )
+        if heartbeat is None:
+            heartbeat = RunHeartbeat(
+                id=str(uuid4()),
+                experiment_id=experiment_id,
+                run_id=run_id,
+                phase=phase,
+                created_at=now,
+            )
+            session.add(heartbeat)
+        heartbeat.provider = _heartbeat_provider(getattr(heartbeat, "provider", None))
+        heartbeat.status = existing.status
+        heartbeat.is_active = False
+        heartbeat.updated_at = now
         session.commit()
     finally:
         session.close()
@@ -739,6 +949,65 @@ class SFTTelemetryCallback(TrainerCallback):
             session.commit()
         finally:
             session.close()
+
+
+class RunHeartbeatTelemetryCallback(TrainerCallback):
+    """
+    Periodically marks a run as alive so local control commands can discover
+    currently-running jobs without guessing from metrics tables.
+    """
+
+    def __init__(
+        self,
+        run_id: str,
+        experiment_id: str,
+        phase: str,
+        client: TelemetryClient,
+        *,
+        provider: Optional[str] = None,
+        min_interval_seconds: float = 10.0,
+    ):
+        self.run_id = run_id
+        self.experiment_id = experiment_id
+        self.phase = phase
+        self.client = client
+        self.provider = provider
+        self.min_interval_seconds = max(0.1, float(min_interval_seconds))
+        self._last_beat_at = 0.0
+        self._warned = False
+
+    def _maybe_beat(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._last_beat_at) < self.min_interval_seconds:
+            return
+        try:
+            beat_run_heartbeat(
+                client=self.client,
+                experiment_id=self.experiment_id,
+                run_id=self.run_id,
+                phase=self.phase,
+                provider=self.provider,
+            )
+            self._last_beat_at = now
+            self._warned = False
+        except SQLAlchemyError as exc:
+            if not self._warned:
+                print(
+                    "[RunHeartbeatTelemetryCallback] Warning: heartbeat update "
+                    f"failed; continuing training. {exc}",
+                    flush=True,
+                )
+                self._warned = True
+
+    def on_train_begin(
+        self, args, state: TrainerState, control: TrainerControl, **kwargs
+    ):
+        self._maybe_beat(force=True)
+        return control
+
+    def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        self._maybe_beat(force=False)
+        return control
 
 
 class ManualStopTelemetryCallback(TrainerCallback):

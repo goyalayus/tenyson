@@ -181,6 +181,8 @@ class EvalJob:
     def run(self) -> JobResult:
         require_gpu_provider_runtime()
         from tenyson.core.telemetry import (
+            beat_run_heartbeat,
+            start_run_heartbeat,
             begin_run_attempt,
             Generation,
             record_run_result,
@@ -201,6 +203,19 @@ class EvalJob:
                 "[EvalJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,
             )
+        try:
+            start_run_heartbeat(
+                client,
+                experiment_id,
+                run_name,
+                "eval",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[EvalJob] Warning: initial heartbeat registration failed; "
+                f"continuing evaluation. {exc}",
+                flush=True,
+            )
 
         model, tokenizer = self._build_model_and_tokenizer()
 
@@ -216,6 +231,31 @@ class EvalJob:
 
         processed_prompts: List[str] = []
         processed_completions: List[str] = []
+        last_heartbeat_at = 0.0
+        heartbeat_warned = False
+
+        def _heartbeat(force: bool = False) -> None:
+            nonlocal heartbeat_warned, last_heartbeat_at
+            now = time.monotonic()
+            if not force and (now - last_heartbeat_at) < 10.0:
+                return
+            try:
+                beat_run_heartbeat(
+                    client=client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase="eval",
+                )
+                last_heartbeat_at = now
+                heartbeat_warned = False
+            except Exception as exc:  # noqa: BLE001
+                if not heartbeat_warned:
+                    print(
+                        "[EvalJob] Warning: heartbeat update failed; continuing "
+                        f"evaluation. {exc}",
+                        flush=True,
+                    )
+                    heartbeat_warned = True
 
         def _should_stop() -> bool:
             session = client.Session()
@@ -241,6 +281,7 @@ class EvalJob:
             f"[EvalJob] Starting batched generation with {backend} (temp={temperature})...",
             flush=True,
         )
+        _heartbeat(force=True)
         for start_idx in range(0, len(all_prompts), batch_size):
             end_idx = min(start_idx + batch_size, len(all_prompts))
             batch_prompts = list(all_prompts[start_idx:end_idx])
@@ -253,6 +294,7 @@ class EvalJob:
             )
             processed_completions.extend(batch_completions)
             processed_prompts.extend(batch_prompts)
+            _heartbeat(force=False)
 
             if _should_stop():
                 print(
