@@ -7,3 +7,6 @@ __pycache__/
 tenyson/.tenyson_runs/
 .tenyson_modal_configs/
 tenyson/.tenyson_modal_configs/
+
+# Local run environment secrets
+tenyson/examples/wordle/run.env

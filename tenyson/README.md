@@ -78,6 +78,7 @@ Optional:
 Run from project root (`tenyson/`):
 
 ```bash
+source examples/wordle/run.env
 python examples/wordle/experiment.py
 ```
 
