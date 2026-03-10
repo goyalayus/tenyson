@@ -4,8 +4,10 @@ Shared loaders for config (YAML/JSON) and TaskPlugin (from file path or module:C
 
 import importlib
 import importlib.util
+import hashlib
 import json
 import os
+import sys
 from typing import Any, Dict
 
 import yaml
@@ -32,11 +34,14 @@ def load_task(path: str) -> TaskPlugin:
     if not os.path.isfile(abs_path):
         raise FileNotFoundError(f"Task file not found: {path}")
 
-    module_name = os.path.splitext(os.path.basename(abs_path))[0]
+    module_hash = hashlib.sha1(abs_path.encode("utf-8")).hexdigest()[:12]
+    module_stem = os.path.splitext(os.path.basename(abs_path))[0]
+    module_name = f"tenyson_task_{module_stem}_{module_hash}"
     spec = importlib.util.spec_from_file_location(module_name, abs_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load task module from {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
 
     candidates = []

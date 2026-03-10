@@ -208,6 +208,15 @@ class ExperimentBranch:
         label: str,
         stages: Sequence[StageSpec],
     ) -> Dict[str, JobResult]:
+        if not self.session.parallel:
+            results: Dict[str, JobResult] = {}
+            for stage in stages:
+                result = self.session.run_stage(stage, cloud=self._resolve_cloud())
+                results[stage.id] = result
+                self._store_result(stage.id, result)
+            self.session.raise_if_aborted()
+            return results
+
         results = self.session.run_parallel(label, stages, cloud=self._resolve_cloud())
         for stage in stages:
             self._store_result(stage.id, results[stage.id])
@@ -246,6 +255,7 @@ class ExperimentSession:
         on_failure: str = "wait",
         shared_overrides: Optional[Mapping[str, Any]] = None,
         abort_message: str = _DEFAULT_ABORT_MESSAGE,
+        parallel: bool = True,
     ) -> None:
         self.task = task
         self.templates = templates
@@ -253,6 +263,7 @@ class ExperimentSession:
         self.on_failure = on_failure
         self.shared_overrides = deepcopy(shared_overrides) if shared_overrides else None
         self.abort_message = abort_message
+        self.parallel = parallel
         self._abort_controller = _ExperimentAbortController()
 
     @property
@@ -286,6 +297,12 @@ class ExperimentSession:
             branch = self.branch()
             runner(branch)
             return branch.results()
+
+        if not self.parallel:
+            completed: Dict[str, Dict[str, JobResult]] = {}
+            for label, runner in branches.items():
+                completed[label] = _run_branch(runner)
+            return completed
 
         completed: Dict[str, Dict[str, JobResult]] = {}
         with ThreadPoolExecutor(max_workers=len(branches)) as executor:

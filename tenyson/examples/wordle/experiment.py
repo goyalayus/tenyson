@@ -23,18 +23,45 @@ def main() -> None:
     task = load_task(str(Path(__file__).with_name("wordle_task.py")))
 
     hf_repo_base = os.getenv("TENYSON_HF_REPO_BASE")
-    shared_overrides = (
-        {"training": {"hf_repo_base": hf_repo_base}} if hf_repo_base else None
-    )
+    telemetry_db_url = os.getenv("TENYSON_DB_URL")
+    experiment_id = os.getenv("TENYSON_EXPERIMENT_ID")
+    on_failure = os.getenv("TENYSON_ON_FAILURE", "abort").strip().lower() or "abort"
+    use_spot = os.getenv("TENYSON_AWS_USE_SPOT", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    disable_parallel = os.getenv(
+        "TENYSON_DISABLE_PARALLEL", "false"
+    ).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    shared_overrides = {}
+    if hf_repo_base:
+        shared_overrides.setdefault("training", {})["hf_repo_base"] = hf_repo_base
+    if telemetry_db_url or experiment_id:
+        telemetry_overrides = shared_overrides.setdefault("telemetry", {})
+        if telemetry_db_url:
+            telemetry_overrides["db_url"] = telemetry_db_url
+        if experiment_id:
+            telemetry_overrides["experiment_id"] = experiment_id
+    if not shared_overrides:
+        shared_overrides = None
+
     session = ExperimentSession(
         task=task,
         templates=ConfigTemplates.from_directory(base_dir / "configs"),
         cloud_factory=AWSManager.factory_from_env(
             auto_terminate=True,
-            use_spot=True,
+            use_spot=use_spot,
         ),
-        on_failure="wait",
+        on_failure=on_failure,
         shared_overrides=shared_overrides,
+        parallel=not disable_parallel,
     )
     primary_branch = session.branch(cloud=session.create_cloud())
 

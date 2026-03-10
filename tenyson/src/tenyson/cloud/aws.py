@@ -48,6 +48,7 @@ class AWSManager(BaseCloudManager):
         auto_terminate: bool = True,
         use_spot: bool = False,
         spot_max_price: str | None = None,
+        skip_runtime_install: bool = False,
     ):
         super().__init__(auto_terminate=auto_terminate)
         self.instance_type = instance_type
@@ -60,9 +61,13 @@ class AWSManager(BaseCloudManager):
         self.ami = ami
         self.use_spot = use_spot
         self.spot_max_price = spot_max_price
+        self.skip_runtime_install = skip_runtime_install
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "AWSManager":
+        skip_runtime_install = os.getenv(
+            "TENYSON_AWS_SKIP_RUNTIME_INSTALL", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         config: Dict[str, Any] = {
             "instance_type": os.getenv("TENYSON_AWS_INSTANCE_TYPE", "g5.2xlarge"),
             "region": os.getenv("TENYSON_AWS_REGION", "us-east-1"),
@@ -71,9 +76,11 @@ class AWSManager(BaseCloudManager):
             "security_group": os.getenv("TENYSON_AWS_SECURITY_GROUP"),
             "subnet": os.getenv("TENYSON_AWS_SUBNET") or None,
             "profile": os.getenv("AWS_PROFILE") or None,
+            "ami": os.getenv("TENYSON_AWS_AMI") or None,
             "auto_terminate": True,
             "use_spot": False,
             "spot_max_price": os.getenv("TENYSON_AWS_SPOT_MAX_PRICE") or None,
+            "skip_runtime_install": skip_runtime_install,
         }
         config.update(
             {key: value for key, value in overrides.items() if value is not None}
@@ -144,6 +151,15 @@ class AWSManager(BaseCloudManager):
         result = subprocess.run(ssh_cmd, capture_output=True, text=True)
         return result.returncode == 0, result.stdout
 
+    def _remote_activate_command(self) -> str:
+        activation_attempts = [
+            "source /opt/conda/bin/activate pytorch",
+            'source "$HOME/anaconda3/bin/activate" pytorch',
+            'source "$HOME/miniconda3/bin/activate" pytorch',
+            '(command -v conda >/dev/null 2>&1 && eval "$(conda shell.bash hook)" && conda activate pytorch)',
+        ]
+        return "( " + " || ".join(activation_attempts) + " || true )"
+
     def _rsync_to_host(
         self, host: str, key_path: str, user: str, local_dir: str, remote_dir: str
     ):
@@ -185,13 +201,16 @@ class AWSManager(BaseCloudManager):
         """
         module_path = task.__class__.__module__
         class_name = task.__class__.__name__
-        try:
-            importlib.import_module(module_path)
-            return f"{module_path}:{class_name}"
-        except Exception:  # noqa: BLE001
-            pass
 
-        task_file = inspect.getsourcefile(task.__class__)
+        task_file = None
+        module = sys.modules.get(module_path)
+        if module is not None:
+            task_file = getattr(module, "__file__", None)
+        if task_file is None:
+            try:
+                task_file = inspect.getsourcefile(task.__class__)
+            except (OSError, TypeError):
+                task_file = None
         if task_file:
             abs_repo = Path(repo_root).resolve()
             abs_task = Path(task_file).resolve()
@@ -201,6 +220,12 @@ class AWSManager(BaseCloudManager):
                 rel = None
             if rel is not None:
                 return str(rel)
+
+        try:
+            importlib.import_module(module_path)
+            return f"{module_path}:{class_name}"
+        except Exception:  # noqa: BLE001
+            pass
 
         return f"{module_path}:{class_name}"
 
@@ -254,40 +279,6 @@ class AWSManager(BaseCloudManager):
         print(f"[AWSManager] Instance is running. IP: {public_ip}")
 
         user = "ubuntu"
-        print("[AWSManager] Waiting for SSH to become available...")
-        max_retries = 30
-        for _ in range(max_retries):
-            ok, _out = self._run_ssh_command(
-                public_ip, self.key_path, user, "echo 'SSH is up'", stream=False
-            )
-            if ok:
-                break
-            time.sleep(10)
-        else:
-            if self.auto_terminate:
-                instance.terminate()
-            raise JobFailedError("SSH did not become available in time.")
-
-        print("[AWSManager] SSH is up. Preparing environment...")
-        setup_cmds = [
-            "source activate pytorch",
-            runtime_pip_install_command(),
-            "mkdir -p ~/workspace",
-        ]
-        setup_cmd = " && ".join(setup_cmds)
-        self._run_ssh_command(public_ip, self.key_path, user, f"bash -c '{setup_cmd}'")
-
-        print("[AWSManager] Syncing codebase to instance...")
-        repo_root = os.getcwd()
-        local_project_root = self._resolve_local_project_root(repo_root)
-        local_project_rel = os.path.relpath(
-            local_project_root, Path(repo_root).resolve()
-        )
-        if local_project_rel == ".":
-            remote_project_root = "~/workspace"
-        else:
-            remote_project_root = f"~/workspace/{local_project_rel}"
-
         job_type = "sft"
         from tenyson.jobs.sft import SFTJob as _S
         from tenyson.jobs.rl import RLJob as _R
@@ -360,6 +351,58 @@ class AWSManager(BaseCloudManager):
             )
             return result
 
+        print("[AWSManager] Waiting for SSH to become available...")
+        max_retries = 30
+        for _ in range(max_retries):
+            ok, _out = self._run_ssh_command(
+                public_ip, self.key_path, user, "echo 'SSH is up'", stream=False
+            )
+            if ok:
+                break
+            time.sleep(10)
+        else:
+            if self.auto_terminate:
+                instance.terminate()
+            raise JobFailedError("SSH did not become available in time.")
+
+        print("[AWSManager] SSH is up. Preparing environment...")
+        setup_cmds = [
+            self._remote_activate_command(),
+            "mkdir -p ~/workspace",
+        ]
+        if not self.skip_runtime_install:
+            setup_cmds.insert(1, runtime_pip_install_command())
+        setup_cmd = " && ".join(setup_cmds)
+        setup_success = self._run_ssh_command(
+            public_ip,
+            self.key_path,
+            user,
+            f"bash -lc '{setup_cmd}'",
+        )
+        if not setup_success:
+            if self.auto_terminate:
+                print(f"[AWSManager] Terminating instance {instance.id}...")
+                instance.terminate()
+            failure_reason = (
+                "Failed to prepare the remote Python environment on the EC2 instance."
+            )
+            result = _finalize_failure(failure_reason=failure_reason)
+            _red_print(
+                f"[TENYSON] Step failed (AWS): {failure_reason} (instance_id={instance.id})"
+            )
+            return result
+
+        print("[AWSManager] Syncing codebase to instance...")
+        repo_root = os.getcwd()
+        local_project_root = self._resolve_local_project_root(repo_root)
+        local_project_rel = os.path.relpath(
+            local_project_root, Path(repo_root).resolve()
+        )
+        if local_project_rel == ".":
+            remote_project_root = "~/workspace"
+        else:
+            remote_project_root = f"~/workspace/{local_project_rel}"
+
         config_path = materialize_run_config(
             config=job.config,
             project_root=Path(local_project_root),
@@ -396,15 +439,24 @@ class AWSManager(BaseCloudManager):
                 env_exports.append(f"export {var}={val}")
 
         task = job.task
-        task_spec = self._resolve_task_spec(task, repo_root)
+        try:
+            task_spec = self._resolve_task_spec(task, repo_root)
+        except Exception:
+            if self.auto_terminate:
+                print(
+                    "[AWSManager] Terminating instance "
+                    f"{instance.id} after local task resolution failure..."
+                )
+                instance.terminate()
+            raise
 
         env_chain = " && ".join(env_exports) if env_exports else ""
         remote_cmd = (
-            "source activate pytorch"
+            self._remote_activate_command()
             + (f" && {env_chain}" if env_chain else "")
             + f" && cd {remote_project_root} && "
             + "export PYTHONPATH=src:${PYTHONPATH} && "
-            + "python -m tenyson.runner "
+            + "python3 -m tenyson.runner "
             + f"--job-type {job_type} "
             + f"--config {config_rel_path} "
             + f"--task-module {task_spec}"
@@ -412,7 +464,7 @@ class AWSManager(BaseCloudManager):
 
         print(f"[AWSManager] Executing remote job: {remote_cmd}")
         success = self._run_ssh_command(
-            public_ip, self.key_path, user, f"bash -c '{remote_cmd}'"
+            public_ip, self.key_path, user, f"bash -lc '{remote_cmd}'"
         )
         if not success:
             # Get instance state reason (e.g. Spot interruption).

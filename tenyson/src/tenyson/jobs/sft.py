@@ -13,6 +13,7 @@ from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
+from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
 
 
 class SFTJob:
@@ -49,8 +50,7 @@ class SFTJob:
             trust_remote_code=True,
         )
 
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        normalize_tokenizer_special_tokens(tokenizer)
 
         print("[SFTJob] Applying LoRA...", flush=True)
         lora_cfg = self.config.get("lora", {})
@@ -76,6 +76,8 @@ class SFTJob:
         require_gpu_provider_runtime()
         from transformers import EarlyStoppingCallback
         from trl import SFTConfig, SFTTrainer
+        import transformers
+        import trl
         from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
             begin_run_attempt,
@@ -121,6 +123,10 @@ class SFTJob:
             )
 
         model, tokenizer, seq_len = self._build_model_and_tokenizer()
+        print(
+            f"[SFTJob] Runtime versions: transformers={transformers.__version__}, trl={trl.__version__}",
+            flush=True,
+        )
 
         # Datasets via TaskPlugin hooks.
         print("[SFTJob] Loading datasets via TaskPlugin...", flush=True)
@@ -155,6 +161,8 @@ class SFTJob:
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
             packing=train_cfg.get("packing", False),
+            eos_token=tokenizer.eos_token,
+            pad_token=tokenizer.pad_token,
             dataset_text_field=(
                 train_cfg.get("dataset_text_field", "text")
                 if not formatting_func
@@ -180,6 +188,12 @@ class SFTJob:
             cfg_kwargs["save_only_model"] = False
         training_args = SFTConfig(
             **{k: v for k, v in cfg_kwargs.items() if k in accepted}
+        )
+        print(
+            "[SFTJob] SFTConfig special tokens: "
+            f"eos_token={getattr(training_args, 'eos_token', None)!r}, "
+            f"pad_token={getattr(training_args, 'pad_token', None)!r}.",
+            flush=True,
         )
 
         if eval_dataset is not None:
