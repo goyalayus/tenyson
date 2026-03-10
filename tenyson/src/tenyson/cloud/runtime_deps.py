@@ -8,7 +8,6 @@ REMOTE_RUNTIME_PACKAGES: tuple[str, ...] = (
     "unsloth",
     "vllm",
     "huggingface_hub",
-    "safetensors",
     "pyyaml",
     "sqlalchemy",
     "psycopg[binary]",
@@ -17,4 +16,6 @@ REMOTE_RUNTIME_PACKAGES: tuple[str, ...] = (
 
 
 def runtime_pip_install_command() -> str:
-    return "pip install " + " ".join(shlex.quote(pkg) for pkg in REMOTE_RUNTIME_PACKAGES)
+    return "python3 -m pip install " + " ".join(
+        shlex.quote(pkg) for pkg in REMOTE_RUNTIME_PACKAGES
+    )
