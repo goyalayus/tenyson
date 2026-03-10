@@ -23,6 +23,71 @@ from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
+from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
+
+
+def _resolve_grpo_max_completion_length(
+    train_cfg: Dict[str, Any],
+    vllm_cfg: Dict[str, Any],
+) -> int:
+    train_length = train_cfg.get("max_completion_length")
+    vllm_length = vllm_cfg.get("max_tokens") if vllm_cfg.get("enabled", False) else None
+
+    if train_length is None and vllm_length is None:
+        return 2048
+    if train_length is None:
+        return int(vllm_length)
+    if vllm_length is None:
+        return int(train_length)
+
+    resolved_train_length = int(train_length)
+    resolved_vllm_length = int(vllm_length)
+    if resolved_train_length != resolved_vllm_length:
+        raise ValueError(
+            "training.max_completion_length and vllm.max_tokens must match when "
+            "vLLM is enabled because TRL GRPO uses a single completion-length setting."
+        )
+    return resolved_train_length
+
+
+def _build_vllm_generation_kwargs(
+    tokenizer: Any,
+    vllm_cfg: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not vllm_cfg.get("enabled", False):
+        return None
+
+    generation_kwargs: Dict[str, Any] = {
+        "include_stop_str_in_output": True,
+    }
+    eos_token = getattr(tokenizer, "eos_token", None)
+    if eos_token is not None:
+        generation_kwargs["stop"] = [eos_token]
+    return generation_kwargs
+
+
+def _build_grpo_vllm_overrides(
+    tokenizer: Any,
+    vllm_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not vllm_cfg.get("enabled", False):
+        return {"use_vllm": False}
+
+    overrides: Dict[str, Any] = {
+        "use_vllm": True,
+        "top_p": float(vllm_cfg.get("top_p", 1.0)),
+        "top_k": int(vllm_cfg.get("top_k", -1)),
+        "vllm_gpu_memory_utilization": float(
+            vllm_cfg.get("gpu_memory_utilization", 0.9)
+        ),
+    }
+    min_p = vllm_cfg.get("min_p")
+    overrides["min_p"] = float(min_p) if min_p is not None else None
+
+    generation_kwargs = _build_vllm_generation_kwargs(tokenizer, vllm_cfg)
+    if generation_kwargs is not None:
+        overrides["generation_kwargs"] = generation_kwargs
+    return overrides
 
 
 def _resolve_reward_component_name(reward_func: Callable[..., Any], index: int) -> str:
@@ -283,26 +348,6 @@ class RLJob:
         self.task = task
         self.run_id = resolve_required_run_name(self.config, "rl")
 
-    def _build_vllm_sampling_params(self, tokenizer: Any):
-        vllm_cfg = self.config.get("vllm", {})
-        if not vllm_cfg.get("enabled", False):
-            return None
-        from vllm import SamplingParams
-
-        max_tokens = int(vllm_cfg.get("max_tokens", 2048))
-        return SamplingParams(
-            temperature=float(vllm_cfg.get("temperature", 1.0)),
-            min_p=float(vllm_cfg.get("min_p", 0.1)),
-            top_p=float(vllm_cfg.get("top_p", 1.0)),
-            top_k=int(vllm_cfg.get("top_k", -1)),
-            seed=int(self.config.get("training", {}).get("seed", 3407)),
-            max_tokens=max_tokens,
-            stop=[tokenizer.eos_token]
-            if getattr(tokenizer, "eos_token", None) is not None
-            else None,
-            include_stop_str_in_output=True,
-        )
-
     def _build_model_and_tokenizer(self) -> Any:
         from unsloth import FastLanguageModel
 
@@ -361,9 +406,7 @@ class RLJob:
             gpu_memory_utilization=vllm_cfg.get("gpu_memory_utilization", 0.9),
         )
 
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "left"
+        normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
         print("[RLJob] Applying LoRA...", flush=True)
         model = FastLanguageModel.get_peft_model(
@@ -450,7 +493,9 @@ class RLJob:
         print("[RLJob] Loading reward functions via TaskPlugin...", flush=True)
         reward_funcs = self.task.get_reward_funcs(self.config, tokenizer)
 
-        vllm_sampling_params = self._build_vllm_sampling_params(tokenizer)
+        max_completion_length = _resolve_grpo_max_completion_length(
+            train_cfg, vllm_cfg
+        )
 
         cfg_kwargs: Dict[str, Any] = dict(
             output_dir=str(os.path.join(output_dir, "trainer_out")),
@@ -461,8 +506,6 @@ class RLJob:
             temperature=float(vllm_cfg.get("temperature", 1.0))
             if vllm_cfg.get("enabled", False)
             else 1.0,
-            use_vllm=vllm_cfg.get("enabled", False),
-            vllm_sampling_params=vllm_sampling_params,
             optim=train_cfg.get("optim", "adamw_8bit"),
             logging_steps=1,
             report_to=train_cfg.get("report_to", ["none"]),
@@ -471,7 +514,7 @@ class RLJob:
             remove_unused_columns=False,
             num_generations=train_cfg.get("num_generations", 4),
             max_prompt_length=train_cfg.get("max_prompt_length", 2048),
-            max_completion_length=train_cfg.get("max_completion_length", 2048),
+            max_completion_length=max_completion_length,
             bf16=False,
             fp16=False,
             save_steps=hf_push_every_steps,
@@ -481,6 +524,7 @@ class RLJob:
             hub_model_id=push_repo_id,
             hub_strategy="checkpoint",
         )
+        cfg_kwargs.update(_build_grpo_vllm_overrides(tokenizer, vllm_cfg))
 
         import inspect
 

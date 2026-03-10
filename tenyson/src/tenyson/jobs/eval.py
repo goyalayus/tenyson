@@ -11,6 +11,7 @@ from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.result import JobResult
+from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
 
 
 class EvalJob:
@@ -74,9 +75,7 @@ class EvalJob:
             gpu_memory_utilization=vllm_cfg.get("gpu_memory_utilization", 0.9),
         )
 
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "left"
+        normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
         if init_adapter is not None and lora_runtime_kwargs is not None:
             model = FastLanguageModel.get_peft_model(
@@ -102,17 +101,79 @@ class EvalJob:
         return model, tokenizer
 
     def _build_sampling_params(self, tokenizer: Any):
+        vllm_cfg = self.config.get("vllm", {})
+        if not vllm_cfg.get("enabled", False):
+            return None
+
         from vllm import SamplingParams
 
+        kwargs: Dict[str, Any] = {
+            "temperature": float(vllm_cfg.get("temperature", 0.0)),
+            "top_p": float(vllm_cfg.get("top_p", 1.0)),
+            "max_tokens": int(vllm_cfg.get("max_tokens", 1024)),
+        }
+        if "top_k" in vllm_cfg:
+            kwargs["top_k"] = int(vllm_cfg["top_k"])
+        if vllm_cfg.get("min_p") is not None:
+            kwargs["min_p"] = float(vllm_cfg["min_p"])
+        if getattr(tokenizer, "eos_token", None) is not None:
+            kwargs["stop"] = [tokenizer.eos_token]
+        return SamplingParams(**kwargs)
+
+    def _resolve_model_device(self, model: Any) -> Any:
+        if getattr(model, "device", None) is not None:
+            return model.device
+
+        parameters = getattr(model, "parameters", None)
+        if callable(parameters):
+            try:
+                return next(parameters()).device
+            except (StopIteration, TypeError):
+                pass
+        return "cpu"
+
+    def _generate_batch(
+        self,
+        model: Any,
+        tokenizer: Any,
+        batch_prompts: Sequence[str],
+        sampling_params: Any,
+    ) -> List[str]:
+        if sampling_params is not None:
+            outputs = model.fast_generate(
+                list(batch_prompts),
+                sampling_params=sampling_params,
+                use_tqdm=True,
+            )
+            return [out.outputs[0].text for out in outputs]
+
+        tokenized = tokenizer(list(batch_prompts), return_tensors="pt", padding=True)
+        if hasattr(tokenized, "to"):
+            tokenized = tokenized.to(self._resolve_model_device(model))
+
+        input_length = tokenized["input_ids"].shape[1]
         vllm_cfg = self.config.get("vllm", {})
-        return SamplingParams(
-            temperature=float(vllm_cfg.get("temperature", 0.0)),
-            top_p=float(vllm_cfg.get("top_p", 1.0)),
-            max_tokens=int(vllm_cfg.get("max_tokens", 1024)),
-            stop=[tokenizer.eos_token]
-            if getattr(tokenizer, "eos_token", None) is not None
-            else None,
-        )
+        temperature = float(vllm_cfg.get("temperature", 0.0))
+        generation_kwargs: Dict[str, Any] = {
+            "max_new_tokens": int(vllm_cfg.get("max_tokens", 1024)),
+            "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+            "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        }
+        if temperature > 0.0:
+            generation_kwargs["do_sample"] = True
+            generation_kwargs["temperature"] = temperature
+            generation_kwargs["top_p"] = float(vllm_cfg.get("top_p", 1.0))
+            if "top_k" in vllm_cfg:
+                generation_kwargs["top_k"] = int(vllm_cfg["top_k"])
+        else:
+            generation_kwargs["do_sample"] = False
+
+        generated = model.generate(**tokenized, **generation_kwargs)
+        completion_ids = generated[:, input_length:]
+        return [
+            tokenizer.decode(ids, skip_special_tokens=True)
+            for ids in completion_ids
+        ]
 
     def _extract_prompts(self, dataset: Any) -> List[str]:
         return [row["prompt"] for row in dataset]
@@ -170,22 +231,27 @@ class EvalJob:
             finally:
                 session.close()
 
+        backend = "vLLM" if sampling_params is not None else "transformers"
+        temperature = (
+            sampling_params.temperature
+            if sampling_params is not None
+            else float(self.config.get("vllm", {}).get("temperature", 0.0))
+        )
         print(
-            f"[EvalJob] Starting batched generation with vLLM (temp={sampling_params.temperature})...",
+            f"[EvalJob] Starting batched generation with {backend} (temp={temperature})...",
             flush=True,
         )
         for start_idx in range(0, len(all_prompts), batch_size):
             end_idx = min(start_idx + batch_size, len(all_prompts))
             batch_prompts = list(all_prompts[start_idx:end_idx])
 
-            outputs = model.fast_generate(
+            batch_completions = self._generate_batch(
+                model,
+                tokenizer,
                 batch_prompts,
-                sampling_params=sampling_params,
-                use_tqdm=True,
+                sampling_params,
             )
-
-            for out in outputs:
-                processed_completions.append(out.outputs[0].text)
+            processed_completions.extend(batch_completions)
             processed_prompts.extend(batch_prompts)
 
             if _should_stop():

@@ -41,7 +41,9 @@ STRICT_FORMAT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-TURN_LINE_RE = re.compile(r"Turn\s*([0-9]+):\s*\[([a-zA-Z]{5})\]\s*->\s*([GYX\s]+)")
+TURN_LINE_RE = re.compile(
+    r"Turn\s*([0-9]+):\s*\[([a-zA-Z]{5})\]\s*(?:->|→)\s*([GYX\s]+)"
+)
 
 
 def render_user_prompt(history_rows: Sequence[Tuple[str, str]]) -> str:
