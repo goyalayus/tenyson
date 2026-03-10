@@ -83,8 +83,10 @@ Optional:
 Run from project root (`tenyson/`):
 
 ```bash
+cp examples/wordle/run.env.example examples/wordle/run.env
+# fill in your values in examples/wordle/run.env
 source examples/wordle/run.env
-python examples/wordle/experiment.py
+python3 examples/wordle/experiment.py
 ```
 
 The experiment entrypoint auto-adds `src/` to `PYTHONPATH` and auto-installs
