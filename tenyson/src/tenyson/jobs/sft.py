@@ -74,10 +74,6 @@ class SFTJob:
 
     def run(self) -> JobResult:
         require_gpu_provider_runtime()
-        from transformers import EarlyStoppingCallback
-        from trl import SFTConfig, SFTTrainer
-        import transformers
-        import trl
         from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
             begin_run_attempt,
@@ -123,6 +119,12 @@ class SFTJob:
             )
 
         model, tokenizer, seq_len = self._build_model_and_tokenizer()
+        # Import TRL/Transformers only after Unsloth has patched the runtime.
+        from transformers import EarlyStoppingCallback
+        from trl import SFTConfig, SFTTrainer
+        import transformers
+        import trl
+
         print(
             f"[SFTJob] Runtime versions: transformers={transformers.__version__}, trl={trl.__version__}",
             flush=True,
@@ -161,8 +163,6 @@ class SFTJob:
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
             packing=train_cfg.get("packing", False),
-            eos_token=tokenizer.eos_token,
-            pad_token=tokenizer.pad_token,
             dataset_text_field=(
                 train_cfg.get("dataset_text_field", "text")
                 if not formatting_func

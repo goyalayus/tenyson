@@ -94,18 +94,27 @@ class ModalManager(BaseCloudManager):
         """
         module_path = task.__class__.__module__
         class_name = task.__class__.__name__
-        try:
-            importlib.import_module(module_path)
-            return f"{module_path}:{class_name}"
-        except Exception:  # noqa: BLE001
-            pass
 
-        task_file = inspect.getsourcefile(task.__class__)
+        task_file = None
+        module = sys.modules.get(module_path)
+        if module is not None:
+            task_file = getattr(module, "__file__", None)
+        if task_file is None:
+            try:
+                task_file = inspect.getsourcefile(task.__class__)
+            except (OSError, TypeError):
+                task_file = None
         if task_file:
             abs_repo = os.path.abspath(repo_root)
             abs_task = os.path.abspath(task_file)
             if abs_task.startswith(abs_repo + os.sep) or abs_task == abs_repo:
                 return os.path.relpath(abs_task, abs_repo)
+
+        try:
+            importlib.import_module(module_path)
+            return f"{module_path}:{class_name}"
+        except Exception:  # noqa: BLE001
+            pass
         return f"{module_path}:{class_name}"
 
     def run(self, job: Any) -> JobResult:

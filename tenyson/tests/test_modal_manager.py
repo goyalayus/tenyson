@@ -1,9 +1,11 @@
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 from tenyson.cloud.manager import CloudManager
 from tenyson.cloud.modal import ModalManager
+from tenyson.loader import load_task
 
 
 class ModalManagerEnvTests(unittest.TestCase):
@@ -52,6 +54,18 @@ class CloudManagerDefaultTests(unittest.TestCase):
         manager = CloudManager()
         self.assertIsInstance(manager, ModalManager)
         self.assertEqual(manager.gpu, "A100")
+
+
+class ModalTaskSpecTests(unittest.TestCase):
+    def test_resolve_task_spec_prefers_repo_relative_file_for_loaded_task(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        task_path = repo_root / "examples" / "wordle" / "wordle_task.py"
+        task = load_task(str(task_path))
+
+        manager = ModalManager()
+        task_spec = manager._resolve_task_spec(task, str(repo_root))
+
+        self.assertEqual(task_spec, "examples/wordle/wordle_task.py")
 
 
 if __name__ == "__main__":
