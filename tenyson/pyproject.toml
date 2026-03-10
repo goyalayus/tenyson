@@ -15,6 +15,7 @@ dependencies = [
   "vllm",
   "huggingface_hub",
   "sqlalchemy",
+  "psycopg[binary]",
   "boto3",
   "wandb",
 ]
