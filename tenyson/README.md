@@ -97,6 +97,7 @@ The experiment entrypoint auto-adds `src/` to `PYTHONPATH` and auto-installs
 missing local controller dependencies (`modal`, `boto3`, `psycopg[binary]`,
 `sqlalchemy`, `datasets`, `pyyaml`, `huggingface_hub`, `wandb`) on first run.
 Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` to disable this behavior.
+The reusable helper behind this is `tenyson.bootstrap.ensure_local_controller_environment(...)`.
 
 ## telemetry
 

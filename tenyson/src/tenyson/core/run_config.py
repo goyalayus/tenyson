@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 import yaml
@@ -40,3 +41,19 @@ def materialize_run_config(
     with open(config_path, "w", encoding="utf-8") as handle:
         yaml.safe_dump(config, handle, sort_keys=False)
     return config_path
+
+
+def shared_overrides_from_env(
+    *,
+    hf_repo_base_env: str = "TENYSON_HF_REPO_BASE",
+    experiment_id_env: str = "TENYSON_EXPERIMENT_ID",
+) -> Optional[Dict[str, Any]]:
+    hf_repo_base = str(os.getenv(hf_repo_base_env) or "").strip()
+    experiment_id = str(os.getenv(experiment_id_env) or "").strip()
+
+    shared_overrides: Dict[str, Any] = {}
+    if hf_repo_base:
+        shared_overrides.setdefault("training", {})["hf_repo_base"] = hf_repo_base
+    if experiment_id:
+        shared_overrides.setdefault("telemetry", {})["experiment_id"] = experiment_id
+    return shared_overrides or None

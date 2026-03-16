@@ -11,6 +11,7 @@ __all__ = [
     "AWSManager",
     "ModalManager",
     "CloudManager",
+    "ensure_local_controller_environment",
     "AdapterRef",
     "ExperimentAborted",
     "ExperimentBranch",
@@ -23,6 +24,7 @@ __all__ = [
     "load_task",
     "load_task_from_spec",
     "run_pipeline",
+    "shared_overrides_from_env",
 ]
 
 _EXPORTS = {
@@ -33,6 +35,10 @@ _EXPORTS = {
     "AWSManager": ("tenyson.cloud.aws", "AWSManager"),
     "ModalManager": ("tenyson.cloud.modal", "ModalManager"),
     "CloudManager": ("tenyson.cloud.manager", "CloudManager"),
+    "ensure_local_controller_environment": (
+        "tenyson.bootstrap",
+        "ensure_local_controller_environment",
+    ),
     "AdapterRef": ("tenyson.experiment", "AdapterRef"),
     "ExperimentAborted": ("tenyson.experiment", "ExperimentAborted"),
     "ExperimentBranch": ("tenyson.experiment", "ExperimentBranch"),
@@ -45,9 +51,11 @@ _EXPORTS = {
     "load_task": ("tenyson.loader", "load_task"),
     "load_task_from_spec": ("tenyson.loader", "load_task_from_spec"),
     "run_pipeline": ("tenyson.pipeline", "run_pipeline"),
+    "shared_overrides_from_env": ("tenyson.core.run_config", "shared_overrides_from_env"),
 }
 
 if TYPE_CHECKING:
+    from tenyson.bootstrap import ensure_local_controller_environment
     from tenyson.cloud.aws import AWSManager
     from tenyson.cloud.manager import CloudManager
     from tenyson.cloud.modal import ModalManager
@@ -65,6 +73,7 @@ if TYPE_CHECKING:
     from tenyson.jobs.sft import SFTJob
     from tenyson.loader import load_config, load_task, load_task_from_spec
     from tenyson.pipeline import run_pipeline
+    from tenyson.core.run_config import shared_overrides_from_env
     from tenyson.reporting.builder import ReportBuilder
     from tenyson.reporting.fixed import ExperimentReport
 

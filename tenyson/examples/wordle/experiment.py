@@ -1,81 +1,21 @@
-import importlib.util
 import os
 from pathlib import Path
-import subprocess
 import sys
 
+# src-layout convenience for running this file directly from a fresh checkout.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC_DIR = _REPO_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-_LOCAL_BOOTSTRAP_PACKAGES = {
-    "boto3": "boto3",
-    "datasets": "datasets",
-    "huggingface_hub": "huggingface_hub",
-    "modal": "modal",
-    "psycopg": "psycopg[binary]",
-    "sqlalchemy": "sqlalchemy",
-    "wandb": "wandb",
-    "yaml": "pyyaml",
-}
-
-
-def _is_truthy(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _bootstrap_local_environment() -> None:
-    """
-    Ensure this script can run from a fresh checkout without manual local setup.
-
-    - Adds the local src/ directory to PYTHONPATH for src-layout imports.
-    - Installs missing controller-side dependencies (Modal + telemetry + task loading).
-    """
-    repo_root = Path(__file__).resolve().parents[2]
-    src_dir = repo_root / "src"
-    if str(src_dir) not in sys.path:
-        sys.path.insert(0, str(src_dir))
-
-    if _is_truthy(os.getenv("TENYSON_SKIP_LOCAL_BOOTSTRAP", "false")):
-        return
-
-    missing_packages = [
-        package
-        for module_name, package in _LOCAL_BOOTSTRAP_PACKAGES.items()
-        if importlib.util.find_spec(module_name) is None
-    ]
-    if not missing_packages:
-        return
-
-    print(
-        "[TENYSON] Installing missing local dependencies: "
-        + ", ".join(missing_packages),
-        flush=True,
-    )
-    install_cmd = [sys.executable, "-m", "pip", "install", *missing_packages]
-    result = subprocess.run(install_cmd, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Automatic local dependency bootstrap failed. "
-            "Re-run after installing the missing packages manually."
-        )
-
-
-_bootstrap_local_environment()
-
+from tenyson.bootstrap import ensure_local_controller_environment
 from tenyson.cloud.modal import ModalManager
+from tenyson.core.run_config import shared_overrides_from_env
 from tenyson.experiment import ConfigTemplates, ExperimentAborted, ExperimentSession
 from tenyson.loader import load_task
 from tenyson.reporting.fixed import ExperimentReport
 
-
-def _build_shared_overrides() -> dict | None:
-    hf_repo_base = str(os.getenv("TENYSON_HF_REPO_BASE") or "").strip()
-    experiment_id = str(os.getenv("TENYSON_EXPERIMENT_ID") or "").strip()
-
-    shared_overrides = {}
-    if hf_repo_base:
-        shared_overrides.setdefault("training", {})["hf_repo_base"] = hf_repo_base
-    if experiment_id:
-        shared_overrides.setdefault("telemetry", {})["experiment_id"] = experiment_id
-    return shared_overrides or None
+ensure_local_controller_environment(anchor_file=__file__)
 
 
 def _run_mixed_branch(branch, *, sft_adapter) -> None:
@@ -231,7 +171,7 @@ def main() -> None:
             profile=modal_profile,
         ),
         on_failure=on_failure,
-        shared_overrides=_build_shared_overrides(),
+        shared_overrides=shared_overrides_from_env(),
         parallel=not disable_parallel,
         report=report,
         report_metric_precision=4,
