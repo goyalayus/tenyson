@@ -68,21 +68,22 @@ def notify_failure(
             )
 
             client = TelemetryClient(db_url=db_url)
-            session = client.Session()
-            try:
-                row = RunFailure(
-                    id=str(uuid4()),
-                    experiment_id=experiment_id,
-                    run_id=run_id,
-                    step_label=step_label,
-                    failure_reason=failure_reason,
-                    instance_id=instance_id,
-                    spot_interruption=spot_interruption,
-                )
-                session.add(row)
-                session.commit()
-            finally:
-                session.close()
+            if client.backend == "sql":
+                session = client.Session()
+                try:
+                    row = RunFailure(
+                        id=str(uuid4()),
+                        experiment_id=experiment_id,
+                        run_id=run_id,
+                        step_label=step_label,
+                        failure_reason=failure_reason,
+                        instance_id=instance_id,
+                        spot_interruption=spot_interruption,
+                    )
+                    session.add(row)
+                    session.commit()
+                finally:
+                    session.close()
             if experiment_id and phase:
                 record_run_summary(
                     client=client,

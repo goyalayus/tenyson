@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
+from . import wandb_store
 from .telemetry import LiveRunInfo, RunControl, TelemetryClient, list_live_run_heartbeats
 
 
@@ -16,7 +17,7 @@ def request_stop(
     create_if_missing: bool = True,
 ) -> bool:
     """
-    Set stop_requested = True for the given run_id in the RunControl table.
+    Set stop_requested = True for the given run_id in the active telemetry backend.
     """
     experiment_id = str(experiment_id or "").strip()
     if not experiment_id:
@@ -26,6 +27,36 @@ def request_stop(
         )
 
     client = TelemetryClient(db_url=db_url)
+    if client.backend == "wandb":
+        matched = list_live_run_heartbeats(
+            client=client,
+            experiment_id=experiment_id,
+            max_age_seconds=365 * 24 * 60 * 60,
+        )
+        phase = None
+        for row in matched:
+            if row.run_id == str(run_id):
+                phase = row.phase
+                break
+        candidate_phases: List[str] = []
+        if phase is not None:
+            candidate_phases.append(str(phase))
+        candidate_phases.extend(
+            phase_name
+            for phase_name in ["sft", "rl", "eval", "run"]
+            if phase_name not in candidate_phases
+        )
+        for phase_name in candidate_phases:
+            if wandb_store.set_stop_requested(
+                client.db_url,
+                experiment_id=experiment_id,
+                phase=phase_name,
+                run_name=str(run_id),
+                requested=True,
+                when_iso=datetime.now(timezone.utc).isoformat(),
+            ):
+                return True
+        return False
     session = client.Session()
     try:
         control: Optional[RunControl] = (
@@ -86,8 +117,8 @@ def _parse_args() -> argparse.Namespace:
         "--db-url",
         required=True,
         help=(
-            "SQLAlchemy database URL used for telemetry "
-            "(e.g. postgresql+psycopg://user:pass@host:5432/dbname)."
+            "Telemetry backend ref. Use a SQLAlchemy database URL or "
+            "wandb://<entity>/<project>."
         ),
     )
     parser.add_argument(

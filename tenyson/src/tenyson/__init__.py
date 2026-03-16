@@ -17,6 +17,7 @@ __all__ = [
     "ConfigTemplates",
     "ExperimentSession",
     "StageSpec",
+    "ExperimentReport",
     "ReportBuilder",
     "load_config",
     "load_task",
@@ -38,6 +39,7 @@ _EXPORTS = {
     "ConfigTemplates": ("tenyson.experiment", "ConfigTemplates"),
     "ExperimentSession": ("tenyson.experiment", "ExperimentSession"),
     "StageSpec": ("tenyson.experiment", "StageSpec"),
+    "ExperimentReport": ("tenyson.reporting.fixed", "ExperimentReport"),
     "ReportBuilder": ("tenyson.reporting.builder", "ReportBuilder"),
     "load_config": ("tenyson.loader", "load_config"),
     "load_task": ("tenyson.loader", "load_task"),
@@ -64,6 +66,7 @@ if TYPE_CHECKING:
     from tenyson.loader import load_config, load_task, load_task_from_spec
     from tenyson.pipeline import run_pipeline
     from tenyson.reporting.builder import ReportBuilder
+    from tenyson.reporting.fixed import ExperimentReport
 
 
 def __getattr__(name: str):

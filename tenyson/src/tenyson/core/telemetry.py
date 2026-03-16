@@ -23,6 +23,8 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
+from tenyson.core import wandb_store
+
 try:
     from transformers.trainer_callback import (
         TrainerCallback,
@@ -52,6 +54,8 @@ def _validate_shared_db_url(db_url: str) -> None:
     The same DB endpoint must be reachable by both remote workers and local control
     commands; local-only SQLite files and localhost hosts are rejected.
     """
+    if wandb_store.is_wandb_backend_ref(str(db_url or "")):
+        return
     try:
         parsed = make_url(str(db_url))
     except Exception as exc:  # noqa: BLE001
@@ -245,6 +249,17 @@ class TelemetryClient:
 
     def __post_init__(self) -> None:
         _validate_shared_db_url(self.db_url)
+        self.backend = "wandb" if wandb_store.is_wandb_backend_ref(self.db_url) else "sql"
+        self.engine = None
+        self.Session = None
+        self.wandb_target = (
+            wandb_store.parse_backend_ref(self.db_url)
+            if self.backend == "wandb"
+            else None
+        )
+        if self.backend == "wandb":
+            return
+
         self.engine = create_engine(
             self.db_url,
             pool_pre_ping=True,
@@ -264,6 +279,8 @@ class TelemetryClient:
         self.Session = sessionmaker(bind=self.engine)
 
     def _ensure_schema_columns(self) -> None:
+        if self.backend != "sql":
+            return
         self._ensure_table_columns(
             "generations",
             {
@@ -305,6 +322,31 @@ class TelemetryClient:
                     and "already exists" not in message
                 ):
                     raise
+
+
+def ensure_wandb_telemetry_run(
+    client: TelemetryClient,
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> Any:
+    if client.backend != "wandb":
+        return None
+    return wandb_store.ensure_run(
+        client.db_url,
+        experiment_id=experiment_id,
+        phase=phase,
+        run_name=run_name,
+        config=config,
+    )
+
+
+def telemetry_project_url(client: TelemetryClient) -> Optional[str]:
+    if client.backend != "wandb" or client.wandb_target is None:
+        return None
+    return client.wandb_target.project_url
 
 
 @dataclass(frozen=True)
@@ -372,6 +414,23 @@ def _upsert_run_heartbeat(
     reset_created_at: bool = False,
 ) -> None:
     now = datetime.now(timezone.utc)
+    if client.backend == "wandb":
+        run = wandb_store.active_run()
+        if run is None:
+            return
+        wandb_store.update_run_summary(
+            run,
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: str(experiment_id),
+                wandb_store.SUMMARY_PHASE: str(phase),
+                wandb_store.SUMMARY_RUN_NAME: str(run_id),
+                wandb_store.SUMMARY_STATUS: str(status),
+                wandb_store.SUMMARY_IS_ACTIVE: bool(is_active),
+                wandb_store.SUMMARY_PROVIDER: _heartbeat_provider(provider),
+                wandb_store.SUMMARY_HEARTBEAT_AT: now.isoformat(),
+            },
+        )
+        return
     provider_name = _heartbeat_provider(provider)
     session = client.Session()
     try:
@@ -471,6 +530,24 @@ def list_live_run_heartbeats(
     *,
     max_age_seconds: int = 90,
 ) -> List[LiveRunInfo]:
+    if client.backend == "wandb":
+        rows = wandb_store.list_live_runs(
+            client.db_url,
+            experiment_id=experiment_id,
+            max_age_seconds=max_age_seconds,
+        )
+        return [
+            LiveRunInfo(
+                run_id=str(row.get("run_id") or ""),
+                phase=str(row.get("phase") or ""),
+                provider=row.get("provider"),
+                status=str(row.get("status") or "running"),
+                is_active=bool(row.get("is_active")),
+                created_at=_normalize_timestamp(row.get("created_at")),
+                updated_at=_normalize_timestamp(row.get("updated_at")),
+            )
+            for row in rows
+        ]
     deadline = datetime.now(timezone.utc) - timedelta(seconds=max(1, int(max_age_seconds)))
     session = client.Session()
     try:
@@ -503,6 +580,7 @@ def begin_run_attempt(
     experiment_id: str,
     run_id: str,
     phase: Optional[str] = None,
+    attempt_token: Optional[str] = None,
 ) -> bool:
     """
     Start a fresh control epoch for a logical run.
@@ -516,6 +594,30 @@ def begin_run_attempt(
     experiment_id = str(experiment_id)
     run_id = str(run_id)
     phase_name = str(phase or "").strip().lower()
+    if client.backend == "wandb":
+        run = wandb_store.ensure_run(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase_name or "run",
+            run_name=run_id,
+        )
+        wandb_store.update_run_summary(
+            run,
+            {
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: str(attempt_token or ""),
+                wandb_store.SUMMARY_STATUS: "running",
+                wandb_store.SUMMARY_IS_ACTIVE: True,
+                wandb_store.SUMMARY_JOB_RESULT_JSON: None,
+                wandb_store.SUMMARY_RESULTS_JSON: None,
+                wandb_store.SUMMARY_RESULT_ARTIFACT: None,
+                wandb_store.SUMMARY_FAILURE_REASON: None,
+                wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None),
+                wandb_store.SUMMARY_STOP_REQUESTED: False,
+                wandb_store.SUMMARY_STOP_REQUESTED_AT: None,
+                wandb_store.SUMMARY_HEARTBEAT_AT: now.isoformat(),
+            },
+        )
+        return False
     now = datetime.now(timezone.utc)
     reset_session = client.Session()
     try:
@@ -602,11 +704,37 @@ def resolve_telemetry_context(
     config: Dict[str, Any],
 ) -> Tuple[Optional[str], Optional[str]]:
     """
-    Return (db_url, experiment_id). If db_url is set, experiment_id is required.
+    Return (backend_ref, experiment_id). The backend ref is either:
+    - a SQLAlchemy DB URL, or
+    - a W&B ref like wandb://<entity>/<project>.
     """
     telemetry_cfg = config.get("telemetry", {}) if isinstance(config, dict) else {}
-    db_url = telemetry_cfg.get("db_url")
-    if not db_url:
+    wandb_cfg = telemetry_cfg.get("wandb", {}) if isinstance(telemetry_cfg, dict) else {}
+    backend = str(telemetry_cfg.get("backend") or "").strip().lower()
+    entity = str(
+        telemetry_cfg.get("entity")
+        or wandb_cfg.get("entity")
+        or os.getenv("TENYSON_WANDB_ENTITY")
+        or os.getenv("WANDB_ENTITY")
+        or ""
+    ).strip()
+    project = str(
+        telemetry_cfg.get("project")
+        or wandb_cfg.get("project")
+        or os.getenv("TENYSON_WANDB_PROJECT")
+        or os.getenv("WANDB_PROJECT")
+        or ""
+    ).strip()
+    if backend == "wandb" or entity or project:
+        if not entity or not project:
+            raise ValueError(
+                "W&B telemetry requires telemetry.entity and telemetry.project "
+                "(or telemetry.wandb.entity / telemetry.wandb.project)."
+            )
+        backend_ref = f"wandb://{entity}/{project}"
+    else:
+        backend_ref = telemetry_cfg.get("db_url")
+    if not backend_ref:
         return None, None
     experiment_id = resolve_experiment_id(config)
     if not experiment_id:
@@ -614,25 +742,25 @@ def resolve_telemetry_context(
             "Telemetry enabled but experiment_id is missing. "
             "Set telemetry.experiment_id or TENYSON_EXPERIMENT_ID."
         )
-    return db_url, experiment_id
+    return str(backend_ref), experiment_id
 
 
 def resolve_required_telemetry_context(config: Dict[str, Any]) -> Tuple[str, str]:
     """
     Return required telemetry context. Raises when db_url or experiment_id is missing.
     """
-    db_url, experiment_id = resolve_telemetry_context(config)
-    if not db_url:
+    backend_ref, experiment_id = resolve_telemetry_context(config)
+    if not backend_ref:
         raise ValueError(
-            "Missing telemetry.db_url. Tenyson requires a hosted SQL telemetry DB "
-            "for all runs."
+            "Missing telemetry backend. Set telemetry.db_url for SQL telemetry or "
+            "telemetry.backend=wandb with telemetry.entity/project."
         )
     if not experiment_id:
         raise ValueError(
             "Missing telemetry.experiment_id. Set telemetry.experiment_id or "
             "TENYSON_EXPERIMENT_ID."
         )
-    return str(db_url), str(experiment_id)
+    return str(backend_ref), str(experiment_id)
 
 
 def record_run_summary(
@@ -646,6 +774,49 @@ def record_run_summary(
     """
     run_id = str(getattr(result, "run_id", "unknown"))
     metrics = getattr(result, "metrics", {}) or {}
+    if client.backend == "wandb":
+        run = wandb_store.resolve_run(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_id,
+            create_if_missing=True,
+        )
+        attempt_token = getattr(result, "attempt_token", None)
+        wandb_store.update_run_summary(
+            run,
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: experiment_id,
+                wandb_store.SUMMARY_PHASE: phase,
+                wandb_store.SUMMARY_RUN_NAME: run_id,
+                wandb_store.SUMMARY_STATUS: str(getattr(result, "status", "unknown")),
+                wandb_store.SUMMARY_TOTAL_TIME: getattr(
+                    result, "total_time_seconds", None
+                ),
+                wandb_store.SUMMARY_METRICS_JSON: json.dumps(
+                    metrics,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                wandb_store.SUMMARY_HF_REPO_ID: getattr(result, "hf_repo_id", None),
+                wandb_store.SUMMARY_HF_REVISION: getattr(
+                    result, "hf_revision", None
+                ),
+                wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None)
+                or getattr(result, "wandb_url", None),
+                wandb_store.SUMMARY_FAILURE_REASON: getattr(
+                    result, "failure_reason", None
+                ),
+                wandb_store.SUMMARY_INSTANCE_ID: getattr(result, "instance_id", None),
+                wandb_store.SUMMARY_SPOT_INTERRUPTION: getattr(
+                    result, "spot_interruption", None
+                ),
+                wandb_store.SUMMARY_IS_ACTIVE: False,
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: attempt_token,
+                wandb_store.SUMMARY_HEARTBEAT_AT: datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return
     now = datetime.now(timezone.utc)
     session = client.Session()
     try:
@@ -725,6 +896,49 @@ def record_run_result(
     """
     Upsert canonical per-run payloads in run_results.
     """
+    if client.backend == "wandb":
+        run = wandb_store.ensure_run(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=str(run_id),
+        )
+        results_payload_dict = _as_payload_dict(results_payload)
+        job_result_payload_dict = _as_payload_dict(job_result_payload)
+        serialized_results = json.dumps(
+            results_payload_dict,
+            ensure_ascii=False,
+            default=str,
+        )
+        artifact_name = None
+        if len(serialized_results) > 50_000:
+            artifact_name = wandb_store.log_result_payload(
+                run,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=str(run_id),
+                results_payload=results_payload_dict,
+                job_result_payload=job_result_payload_dict,
+            )
+            serialized_results = ""
+        wandb_store.update_run_summary(
+            run,
+            {
+                wandb_store.SUMMARY_JOB_RESULT_JSON: json.dumps(
+                    job_result_payload_dict,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                wandb_store.SUMMARY_RESULTS_JSON: serialized_results or None,
+                wandb_store.SUMMARY_RESULT_ARTIFACT: artifact_name,
+                wandb_store.SUMMARY_IS_ACTIVE: False,
+                wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None),
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: job_result_payload_dict.get(
+                    "attempt_token"
+                ),
+            },
+        )
+        return
     now = datetime.now(timezone.utc)
     session = client.Session()
     try:
@@ -763,10 +977,20 @@ def get_run_result(
     experiment_id: str,
     run_id: str,
     phase: str,
+    *,
+    attempt_token: Optional[str] = None,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """
     Read canonical per-run payloads from run_results.
     """
+    if client.backend == "wandb":
+        return wandb_store.fetch_run_result(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_id,
+            attempt_token=attempt_token,
+        )
     session = client.Session()
     try:
         row = (
@@ -788,6 +1012,10 @@ def get_run_result(
             results_payload = {"value": results_payload}
         if not isinstance(job_result_payload, dict):
             job_result_payload = {"value": job_result_payload}
+        if attempt_token and str(job_result_payload.get("attempt_token") or "") != str(
+            attempt_token
+        ):
+            return None
         return results_payload, job_result_payload
     finally:
         session.close()
@@ -799,10 +1027,21 @@ def get_run_metadata_wandb_url(
     run_id: str,
     *,
     min_attempt_updated_at: Optional[datetime] = None,
+    phase: Optional[str] = None,
+    attempt_token: Optional[str] = None,
 ) -> Optional[str]:
     """
     Read the latest WandB URL for a run from run_metadata, if available.
     """
+    if client.backend == "wandb":
+        return wandb_store.fetch_run_url(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=str(phase or ""),
+            run_name=run_id,
+            attempt_token=attempt_token,
+        )
+
     def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
         if value is None:
             return None
@@ -850,6 +1089,35 @@ def get_run_metadata_wandb_url(
         session.close()
 
 
+def run_stop_requested(
+    client: TelemetryClient,
+    *,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+) -> bool:
+    if client.backend == "wandb":
+        return wandb_store.fetch_stop_requested(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_id,
+        )
+
+    session = client.Session()
+    try:
+        control_row = (
+            session.query(RunControl)
+            .filter(RunControl.run_id == str(run_id))
+            .filter(RunControl.experiment_id == str(experiment_id))
+            .order_by(RunControl.updated_at.desc())
+            .first()
+        )
+        return bool(control_row and control_row.stop_requested)
+    finally:
+        session.close()
+
+
 def wait_for_run_result(
     client: TelemetryClient,
     experiment_id: str,
@@ -857,6 +1125,7 @@ def wait_for_run_result(
     phase: str,
     timeout_seconds: int = 120,
     poll_interval_seconds: float = 2.0,
+    attempt_token: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Poll run_results until the canonical payload is available or timeout.
@@ -868,6 +1137,7 @@ def wait_for_run_result(
             experiment_id=experiment_id,
             run_id=run_id,
             phase=phase,
+            attempt_token=attempt_token,
         )
         if row is not None:
             return row
@@ -927,6 +1197,8 @@ class SFTTelemetryCallback(TrainerCallback):
     def on_log(
         self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs
     ):
+        if self.client.backend != "sql":
+            return
         if not logs:
             return
 
@@ -990,7 +1262,7 @@ class RunHeartbeatTelemetryCallback(TrainerCallback):
             )
             self._last_beat_at = now
             self._warned = False
-        except SQLAlchemyError as exc:
+        except Exception as exc:  # noqa: BLE001
             if not self._warned:
                 print(
                     "[RunHeartbeatTelemetryCallback] Warning: heartbeat update "
@@ -1020,11 +1292,13 @@ class ManualStopTelemetryCallback(TrainerCallback):
         self,
         run_id: str,
         experiment_id: str,
+        phase: str,
         client: TelemetryClient,
         check_every_n_steps: int = 1,
     ):
         self.run_id = run_id
         self.experiment_id = experiment_id
+        self.phase = str(phase)
         self.client = client
         self.check_every_n_steps = max(1, int(check_every_n_steps))
         self.stop_requested = False
@@ -1034,14 +1308,13 @@ class ManualStopTelemetryCallback(TrainerCallback):
         # Optionally throttle checks; default is every step for responsiveness.
         if state.global_step % self.check_every_n_steps != 0:
             return control
-
-        session = self.client.Session()
         try:
-            query = session.query(RunControl).filter(RunControl.run_id == self.run_id)
-            if self.experiment_id:
-                query = query.filter(RunControl.experiment_id == self.experiment_id)
-            control_row = query.order_by(RunControl.updated_at.desc()).first()
-            if control_row and control_row.stop_requested:
+            if run_stop_requested(
+                self.client,
+                experiment_id=self.experiment_id,
+                run_id=self.run_id,
+                phase=self.phase,
+            ):
                 print(
                     f"[ManualStopTelemetryCallback] Stop requested for run_id="
                     f"{self.run_id} at step {state.global_step}",
@@ -1052,14 +1325,18 @@ class ManualStopTelemetryCallback(TrainerCallback):
                 control.should_training_stop = True
                 control.should_save = True
         except SQLAlchemyError as exc:
-            session.rollback()
+            if self.client.backend == "sql":
+                print(
+                    "[ManualStopTelemetryCallback] Warning: stop polling failed; "
+                    f"continuing training. {exc}",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001
             print(
                 "[ManualStopTelemetryCallback] Warning: stop polling failed; "
                 f"continuing training. {exc}",
                 flush=True,
             )
-        finally:
-            session.close()
 
         return control
 
@@ -1090,6 +1367,9 @@ class WandBUrlTelemetryCallback(TrainerCallback):
             if not url:
                 return
         except Exception:  # noqa: BLE001
+            return
+        if self.client.backend != "sql":
+            self._written = True
             return
         session = self.client.Session()
         try:

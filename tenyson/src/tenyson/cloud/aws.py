@@ -203,8 +203,11 @@ class AWSManager(BaseCloudManager):
         class_name = task.__class__.__name__
 
         task_file = None
+        adapter_task_file = getattr(task, "__tenyson_source_path__", None)
+        if adapter_task_file:
+            task_file = adapter_task_file
         module = sys.modules.get(module_path)
-        if module is not None:
+        if task_file is None and module is not None:
             task_file = getattr(module, "__file__", None)
         if task_file is None:
             try:
@@ -297,8 +300,11 @@ class AWSManager(BaseCloudManager):
             job_type = "eval"
 
         run_name = resolve_required_run_name(job.config, job_type)
-        db_url, experiment_id = resolve_required_telemetry_context(job.config)
-        telemetry_client = TelemetryClient(db_url=db_url)
+        backend_ref, experiment_id = resolve_required_telemetry_context(job.config)
+        attempt_token = str(
+            job.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
+        telemetry_client = TelemetryClient(db_url=backend_ref)
 
         def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
             if job_type not in ("sft", "rl"):
@@ -334,6 +340,7 @@ class AWSManager(BaseCloudManager):
                 failure_reason=failure_reason,
                 instance_id=instance.id,
                 spot_interruption=spot_interruption,
+                attempt_token=attempt_token,
             )
             record_run_summary(
                 client=telemetry_client,
@@ -508,6 +515,7 @@ class AWSManager(BaseCloudManager):
                 experiment_id=experiment_id,
                 run_id=run_name,
                 phase=job_type,
+                attempt_token=attempt_token,
             )
             return JobResult.from_dict(job_result_payload)
         except Exception as exc:  # noqa: BLE001

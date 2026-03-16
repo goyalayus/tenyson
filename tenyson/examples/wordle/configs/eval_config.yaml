@@ -5,8 +5,6 @@ model:
   lora_r: 16
   lora_alpha: 32
   lora_target_modules: ["up_proj", "gate_proj", "down_proj"]
-  init_adapter_repo: ""
-  init_adapter_revision: "main"
 
 vllm:
   enabled: true
@@ -15,16 +13,6 @@ vllm:
   top_p: 1.0
   max_tokens: 1024
 
-evaluation:
-  output_dir: "./outputs/evals"
-
-task:
-  eval_samples: 100
-  eval_seed: 42
-  wordlists:
-    solutions: "tenyson/examples/wordle/wordlists/wordle_solutions.txt"
-    allowed: "tenyson/examples/wordle/wordlists/wordle_allowed_guesses.txt"
-
 telemetry:
-  db_url: "postgresql+psycopg://user:password@db.example.com:5432/tenyson"
+  backend: "wandb"
   experiment_id: "wordle_research_2026_03_07"

@@ -6,12 +6,12 @@ It provides:
 - Job abstractions: `SFTJob`, `RLJob`, `EvalJob`
 - A standard `JobResult` return type
 - Cloud execution managers: AWS and Modal
-- Structured SQL telemetry helpers
-- Markdown report templating with placeholder filling and optional WandB integration
+- Telemetry backends for W&B (recommended) and SQL
+- A fixed markdown experiment report with W&B run/project links
 
 ## basic usage
 
-Run jobs in the cloud via a manager (AWS or Modal). The manager launches the job remotely using `python -m tenyson.runner`, reads canonical results from telemetry DB, and returns a `JobResult` instance.
+Run jobs in the cloud via a manager (AWS or Modal). The manager launches the job remotely using `python -m tenyson.runner`, reads canonical results from telemetry, and returns a `JobResult` instance.
 
 Local execution is intentionally disabled: jobs must run through supported GPU providers (AWS or Modal).
 
@@ -57,28 +57,32 @@ print(result.metrics, result.wandb_url)
      - after RL4: eval turn3 + turn4 (parallel)
      - after RL5: eval turn4 + turn5 (parallel)
      - then final mixed eval (turns 1..5)
-4. **Final report generation** into `examples/wordle/final_report.md`
+4. **Fixed report generation** into `examples/wordle/final_report.md`
 
-All runs keep canonical metrics/results in the telemetry DB (plus adapters on HF for SFT/RL).
+The task file now exposes a single `ENVIRONMENT` definition with explicit named runs:
+
+- `sft`: dataset + formatting hooks + SFT-specific config overrides
+- `rl`: dataset + reward hooks + RL-specific config overrides
+- `eval`: dataset + metric hooks + eval-specific config overrides
+
+`examples/wordle/experiment.py` now only orchestrates stages. It selects task behavior by named run ids such as `wordle_rl_turn2`, `wordle_rl_turn3`, `wordle_eval_turn2`, and `wordle_eval_mixed`.
+
+All runs keep canonical metrics/results in telemetry and adapters on HF for SFT/RL.
 
 ### required environment variables for `examples/wordle/experiment.py`
 
 No cloud provider credential env vars are required by the script itself when using
 Modal defaults (`A100` GPU). Ensure `modal` is authenticated in your shell.
-If you enable automatic RDS ingress sync via `TENYSON_RDS_SECURITY_GROUP`, AWS
-credentials (for example `AWS_PROFILE`) are required on the controller host.
-
 Optional:
 
 - `TENYSON_MODAL_GPU` (default: `A100`)
 - `TENYSON_MODAL_TIMEOUT` (default: `86400`)
 - `TENYSON_MODAL_PROFILE` (or `MODAL_PROFILE`)
-- `TENYSON_RDS_SECURITY_GROUP` (for automatic telemetry DB ingress sync)
-- `TENYSON_SYNC_RDS_LOCAL_IP` (default: `true`)
-- `TENYSON_MODAL_RDS_CIDR` (default: `0.0.0.0/0`)
 - `TENYSON_HF_REPO_BASE` (override HF repo base for SFT/RL pushes)
+- `TENYSON_WANDB_ENTITY`
+- `TENYSON_WANDB_PROJECT`
 - `HF_TOKEN` (required for SFT/RL jobs)
-- `WANDB_API_KEY`
+- `WANDB_API_KEY` (required for W&B telemetry)
 
 Run from project root (`tenyson/`):
 
@@ -91,20 +95,33 @@ python3 examples/wordle/experiment.py
 
 The experiment entrypoint auto-adds `src/` to `PYTHONPATH` and auto-installs
 missing local controller dependencies (`modal`, `boto3`, `psycopg[binary]`,
-`sqlalchemy`, `datasets`, `pyyaml`, `huggingface_hub`) on first run.
+`sqlalchemy`, `datasets`, `pyyaml`, `huggingface_hub`, `wandb`) on first run.
 Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` to disable this behavior.
 
 ## telemetry
 
-Telemetry is mandatory. Every run must set `telemetry.db_url` and `telemetry.experiment_id`.
+Telemetry is mandatory. Every run must set `telemetry.experiment_id`.
 
-For cloud runs, telemetry must use a network-reachable hosted SQL endpoint (recommended: Postgres). SQLite and localhost DB URLs are intentionally rejected.
+Recommended backend: W&B.
 
-Each run also needs an **experiment id** so multiple runs can be grouped in one DB:
+```yaml
+telemetry:
+  backend: "wandb"
+  experiment_id: "wordle_research_2026_03_01"
+```
+
+Provide the W&B destination through config or env vars:
+
+- `telemetry.entity` / `telemetry.project`, or
+- `TENYSON_WANDB_ENTITY` / `TENYSON_WANDB_PROJECT`
+
+SQL remains available as a fallback with `telemetry.db_url`, but W&B is now the intended canonical telemetry path.
+
+Each run also needs an **experiment id** so multiple runs can be grouped together:
 
 - Prefer config: `telemetry.experiment_id`
 - Fallback env var: `TENYSON_EXPERIMENT_ID`
-- Missing db_url or experiment_id fails fast.
+- Missing backend destination or experiment_id fails fast.
 
 - **SFT**:
   - `SFTTelemetryCallback` writes into the `sft_metrics` table.
@@ -114,19 +131,11 @@ Each run also needs an **experiment id** so multiple runs can be grouped in one 
   - `ManualStopTelemetryCallback` on the GRPO trainer polls the same `run_controls` table and stops training cleanly after the current step.
   - A wrapped reward function writes per-prompt rollouts and rewards into `rollouts` and `generations` (with `phase="rl"`).
 - **Eval**:
-  - `EvalJob` streams batched generations and can log prompts/completions into `generations` (with `phase="eval"`).
+  - `EvalJob` streams batched generations and can log prompts/completions into `generations` when SQL telemetry is enabled.
   - When a manual stop is requested, eval stops between batches, computes metrics on the processed subset only, and marks `results.metadata.stopped_early = true`.
 - **Canonical run payloads**:
-  - `run_summaries` stores per-run status/metrics summary.
-  - `run_results` stores full per-run payloads (`results_json`) plus serialized `JobResult` (`job_result_json`), keyed by `(experiment_id, run_id, phase)`.
-
-Example snippet in a YAML config:
-
-```yaml
-telemetry:
-  db_url: "postgresql+psycopg://user:password@db.example.com:5432/tenyson"
-  experiment_id: "wordle_research_2026_03_01"
-```
+  - W&B summaries/artifacts are the canonical per-run result rendezvous when `telemetry.backend: wandb`.
+  - `run_summaries` / `run_results` remain available as the SQL canonical path when `telemetry.db_url` is used.
 
 With telemetry enabled, you can mark a run for manual stop from another process.
 Use the same `experiment_id` as the running job:
@@ -135,20 +144,20 @@ Use the same `experiment_id` as the running job:
 python -m tenyson.core.control \
   --run-id lora_sft_qwen3-4b \
   --experiment-id wordle_research_2026_03_01 \
-  --db-url postgresql+psycopg://user:password@db.example.com:5432/tenyson
+  --db-url wandb://your-entity/wordle-research
 ```
 
-The next step or batch will see the `stop_requested` flag in the database and exit the loop cleanly; summaries/results remain queryable in telemetry DB.
+The next step or batch will see the `stop_requested` flag in telemetry and exit the loop cleanly; summaries/results remain queryable afterward.
 
 ## eval and generations
 
-`EvalJob` mirrors the old eval script: it loads a model plus adapter, runs batched vLLM generation, computes metrics via the `TaskPlugin`, and writes canonical payloads to telemetry DB (`run_results` + `run_summaries`).
+`EvalJob` mirrors the old eval script: it loads a model plus adapter, runs batched vLLM generation, computes metrics via the environment hooks, and writes canonical payloads to telemetry.
 
 The same `Generation` table is intended for logging eval prompts and completions when you need per-sample telemetry.
 
 ### task-specific eval filtering (`examples/wordle/wordle_task.py`)
 
-The Wordle task supports a task-level eval control key:
+The Wordle environment exposes explicit eval run definitions through the environment contract. Under the hood those runs map to task-level keys like:
 
 ```yaml
 task:
@@ -164,19 +173,12 @@ When `eval_exact_turns` is set, eval dataset generation is restricted to those e
 `tenyson.jobs.result.JobResult` is the common return type from all jobs and cloud managers:
 
 - **Fields**: `run_id`, `status`, `total_time_seconds`, `metrics`, `hf_repo_id`, `hf_revision`, `wandb_url`. When present, `hf_revision` is the exact immutable Hub commit SHA used for lineage/resume. On failure, cloud managers also set `failure_reason`, `instance_id`, and `spot_interruption`.
-- **Persistence**: `run_summaries` and `run_results` tables in telemetry DB are the canonical source of truth.
-
-`ReportBuilder` turns a markdown template into a final report with:
-
-- Simple `{placeholder}` replacement via `fill(data)`, and
-- Optional WandB helpers:
-  - `attach_wandb_scalar_link(placeholder, run_url, metric_name)`
-  - `attach_wandb_latest_value(placeholder, run_path, metric_name)`
+- **Persistence**: W&B summaries/artifacts or SQL `run_summaries` / `run_results`, depending on the configured backend.
 
 The Wordle example (`examples/wordle/experiment.py`) shows how to:
 
 - Orchestrate a mixed-vs-curriculum branching experiment with both sequential and parallel stages, and
-- Build a `final_report.md` with branch/stage statuses and metric comparisons using `ReportBuilder`.
+- Build a fixed `final_report.md` with stage status, metrics, HF adapter lineage, and W&B run/project links using `ExperimentReport`.
 
 ## sft early stopping
 
@@ -223,7 +225,7 @@ python -m tenyson.runner \
 
 - **`--job-type`**: one of `sft`, `rl`, or `eval`.
 - **`--config`**: YAML or JSON config file; the same schema used by jobs run via cloud managers.
-- **`--task-module`**: Either a path to a Python file containing a single `TaskPlugin` subclass (e.g. `examples/wordle/wordle_task.py`), or a `module.path:ClassName` spec for remote/advanced use (e.g. `examples.wordle.wordle_task:WordleTask`).
+- **`--task-module`**: Either a path to a Python file containing a single `ENVIRONMENT` definition (or compatible wrapper class), or a `module.path:ClassName` spec for remote/advanced use (e.g. `examples.wordle.wordle_task:WordleTask`).
 - **`--resume-from-checkpoint`**: (SFT/RL only) `repo_id:revision` to resume training from Hugging Face.
 
 `AWSManager` and `ModalManager` invoke this entrypoint on the remote worker. Running this entrypoint locally is blocked unless the cloud runtime context variables are set by a supported provider manager.

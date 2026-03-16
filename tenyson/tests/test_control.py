@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import tenyson.ctl as ctl_module
+import tenyson.core.control as control_module
 import tenyson.core.telemetry as telemetry_module
 from tenyson.core.telemetry import (
     LiveRunInfo,
@@ -120,6 +121,47 @@ class CtlStopTests(unittest.TestCase):
             run_id="wordle_rl_mixed",
             experiment_id="wordle_exp",
             create_if_missing=False,
+        )
+
+
+class WandBStopTests(unittest.TestCase):
+    def test_request_stop_uses_wandb_phase_from_live_runs(self) -> None:
+        live_runs = [
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        ]
+
+        with patch.object(
+            control_module,
+            "list_live_run_heartbeats",
+            return_value=live_runs,
+        ), patch.object(
+            control_module.wandb_store,
+            "set_stop_requested",
+            return_value=True,
+        ) as set_stop_requested_mock:
+            stopped = control_module.request_stop(
+                db_url="wandb://ayush/wordle",
+                run_id="wordle_rl_mixed",
+                experiment_id="wordle_exp",
+                create_if_missing=False,
+            )
+
+        self.assertTrue(stopped)
+        set_stop_requested_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            requested=True,
+            when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
         )
 
 

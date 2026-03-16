@@ -18,6 +18,7 @@ class JobResult:
     failure_reason: Optional[str] = None
     instance_id: Optional[str] = None
     spot_interruption: Optional[bool] = None
+    attempt_token: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "JobResult":

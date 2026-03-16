@@ -286,6 +286,8 @@ class ExperimentSessionTests(unittest.TestCase):
                 },
                 job_class=object,
                 task=object(),
+                run_type="sft",
+                run_name="wordle_sft_main",
             )
 
             with patch.object(

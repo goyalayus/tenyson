@@ -1,10 +1,33 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from datasets import Dataset
 
 
 class TaskPlugin(ABC):
+    def get_environment_name(self) -> Optional[str]:
+        return None
+
+    def list_named_runs(self, run_type: Optional[str] = None) -> Sequence[str]:
+        return []
+
+    def get_named_run_type(self, run_name: str) -> Optional[str]:
+        return None
+
+    def get_named_run_config_overrides(self, run_name: str) -> Optional[Mapping[str, Any]]:
+        return None
+
+    def get_run_config_overrides(
+        self,
+        run_type: str,
+        *,
+        variant: Optional[str] = None,
+    ) -> Optional[Mapping[str, Any]]:
+        return None
+
+    def list_run_variants(self, run_type: str) -> Sequence[str]:
+        return []
+
     @abstractmethod
     def get_sft_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
         raise NotImplementedError

@@ -78,6 +78,7 @@ class SFTJob:
         from tenyson.core.telemetry import (
             start_run_heartbeat,
             begin_run_attempt,
+            ensure_wandb_telemetry_run,
             ManualStopTelemetryCallback,
             record_run_result,
             record_run_summary,
@@ -92,9 +93,25 @@ class SFTJob:
         train_cfg = self.config.get("training", {})
         run_name = self.run_id
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
-        db_url, experiment_id = resolve_required_telemetry_context(self.config)
-        telemetry_client: Any = TelemetryClient(db_url=db_url)
-        if begin_run_attempt(telemetry_client, experiment_id, run_name, phase="sft"):
+        attempt_token = str(
+            self.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
+        backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
+        telemetry_client: Any = TelemetryClient(db_url=backend_ref)
+        ensure_wandb_telemetry_run(
+            telemetry_client,
+            experiment_id=experiment_id,
+            phase="sft",
+            run_name=run_name,
+            config=self.config,
+        )
+        if begin_run_attempt(
+            telemetry_client,
+            experiment_id,
+            run_name,
+            phase="sft",
+            attempt_token=attempt_token,
+        ):
             print(
                 "[SFTJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,
@@ -156,6 +173,16 @@ class SFTJob:
         print(f"[SFTJob] Train size: {len(train_dataset)}", flush=True)
 
         formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
+        report_to = train_cfg.get("report_to", "none")
+        if telemetry_client.backend == "wandb":
+            if report_to == "none":
+                report_to = ["wandb"]
+            elif isinstance(report_to, list):
+                report_to = list(report_to)
+                if "wandb" not in report_to:
+                    report_to.append("wandb")
+            elif report_to != "wandb":
+                report_to = [report_to, "wandb"]
 
         cfg_kwargs: Dict[str, Any] = dict(
             output_dir=output_dir,
@@ -174,7 +201,7 @@ class SFTJob:
             hub_model_id=push_repo_id,
             hub_strategy="checkpoint",
             optim=train_cfg.get("optim", "adamw_8bit"),
-            report_to=train_cfg.get("report_to", "none"),
+            report_to=report_to,
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
             packing=train_cfg.get("packing", False),
@@ -265,6 +292,7 @@ class SFTJob:
         manual_stop_callback = ManualStopTelemetryCallback(
             run_id=run_name,
             experiment_id=experiment_id,
+            phase="sft",
             client=telemetry_client,
         )
         callbacks.append(manual_stop_callback)
@@ -276,7 +304,6 @@ class SFTJob:
                 client=telemetry_client,
             )
         )
-        report_to = train_cfg.get("report_to", "none")
         if report_to == "wandb" or (
             isinstance(report_to, list) and "wandb" in report_to
         ):
@@ -388,6 +415,7 @@ class SFTJob:
             hf_repo_id=push_repo_id or None,
             hf_revision=hf_revision,
             failure_reason=failure_reason,
+            attempt_token=attempt_token,
         )
         record_run_summary(
             client=telemetry_client,
@@ -403,4 +431,10 @@ class SFTJob:
             results_payload=result,
             job_result_payload=result,
         )
+        try:
+            import wandb  # type: ignore[import-not-found]
+
+            wandb.finish()
+        except Exception:  # noqa: BLE001
+            pass
         return result

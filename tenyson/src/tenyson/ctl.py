@@ -10,7 +10,7 @@ def _resolve_db_url(args: argparse.Namespace) -> str:
     db_url = str(args.db_url or os.getenv("TENYSON_DB_URL") or "").strip()
     if not db_url:
         print(
-            "Error: set TENYSON_DB_URL or pass --db-url.",
+            "Error: set TENYSON_DB_URL to a telemetry backend ref or pass --db-url.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -87,7 +87,7 @@ def _choose_live_run_id(db_url: str, experiment_id: str, max_age_seconds: int) -
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
-    """Mark a run as stop_requested in the telemetry database."""
+    """Mark a run as stop_requested in the active telemetry backend."""
     db_url = _resolve_db_url(args)
     experiment_id = _resolve_experiment_id(args)
     run_id = str(args.run_id or "").strip()
@@ -140,7 +140,7 @@ def main() -> None:
     stop_parser.add_argument(
         "--db-url",
         default=None,
-        help="Telemetry database URL (overrides TENYSON_DB_URL).",
+        help="Telemetry backend ref (SQL URL or wandb://<entity>/<project>).",
     )
     stop_parser.add_argument(
         "--experiment-id",

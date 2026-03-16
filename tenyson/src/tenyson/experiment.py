@@ -7,13 +7,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from uuid import uuid4
 
 from tenyson.cloud.base import _red_print
+from tenyson.core.environment import bind_environment_run
 from tenyson.core.control import request_stop
 from tenyson.core.telemetry import (
     TelemetryClient,
     get_run_metadata_wandb_url,
     resolve_telemetry_context,
+    telemetry_project_url,
 )
 from tenyson.jobs.eval import EvalJob
 from tenyson.jobs.result import JobResult
@@ -61,9 +64,23 @@ class StageSpec:
     config: Dict[str, Any]
     job_class: type
     task: Any
+    run_type: str
+    run_name: str
+    environment_run: Optional[str] = None
+    variant: Optional[str] = None
 
     def as_pipeline_step(self) -> Tuple[str, Dict[str, Any], type, Any]:
         return (self.id, self.config, self.job_class, self.task)
+
+
+def _ensure_stage_attempt_token(stage: StageSpec) -> str:
+    telemetry_cfg = stage.config.setdefault("telemetry", {})
+    attempt_token = str(telemetry_cfg.get("attempt_token") or "").strip()
+    if attempt_token:
+        return attempt_token
+    attempt_token = uuid4().hex
+    telemetry_cfg["attempt_token"] = attempt_token
+    return attempt_token
 
 
 class ConfigTemplates:
@@ -100,7 +117,7 @@ class ConfigTemplates:
 @dataclass(frozen=True)
 class _ActiveRun:
     run_id: str
-    db_url: Optional[str]
+    backend_ref: Optional[str]
     experiment_id: Optional[str]
     label: str
 
@@ -120,11 +137,11 @@ class _ExperimentAbortController:
         run_id = _resolve_stage_run_name(stage)
         if not run_id:
             return None
-        db_url, experiment_id = resolve_telemetry_context(stage.config)
+        backend_ref, experiment_id = resolve_telemetry_context(stage.config)
         with self._lock:
             self._active_runs[run_id] = _ActiveRun(
                 run_id=run_id,
-                db_url=db_url,
+                backend_ref=backend_ref,
                 experiment_id=experiment_id,
                 label=stage.id,
             )
@@ -157,11 +174,11 @@ class _ExperimentAbortController:
             f"Stopping experiment and signalling {len(active_runs)} active sibling run(s)."
         )
         for active_run in active_runs:
-            if not active_run.db_url or not active_run.experiment_id:
+            if not active_run.backend_ref or not active_run.experiment_id:
                 continue
             try:
                 request_stop(
-                    db_url=active_run.db_url,
+                    db_url=active_run.backend_ref,
                     run_id=active_run.run_id,
                     experiment_id=active_run.experiment_id,
                     create_if_missing=True,
@@ -187,6 +204,15 @@ def _resolve_stage_run_name(stage: StageSpec) -> str:
     return run_id
 
 
+def _resolve_stage_phase(stage: StageSpec) -> str:
+    job_name = getattr(stage.job_class, "__name__", "")
+    if job_name == "EvalJob":
+        return "eval"
+    if job_name == "RLJob":
+        return "rl"
+    return "sft"
+
+
 @dataclass
 class _ReportWatch:
     stop_event: threading.Event
@@ -196,7 +222,7 @@ class _ReportWatch:
 class _ExperimentReportController:
     def __init__(
         self,
-        report: ReportBuilder,
+        report: Any,
         *,
         metric_precision: Optional[int] = 4,
         wandb_text: str = "run",
@@ -222,29 +248,39 @@ class _ExperimentReportController:
 
     def start_stage(self, stage: StageSpec) -> None:
         stage_id = str(stage.id)
-        self.report.update(
-            {
-                f"{stage_id}_status": "running",
-                f"{stage_id}_wandb_link": self.missing,
-            }
-        )
-
-        db_url, experiment_id = resolve_telemetry_context(stage.config)
-        if not db_url or not experiment_id:
+        backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        self._sync_report_context(stage, backend_ref=backend_ref, experiment_id=experiment_id)
+        self._register_stage(stage)
+        if hasattr(self.report, "mark_stage_running"):
+            self.report.mark_stage_running(stage_id)
+        else:
+            self.report.update(
+                {
+                    f"{stage_id}_status": "running",
+                    f"{stage_id}_wandb_link": self.missing,
+                }
+            )
+        if not backend_ref or not experiment_id:
             return
 
         self.stop_stage(stage_id)
         run_id = _resolve_stage_run_name(stage)
+        phase = _resolve_stage_phase(stage)
         min_attempt_updated_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        attempt_token = str(
+            stage.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
         stop_event = threading.Event()
         watcher = threading.Thread(
             target=self._poll_wandb_url,
             args=(
                 stage_id,
                 run_id,
-                str(db_url),
+                phase,
+                str(backend_ref),
                 str(experiment_id),
                 min_attempt_updated_at,
+                attempt_token,
                 stop_event,
             ),
             daemon=True,
@@ -257,24 +293,68 @@ class _ExperimentReportController:
             )
         watcher.start()
 
+    def _sync_report_context(
+        self,
+        stage: StageSpec,
+        *,
+        backend_ref: Optional[str],
+        experiment_id: Optional[str],
+    ) -> None:
+        if not hasattr(self.report, "set_context"):
+            return
+        environment_name = None
+        if hasattr(stage.task, "get_environment_name"):
+            try:
+                environment_name = stage.task.get_environment_name()
+            except Exception:  # noqa: BLE001
+                environment_name = None
+
+        project_url = None
+        if backend_ref:
+            try:
+                project_url = telemetry_project_url(self._client_for(str(backend_ref)))
+            except Exception:  # noqa: BLE001
+                project_url = None
+
+        self.report.set_context(
+            environment_name=environment_name,
+            experiment_id=experiment_id,
+            telemetry_backend_ref=backend_ref,
+            telemetry_project_url=project_url,
+        )
+
+    def _register_stage(self, stage: StageSpec) -> None:
+        if not hasattr(self.report, "register_stage"):
+            return
+        self.report.register_stage(
+            stage_id=stage.id,
+            run_type=stage.run_type,
+            run_name=stage.run_name,
+            variant=stage.environment_run or stage.variant,
+        )
+
     def _poll_wandb_url(
         self,
         stage_id: str,
         run_id: str,
-        db_url: str,
+        phase: str,
+        backend_ref: str,
         experiment_id: str,
         min_attempt_updated_at: datetime,
+        attempt_token: Optional[str],
         stop_event: threading.Event,
     ) -> None:
         warned = False
         while not stop_event.is_set():
             try:
-                client = self._client_for(db_url)
+                client = self._client_for(backend_ref)
                 run_url = get_run_metadata_wandb_url(
                     client=client,
                     experiment_id=experiment_id,
                     run_id=run_id,
                     min_attempt_updated_at=min_attempt_updated_at,
+                    phase=phase,
+                    attempt_token=attempt_token,
                 )
                 if run_url:
                     self.report.update_wandb_link(
@@ -396,12 +476,15 @@ class ExperimentSession:
         shared_overrides: Optional[Mapping[str, Any]] = None,
         abort_message: str = _DEFAULT_ABORT_MESSAGE,
         parallel: bool = True,
+        report: Optional[Any] = None,
         report_builder: Optional[ReportBuilder] = None,
         report_metric_precision: Optional[int] = 4,
         report_wandb_text: str = "run",
         report_missing: str = "n/a",
         report_poll_interval_seconds: float = 2.0,
     ) -> None:
+        if report is not None and report_builder is not None:
+            raise ValueError("Pass either report or report_builder, not both.")
         self.task = task
         self.templates = templates
         self.cloud_factory = cloud_factory
@@ -410,15 +493,16 @@ class ExperimentSession:
         self.abort_message = abort_message
         self.parallel = parallel
         self._abort_controller = _ExperimentAbortController()
+        resolved_report = report if report is not None else report_builder
         self._report_controller = (
             _ExperimentReportController(
-                report_builder,
+                resolved_report,
                 metric_precision=report_metric_precision,
                 wandb_text=report_wandb_text,
                 missing=report_missing,
                 poll_interval_seconds=report_poll_interval_seconds,
             )
-            if report_builder is not None
+            if resolved_report is not None
             else None
         )
 
@@ -494,6 +578,8 @@ class ExperimentSession:
         stage_id: str,
         *,
         base: str = "sft",
+        run: Optional[str] = None,
+        variant: Optional[str] = None,
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
@@ -502,6 +588,9 @@ class ExperimentSession:
             stage_id=stage_id,
             base=base,
             job_class=SFTJob,
+            run_type="sft",
+            environment_run=run,
+            variant=variant,
             run_name=run_name,
             output_dir=output_dir,
             overrides=overrides,
@@ -515,6 +604,8 @@ class ExperimentSession:
         *,
         adapter: AdapterRef,
         base: str = "rl",
+        run: Optional[str] = None,
+        variant: Optional[str] = None,
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
@@ -523,6 +614,9 @@ class ExperimentSession:
             stage_id=stage_id,
             base=base,
             job_class=RLJob,
+            run_type="rl",
+            environment_run=run,
+            variant=variant,
             run_name=run_name,
             output_dir=output_dir,
             overrides=overrides,
@@ -536,6 +630,8 @@ class ExperimentSession:
         *,
         adapter: AdapterRef,
         base: str = "eval",
+        run: Optional[str] = None,
+        variant: Optional[str] = None,
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
@@ -544,6 +640,9 @@ class ExperimentSession:
             stage_id=stage_id,
             base=base,
             job_class=EvalJob,
+            run_type="eval",
+            environment_run=run,
+            variant=variant,
             run_name=run_name,
             output_dir=output_dir,
             overrides=overrides,
@@ -554,6 +653,7 @@ class ExperimentSession:
     def run_stage(self, stage: StageSpec, *, cloud: Optional[Any] = None) -> JobResult:
         self.raise_if_aborted()
         run_id = _resolve_stage_run_name(stage)
+        _ensure_stage_attempt_token(stage)
         active_run_id = self._abort_controller.register_stage(stage)
         matched_result = None
         if self._report_controller is not None:
@@ -602,6 +702,8 @@ class ExperimentSession:
         if not stages:
             return {}
 
+        for stage in stages:
+            _ensure_stage_attempt_token(stage)
         active_run_ids = [
             active_run_id
             for active_run_id in (
@@ -687,6 +789,9 @@ class ExperimentSession:
         stage_id: str,
         base: str,
         job_class: type,
+        run_type: str,
+        environment_run: Optional[str],
+        variant: Optional[str],
         run_name: Optional[str],
         output_dir: Optional[str],
         overrides: Optional[Mapping[str, Any]],
@@ -694,24 +799,61 @@ class ExperimentSession:
         run_section: str,
     ) -> StageSpec:
         config = self.templates.clone(base)
+        task_overrides = None
+        resolved_environment_run = str(environment_run or "").strip() or None
+        if resolved_environment_run is not None:
+            named_run_type = None
+            if hasattr(self.task, "get_named_run_type"):
+                named_run_type = self.task.get_named_run_type(resolved_environment_run)
+            if named_run_type is not None and str(named_run_type).strip().lower() != str(
+                run_type
+            ).strip().lower():
+                raise ValueError(
+                    f'Stage "{stage_id}" requested run "{resolved_environment_run}" '
+                    f'with run_type "{named_run_type}", expected "{run_type}".'
+                )
+            if not hasattr(self.task, "get_named_run_config_overrides"):
+                raise ValueError(
+                    f'Task "{type(self.task).__name__}" does not support named runs '
+                    f'but stage "{stage_id}" requested run "{resolved_environment_run}".'
+                )
+            task_overrides = self.task.get_named_run_config_overrides(
+                resolved_environment_run
+            )
+        elif hasattr(self.task, "get_run_config_overrides"):
+            task_overrides = self.task.get_run_config_overrides(
+                run_type,
+                variant=variant,
+            )
+        if task_overrides:
+            _deep_merge(config, task_overrides)
         if self.shared_overrides:
             _deep_merge(config, self.shared_overrides)
         if overrides:
             _deep_merge(config, overrides)
 
         section_cfg = config.setdefault(run_section, {})
-        section_cfg["run_name"] = run_name or stage_id
+        resolved_run_name = str(run_name or stage_id)
+        section_cfg["run_name"] = resolved_run_name
         if output_dir is not None:
             section_cfg["output_dir"] = output_dir
+        elif not section_cfg.get("output_dir"):
+            section_cfg["output_dir"] = f"./outputs/{resolved_run_name}"
 
         if adapter is not None:
             model_cfg = config.setdefault("model", {})
             model_cfg["init_adapter_repo"] = adapter.repo_id
             model_cfg["init_adapter_revision"] = adapter.revision
+        if resolved_environment_run is not None:
+            bind_environment_run(config, resolved_environment_run)
 
         return StageSpec(
             id=stage_id,
             config=config,
             job_class=job_class,
             task=self.task,
+            run_type=run_type,
+            run_name=resolved_run_name,
+            environment_run=resolved_environment_run,
+            variant=variant,
         )

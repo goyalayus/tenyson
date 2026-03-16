@@ -184,21 +184,38 @@ class EvalJob:
             beat_run_heartbeat,
             start_run_heartbeat,
             begin_run_attempt,
+            ensure_wandb_telemetry_run,
             Generation,
             record_run_result,
             record_run_summary,
             resolve_required_telemetry_context,
-            RunControl,
+            run_stop_requested,
             TelemetryClient,
         )
 
         start = time.time()
         eval_cfg = self.config.get("evaluation", {})
         run_name = self.run_id
+        attempt_token = str(
+            self.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
 
-        db_url, experiment_id = resolve_required_telemetry_context(self.config)
-        client = TelemetryClient(db_url=db_url)
-        if begin_run_attempt(client, experiment_id, run_name, phase="eval"):
+        backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
+        client = TelemetryClient(db_url=backend_ref)
+        wandb_run = ensure_wandb_telemetry_run(
+            client,
+            experiment_id=experiment_id,
+            phase="eval",
+            run_name=run_name,
+            config=self.config,
+        )
+        if begin_run_attempt(
+            client,
+            experiment_id,
+            run_name,
+            phase="eval",
+            attempt_token=attempt_token,
+        ):
             print(
                 "[EvalJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,
@@ -258,18 +275,12 @@ class EvalJob:
                     heartbeat_warned = True
 
         def _should_stop() -> bool:
-            session = client.Session()
-            try:
-                control_row = (
-                    session.query(RunControl)
-                    .filter(RunControl.run_id == run_name)
-                    .filter(RunControl.experiment_id == experiment_id)
-                    .order_by(RunControl.updated_at.desc())
-                    .first()
-                )
-                return bool(control_row and control_row.stop_requested)
-            finally:
-                session.close()
+            return run_stop_requested(
+                client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase="eval",
+            )
 
         backend = "vLLM" if sampling_params is not None else "transformers"
         temperature = (
@@ -306,25 +317,26 @@ class EvalJob:
         print("[EvalJob] Generation complete. Computing metrics...", flush=True)
 
         # Telemetry: log eval prompts and completions into shared Generation table.
-        session = client.Session()
-        try:
-            for idx, (prompt, completion) in enumerate(
-                zip(processed_prompts, processed_completions)
-            ):
-                generation = Generation(
-                    id=str(uuid4()),
-                    experiment_id=experiment_id,
-                    run_id=run_name,
-                    global_step=idx,
-                    phase="eval",
-                    prompt_text=str(prompt),
-                    completion_text=str(completion),
-                    reward=None,
-                )
-                session.add(generation)
-            session.commit()
-        finally:
-            session.close()
+        if client.backend == "sql":
+            session = client.Session()
+            try:
+                for idx, (prompt, completion) in enumerate(
+                    zip(processed_prompts, processed_completions)
+                ):
+                    generation = Generation(
+                        id=str(uuid4()),
+                        experiment_id=experiment_id,
+                        run_id=run_name,
+                        global_step=idx,
+                        phase="eval",
+                        prompt_text=str(prompt),
+                        completion_text=str(completion),
+                        reward=None,
+                    )
+                    session.add(generation)
+                session.commit()
+            finally:
+                session.close()
 
         # Only pass the processed subset through to metrics.
         processed_samples = len(processed_prompts)
@@ -359,6 +371,8 @@ class EvalJob:
             stopped_early=stopped_early,
             processed_samples=processed_samples,
             expected_samples=expected_samples,
+            wandb_url=getattr(wandb_run, "url", None) if wandb_run is not None else None,
+            attempt_token=attempt_token,
         )
         record_run_summary(
             client=client,
@@ -374,4 +388,12 @@ class EvalJob:
             results_payload=results,
             job_result_payload=result,
         )
+        if wandb_run is not None:
+            try:
+                import wandb
+
+                wandb.log(metrics)
+                wandb.finish()
+            except Exception:  # noqa: BLE001
+                pass
         return result

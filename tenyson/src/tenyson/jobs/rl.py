@@ -441,6 +441,7 @@ class RLJob:
         from tenyson.core.telemetry import (
             start_run_heartbeat,
             begin_run_attempt,
+            ensure_wandb_telemetry_run,
             ManualStopTelemetryCallback,
             RLRolloutTracker,
             record_run_result,
@@ -454,11 +455,27 @@ class RLJob:
         start = time.time()
         train_cfg = self.config.get("training", {})
         vllm_cfg = self.config.get("vllm", {})
-        db_url, experiment_id = resolve_required_telemetry_context(self.config)
-        telemetry_client = TelemetryClient(db_url=db_url)
+        attempt_token = str(
+            self.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
+        backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
+        telemetry_client = TelemetryClient(db_url=backend_ref)
 
         run_name = self.run_id
-        if begin_run_attempt(telemetry_client, experiment_id, run_name, phase="rl"):
+        ensure_wandb_telemetry_run(
+            telemetry_client,
+            experiment_id=experiment_id,
+            phase="rl",
+            run_name=run_name,
+            config=self.config,
+        )
+        if begin_run_attempt(
+            telemetry_client,
+            experiment_id,
+            run_name,
+            phase="rl",
+            attempt_token=attempt_token,
+        ):
             print(
                 "[RLJob] Cleared stale manual stop request from a previous attempt.",
                 flush=True,
@@ -508,6 +525,17 @@ class RLJob:
         print("[RLJob] Loading reward functions via TaskPlugin...", flush=True)
         reward_funcs = self.task.get_reward_funcs(self.config, tokenizer)
 
+        report_to = train_cfg.get("report_to", ["none"])
+        if telemetry_client.backend == "wandb":
+            if report_to == "none":
+                report_to = ["wandb"]
+            elif isinstance(report_to, list):
+                report_to = list(report_to)
+                if "wandb" not in report_to:
+                    report_to.append("wandb")
+            elif report_to != "wandb":
+                report_to = [report_to, "wandb"]
+
         max_completion_length = _resolve_grpo_max_completion_length(
             train_cfg, vllm_cfg
         )
@@ -523,7 +551,7 @@ class RLJob:
             else 1.0,
             optim=train_cfg.get("optim", "adamw_8bit"),
             logging_steps=1,
-            report_to=train_cfg.get("report_to", ["none"]),
+            report_to=report_to,
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
             remove_unused_columns=False,
@@ -571,6 +599,7 @@ class RLJob:
         manual_stop_callback = ManualStopTelemetryCallback(
             run_id=run_name,
             experiment_id=experiment_id,
+            phase="rl",
             client=telemetry_client,
             check_every_n_steps=manual_stop_every,
         )
@@ -583,7 +612,6 @@ class RLJob:
                 client=telemetry_client,
             ),
         ]
-        report_to = train_cfg.get("report_to", ["none"])
         if report_to == "wandb" or (
             isinstance(report_to, list) and "wandb" in report_to
         ):
@@ -596,7 +624,7 @@ class RLJob:
             ]
 
         reward_telemetry_collector = None
-        if reward_funcs:
+        if reward_funcs and telemetry_client.backend == "sql":
             reward_component_names = _resolve_reward_component_names(reward_funcs)
             reward_telemetry_collector = _RewardTelemetryCollector(
                 client=telemetry_client,
@@ -711,6 +739,7 @@ class RLJob:
             hf_repo_id=push_repo_id or None,
             hf_revision=hf_revision,
             failure_reason=failure_reason,
+            attempt_token=attempt_token,
         )
         record_run_summary(
             client=telemetry_client,
@@ -726,4 +755,10 @@ class RLJob:
             results_payload=result,
             job_result_payload=result,
         )
+        try:
+            import wandb  # type: ignore[import-not-found]
+
+            wandb.finish()
+        except Exception:  # noqa: BLE001
+            pass
         return result

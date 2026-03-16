@@ -12,6 +12,7 @@ _LOCAL_BOOTSTRAP_PACKAGES = {
     "modal": "modal",
     "psycopg": "psycopg[binary]",
     "sqlalchemy": "sqlalchemy",
+    "wandb": "wandb",
     "yaml": "pyyaml",
 }
 
@@ -60,34 +61,153 @@ def _bootstrap_local_environment() -> None:
 _bootstrap_local_environment()
 
 from tenyson.cloud.modal import ModalManager
-from tenyson.experiment import (
-    ConfigTemplates,
-    ExperimentAborted,
-    ExperimentSession,
-)
+from tenyson.experiment import ConfigTemplates, ExperimentAborted, ExperimentSession
 from tenyson.loader import load_task
-from tenyson.reporting.builder import ReportBuilder
+from tenyson.reporting.fixed import ExperimentReport
 
 
-REPORT_METRICS = (
-    "constraint_accuracy",
-    "dict_accuracy",
-    "format_accuracy",
-)
+def _build_shared_overrides() -> dict | None:
+    hf_repo_base = str(os.getenv("TENYSON_HF_REPO_BASE") or "").strip()
+    experiment_id = str(os.getenv("TENYSON_EXPERIMENT_ID") or "").strip()
+
+    shared_overrides = {}
+    if hf_repo_base:
+        shared_overrides.setdefault("training", {})["hf_repo_base"] = hf_repo_base
+    if experiment_id:
+        shared_overrides.setdefault("telemetry", {})["experiment_id"] = experiment_id
+    return shared_overrides or None
+
+
+def _run_mixed_branch(branch, *, sft_adapter) -> None:
+    branch.run(
+        branch.rl(
+            "mixed_rl",
+            run="wordle_rl_mixed",
+            run_name="wordle_rl_mixed",
+            adapter=sft_adapter,
+        )
+    )
+    branch.run(
+        branch.eval(
+            "mixed_final_eval",
+            run="wordle_eval_mixed",
+            run_name="wordle_mixed_final_eval",
+            adapter=branch.require_adapter("mixed_rl"),
+        )
+    )
+
+
+def _run_curriculum_branch(branch, *, sft_adapter) -> None:
+    branch.run(
+        branch.rl(
+            "curr_rl_t2",
+            run="wordle_rl_turn2",
+            run_name="wordle_curriculum_rl_t2",
+            adapter=sft_adapter,
+        )
+    )
+    branch.run(
+        branch.eval(
+            "curr_eval_after_t2_turn2",
+            run="wordle_eval_turn2",
+            run_name="wordle_curr_eval_after_t2_turn2",
+            adapter=branch.require_adapter("curr_rl_t2"),
+        )
+    )
+
+    branch.run(
+        branch.rl(
+            "curr_rl_t3",
+            run="wordle_rl_turn3",
+            run_name="wordle_curriculum_rl_t3",
+            adapter=branch.require_adapter("curr_rl_t2"),
+        )
+    )
+    branch.run_parallel(
+        "curr_eval_after_t3",
+        [
+            branch.eval(
+                "curr_eval_after_t3_turn2",
+                run="wordle_eval_turn2",
+                run_name="wordle_curr_eval_after_t3_turn2",
+                adapter=branch.require_adapter("curr_rl_t3"),
+            ),
+            branch.eval(
+                "curr_eval_after_t3_turn3",
+                run="wordle_eval_turn3",
+                run_name="wordle_curr_eval_after_t3_turn3",
+                adapter=branch.require_adapter("curr_rl_t3"),
+            ),
+        ],
+    )
+
+    branch.run(
+        branch.rl(
+            "curr_rl_t4",
+            run="wordle_rl_turn4",
+            run_name="wordle_curriculum_rl_t4",
+            adapter=branch.require_adapter("curr_rl_t3"),
+        )
+    )
+    branch.run_parallel(
+        "curr_eval_after_t4",
+        [
+            branch.eval(
+                "curr_eval_after_t4_turn3",
+                run="wordle_eval_turn3",
+                run_name="wordle_curr_eval_after_t4_turn3",
+                adapter=branch.require_adapter("curr_rl_t4"),
+            ),
+            branch.eval(
+                "curr_eval_after_t4_turn4",
+                run="wordle_eval_turn4",
+                run_name="wordle_curr_eval_after_t4_turn4",
+                adapter=branch.require_adapter("curr_rl_t4"),
+            ),
+        ],
+    )
+
+    branch.run(
+        branch.rl(
+            "curr_rl_t5",
+            run="wordle_rl_turn5",
+            run_name="wordle_curriculum_rl_t5",
+            adapter=branch.require_adapter("curr_rl_t4"),
+        )
+    )
+    branch.run_parallel(
+        "curr_eval_after_t5",
+        [
+            branch.eval(
+                "curr_eval_after_t5_turn4",
+                run="wordle_eval_turn4",
+                run_name="wordle_curr_eval_after_t5_turn4",
+                adapter=branch.require_adapter("curr_rl_t5"),
+            ),
+            branch.eval(
+                "curr_eval_after_t5_turn5",
+                run="wordle_eval_turn5",
+                run_name="wordle_curr_eval_after_t5_turn5",
+                adapter=branch.require_adapter("curr_rl_t5"),
+            ),
+        ],
+    )
+
+    branch.run(
+        branch.eval(
+            "curr_final_eval",
+            run="wordle_eval_mixed",
+            run_name="wordle_curriculum_final_eval",
+            adapter=branch.require_adapter("curr_rl_t5"),
+        )
+    )
 
 
 def main() -> None:
     base_dir = Path(__file__).parent
-    task = load_task(str(Path(__file__).with_name("wordle_task.py")))
-    report = ReportBuilder(
-        template_path=str(base_dir / "report_template.md"),
-        output_path=str(base_dir / "final_report.md"),
-    )
-    report.generate()
+    task = load_task(str(base_dir / "wordle_task.py"))
+    report = ExperimentReport(output_path=base_dir / "final_report.md")
 
-    hf_repo_base = os.getenv("TENYSON_HF_REPO_BASE")
-    telemetry_db_url = os.getenv("TENYSON_DB_URL")
-    experiment_id = os.getenv("TENYSON_EXPERIMENT_ID")
     on_failure = os.getenv("TENYSON_ON_FAILURE", "abort").strip().lower() or "abort"
     modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
     modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
@@ -100,17 +220,6 @@ def main() -> None:
         "yes",
         "on",
     }
-    shared_overrides = {}
-    if hf_repo_base:
-        shared_overrides.setdefault("training", {})["hf_repo_base"] = hf_repo_base
-    if telemetry_db_url or experiment_id:
-        telemetry_overrides = shared_overrides.setdefault("telemetry", {})
-        if telemetry_db_url:
-            telemetry_overrides["db_url"] = telemetry_db_url
-        if experiment_id:
-            telemetry_overrides["experiment_id"] = experiment_id
-    if not shared_overrides:
-        shared_overrides = None
 
     session = ExperimentSession(
         task=task,
@@ -122,9 +231,9 @@ def main() -> None:
             profile=modal_profile,
         ),
         on_failure=on_failure,
-        shared_overrides=shared_overrides,
+        shared_overrides=_build_shared_overrides(),
         parallel=not disable_parallel,
-        report_builder=report,
+        report=report,
         report_metric_precision=4,
         report_wandb_text="run",
     )
@@ -134,263 +243,35 @@ def main() -> None:
         primary_branch.run(
             primary_branch.sft(
                 "sft_main",
+                run="wordle_sft_main",
                 run_name="wordle_sft_main",
-                output_dir="./outputs/wordle_research/sft",
             )
         )
         sft_adapter = primary_branch.require_adapter("sft_main")
         primary_branch.run(
             primary_branch.eval(
                 "eval_baseline_mixed",
+                run="wordle_eval_mixed",
                 run_name="wordle_eval_baseline_mixed",
-                output_dir="./outputs/wordle_research/eval_baseline_mixed",
                 adapter=sft_adapter,
-                overrides={
-                    "task": {
-                        "min_history_turns": 1,
-                        "max_history_turns": 5,
-                    }
-                },
             )
         )
-        branch_results = session.run_branches(
+        session.run_branches(
             {
-                "mixed": lambda branch: (
-                    branch.run(
-                        branch.rl(
-                            "mixed_rl",
-                            run_name="wordle_rl_mixed",
-                            output_dir="./outputs/wordle_research/mixed/rl",
-                            adapter=sft_adapter,
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 1,
-                                    "max_history_turns": 5,
-                                }
-                            },
-                        )
-                    ),
-                    branch.run(
-                        branch.eval(
-                            "mixed_final_eval",
-                            run_name="wordle_mixed_final_eval",
-                            output_dir="./outputs/wordle_research/mixed/eval_final_mixed",
-                            adapter=branch.require_adapter("mixed_rl"),
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 1,
-                                    "max_history_turns": 5,
-                                }
-                            },
-                        )
-                    ),
+                "mixed": lambda branch: _run_mixed_branch(
+                    branch,
+                    sft_adapter=sft_adapter,
                 ),
-                "curriculum": lambda branch: (
-                    branch.run(
-                        branch.rl(
-                            "curr_rl_t2",
-                            run_name="wordle_curriculum_rl_t2",
-                            output_dir="./outputs/wordle_research/curriculum/rl_t2",
-                            adapter=sft_adapter,
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 2,
-                                    "max_history_turns": 2,
-                                }
-                            },
-                        )
-                    ),
-                    branch.run(
-                        branch.eval(
-                            "curr_eval_after_t2_turn2",
-                            run_name="wordle_curr_eval_after_t2_turn2",
-                            output_dir="./outputs/wordle_research/curriculum/eval_after_t2_turn2",
-                            adapter=branch.require_adapter("curr_rl_t2"),
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 2,
-                                    "max_history_turns": 2,
-                                    "eval_exact_turns": [2],
-                                }
-                            },
-                        )
-                    ),
-                    branch.run(
-                        branch.rl(
-                            "curr_rl_t3",
-                            run_name="wordle_curriculum_rl_t3",
-                            output_dir="./outputs/wordle_research/curriculum/rl_t3",
-                            adapter=branch.require_adapter("curr_rl_t2"),
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 3,
-                                    "max_history_turns": 3,
-                                }
-                            },
-                        )
-                    ),
-                    branch.run_parallel(
-                        "curr_eval_after_t3",
-                        [
-                            branch.eval(
-                                "curr_eval_after_t3_turn2",
-                                run_name="wordle_curr_eval_after_t3_turn2",
-                                output_dir="./outputs/wordle_research/curriculum/eval_after_t3_turn2",
-                                adapter=branch.require_adapter("curr_rl_t3"),
-                                overrides={
-                                    "task": {
-                                        "min_history_turns": 2,
-                                        "max_history_turns": 2,
-                                        "eval_exact_turns": [2],
-                                    }
-                                },
-                            ),
-                            branch.eval(
-                                "curr_eval_after_t3_turn3",
-                                run_name="wordle_curr_eval_after_t3_turn3",
-                                output_dir="./outputs/wordle_research/curriculum/eval_after_t3_turn3",
-                                adapter=branch.require_adapter("curr_rl_t3"),
-                                overrides={
-                                    "task": {
-                                        "min_history_turns": 3,
-                                        "max_history_turns": 3,
-                                        "eval_exact_turns": [3],
-                                    }
-                                },
-                            ),
-                        ],
-                    ),
-                    branch.run(
-                        branch.rl(
-                            "curr_rl_t4",
-                            run_name="wordle_curriculum_rl_t4",
-                            output_dir="./outputs/wordle_research/curriculum/rl_t4",
-                            adapter=branch.require_adapter("curr_rl_t3"),
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 4,
-                                    "max_history_turns": 4,
-                                }
-                            },
-                        )
-                    ),
-                    branch.run_parallel(
-                        "curr_eval_after_t4",
-                        [
-                            branch.eval(
-                                "curr_eval_after_t4_turn3",
-                                run_name="wordle_curr_eval_after_t4_turn3",
-                                output_dir="./outputs/wordle_research/curriculum/eval_after_t4_turn3",
-                                adapter=branch.require_adapter("curr_rl_t4"),
-                                overrides={
-                                    "task": {
-                                        "min_history_turns": 3,
-                                        "max_history_turns": 3,
-                                        "eval_exact_turns": [3],
-                                    }
-                                },
-                            ),
-                            branch.eval(
-                                "curr_eval_after_t4_turn4",
-                                run_name="wordle_curr_eval_after_t4_turn4",
-                                output_dir="./outputs/wordle_research/curriculum/eval_after_t4_turn4",
-                                adapter=branch.require_adapter("curr_rl_t4"),
-                                overrides={
-                                    "task": {
-                                        "min_history_turns": 4,
-                                        "max_history_turns": 4,
-                                        "eval_exact_turns": [4],
-                                    }
-                                },
-                            ),
-                        ],
-                    ),
-                    branch.run(
-                        branch.rl(
-                            "curr_rl_t5",
-                            run_name="wordle_curriculum_rl_t5",
-                            output_dir="./outputs/wordle_research/curriculum/rl_t5",
-                            adapter=branch.require_adapter("curr_rl_t4"),
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 5,
-                                    "max_history_turns": 5,
-                                }
-                            },
-                        )
-                    ),
-                    branch.run_parallel(
-                        "curr_eval_after_t5",
-                        [
-                            branch.eval(
-                                "curr_eval_after_t5_turn4",
-                                run_name="wordle_curr_eval_after_t5_turn4",
-                                output_dir="./outputs/wordle_research/curriculum/eval_after_t5_turn4",
-                                adapter=branch.require_adapter("curr_rl_t5"),
-                                overrides={
-                                    "task": {
-                                        "min_history_turns": 4,
-                                        "max_history_turns": 4,
-                                        "eval_exact_turns": [4],
-                                    }
-                                },
-                            ),
-                            branch.eval(
-                                "curr_eval_after_t5_turn5",
-                                run_name="wordle_curr_eval_after_t5_turn5",
-                                output_dir="./outputs/wordle_research/curriculum/eval_after_t5_turn5",
-                                adapter=branch.require_adapter("curr_rl_t5"),
-                                overrides={
-                                    "task": {
-                                        "min_history_turns": 5,
-                                        "max_history_turns": 5,
-                                        "eval_exact_turns": [5],
-                                    }
-                                },
-                            ),
-                        ],
-                    ),
-                    branch.run(
-                        branch.eval(
-                            "curr_final_eval",
-                            run_name="wordle_curriculum_final_eval",
-                            output_dir="./outputs/wordle_research/curriculum/eval_final_mixed",
-                            adapter=branch.require_adapter("curr_rl_t5"),
-                            overrides={
-                                "task": {
-                                    "min_history_turns": 1,
-                                    "max_history_turns": 5,
-                                }
-                            },
-                        )
-                    ),
+                "curriculum": lambda branch: _run_curriculum_branch(
+                    branch,
+                    sft_adapter=sft_adapter,
                 ),
             }
         )
     except ExperimentAborted as exc:
         print(exc)
-        return
     finally:
         session.close()
-
-    mixed_results = branch_results["mixed"]
-    curriculum_results = branch_results["curriculum"]
-    all_results = ExperimentSession.combine_results(
-        primary_branch.results(),
-        mixed_results,
-        curriculum_results,
-    )
-
-    report.fill_results(all_results, metric_precision=4, wandb_text="run")
-    for metric_name in REPORT_METRICS:
-        report.fill_metric_delta(
-            f"delta_final_{metric_name}",
-            mixed_results.get("mixed_final_eval"),
-            curriculum_results.get("curr_final_eval"),
-            metric_name,
-            precision=4,
-        )
-    report.generate()
 
 
 if __name__ == "__main__":

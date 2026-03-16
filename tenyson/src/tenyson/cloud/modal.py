@@ -96,8 +96,11 @@ class ModalManager(BaseCloudManager):
         class_name = task.__class__.__name__
 
         task_file = None
+        adapter_task_file = getattr(task, "__tenyson_source_path__", None)
+        if adapter_task_file:
+            task_file = adapter_task_file
         module = sys.modules.get(module_path)
-        if module is not None:
+        if task_file is None and module is not None:
             task_file = getattr(module, "__file__", None)
         if task_file is None:
             try:
@@ -221,9 +224,16 @@ class ModalManager(BaseCloudManager):
         task_spec = self._resolve_task_spec(task, local_project_root)
 
         run_name = resolve_required_run_name(job.config, job_type)
-        db_url, experiment_id = resolve_required_telemetry_context(job.config)
-        cleanup_modal_rds_ingress = prepare_modal_rds_access()
-        telemetry_client = TelemetryClient(db_url=db_url)
+        backend_ref, experiment_id = resolve_required_telemetry_context(job.config)
+        attempt_token = str(
+            job.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
+        cleanup_modal_rds_ingress = (
+            prepare_modal_rds_access()
+            if not str(backend_ref).startswith("wandb://")
+            else (lambda: None)
+        )
+        telemetry_client = TelemetryClient(db_url=backend_ref)
 
         def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
             if job_type not in ("sft", "rl"):
@@ -268,6 +278,7 @@ class ModalManager(BaseCloudManager):
                     failure_reason=str(exc),
                     instance_id=None,
                     spot_interruption=None,
+                    attempt_token=attempt_token,
                 )
                 record_run_summary(
                     client=telemetry_client,
@@ -292,6 +303,7 @@ class ModalManager(BaseCloudManager):
                     experiment_id=experiment_id,
                     run_id=run_name,
                     phase=job_type,
+                    attempt_token=attempt_token,
                 )
                 return JobResult.from_dict(job_result_payload)
             except Exception as exc:  # noqa: BLE001
@@ -309,6 +321,7 @@ class ModalManager(BaseCloudManager):
                     failure_reason=failure_reason,
                     instance_id=None,
                     spot_interruption=None,
+                    attempt_token=attempt_token,
                 )
                 record_run_summary(
                     client=telemetry_client,

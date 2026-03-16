@@ -5,8 +5,15 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
 from datasets import Dataset
-from tenyson.core.plugin import TaskPlugin
+from tenyson.core.environment import (
+    DatasetHooks,
+    EnvironmentDefinition,
+    EnvironmentRunSpec,
+    EnvironmentTaskAdapter,
+    RubricHooks,
+)
 
 # ==============================================================================
 # PROMPTS
@@ -685,34 +692,251 @@ def compute_metrics(
         "detailed_results": detailed_results,
     }
 
+def _wordlists_override() -> Dict[str, Any]:
+    wordlists_dir = Path(__file__).parent / "wordlists"
+    return {
+        "task": {
+            "wordlists": {
+                "solutions": str(wordlists_dir / "wordle_solutions.txt"),
+                "allowed": str(wordlists_dir / "wordle_allowed_guesses.txt"),
+            }
+        }
+    }
 
-class WordleTask(TaskPlugin):
-    def get_sft_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Dataset:
-        return get_sft_dataset(config, tokenizer)
 
-    def get_sft_eval_dataset(
-        self, config: Dict[str, Any], tokenizer: Any
-    ) -> Optional[Dataset]:
-        return get_sft_eval_dataset(config, tokenizer)
+def _turn_window_override(
+    min_turns: int,
+    max_turns: int,
+    *,
+    eval_exact_turns: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    override: Dict[str, Any] = {
+        "task": {
+            "min_history_turns": int(min_turns),
+            "max_history_turns": int(max_turns),
+        }
+    }
+    if eval_exact_turns is not None:
+        override["task"]["eval_exact_turns"] = list(eval_exact_turns)
+    return override
 
-    def get_sft_formatting_func(self, config: Dict[str, Any], tokenizer: Any):
-        return get_sft_formatting_func(config, tokenizer)
 
-    def get_rl_dataset(self, config: Dict[str, Any]) -> Dataset:
-        return get_rl_dataset(config)
+def _deep_merge_dict(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in incoming.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge_dict(base[key], value)
+        else:
+            base[key] = json.loads(json.dumps(value))
+    return base
 
-    def get_reward_funcs(self, config: Dict[str, Any], tokenizer: Any) -> List[Any]:
-        return get_reward_funcs(config, tokenizer)
 
-    def get_eval_dataset(self, config: Dict[str, Any]) -> Dataset:
-        return get_eval_dataset(config)
+def _merge_overrides(*chunks: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for chunk in chunks:
+        _deep_merge_dict(merged, chunk)
+    return merged
 
-    def compute_metrics(
-        self,
-        prompts: List[str],
-        completions: List[str],
-        dataset_rows: Dataset,
-        config: Dict[str, Any],
-        tokenizer: Any,
-    ) -> Dict[str, Any]:
-        return compute_metrics(prompts, completions, dataset_rows, config, tokenizer)
+
+_WORDLE_ENV = {
+    "kind": "single-turn-wordle",
+    "multi_turn_env": False,
+}
+
+_SFT_OVERRIDES: Dict[str, Any] = {
+    "training": {
+        "loss_on_assistant_only": True,
+        "response_template": "<|im_start|>assistant\n",
+    },
+    "task": {
+        "sft_dataset": "goyalayus/wordle-reasoning-sft-prefix-keep-think",
+    },
+}
+
+_RL_OVERRIDES: Dict[str, Any] = {
+    "task": {
+        "synthetic_samples": 4096,
+        "min_history_turns": 1,
+        "max_history_turns": 5,
+        "rewards": {
+            "format": 0.2,
+            "dict": 0.2,
+            "repeat_penalty": -0.5,
+            "constraint": 0.1,
+            "overlength_penalty": -0.5,
+        },
+    }
+}
+_RL_OVERRIDES["task"].update(_wordlists_override()["task"])
+
+_EVAL_OVERRIDES: Dict[str, Any] = {
+    "task": {
+        "eval_samples": 100,
+        "eval_seed": 42,
+    }
+}
+_EVAL_OVERRIDES["task"].update(_wordlists_override()["task"])
+
+ENVIRONMENT = EnvironmentDefinition(
+    name="wordle",
+    runs={
+        "wordle_sft_main": EnvironmentRunSpec(
+            run_type="sft",
+            datasets=DatasetHooks(
+                primary=get_sft_dataset,
+                evaluation=get_sft_eval_dataset,
+                formatting=get_sft_formatting_func,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_SFT_OVERRIDES,
+        ),
+        "wordle_rl_mixed": EnvironmentRunSpec(
+            run_type="rl",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_rl_dataset(config),
+            ),
+            rubric=RubricHooks(
+                reward_funcs=get_reward_funcs,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _RL_OVERRIDES,
+                _turn_window_override(1, 5),
+            ),
+        ),
+        "wordle_rl_turn2": EnvironmentRunSpec(
+            run_type="rl",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_rl_dataset(config),
+            ),
+            rubric=RubricHooks(
+                reward_funcs=get_reward_funcs,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _RL_OVERRIDES,
+                _turn_window_override(1, 1),
+            ),
+        ),
+        "wordle_rl_turn3": EnvironmentRunSpec(
+            run_type="rl",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_rl_dataset(config),
+            ),
+            rubric=RubricHooks(
+                reward_funcs=get_reward_funcs,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _RL_OVERRIDES,
+                _turn_window_override(2, 2),
+            ),
+        ),
+        "wordle_rl_turn4": EnvironmentRunSpec(
+            run_type="rl",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_rl_dataset(config),
+            ),
+            rubric=RubricHooks(
+                reward_funcs=get_reward_funcs,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _RL_OVERRIDES,
+                _turn_window_override(3, 3),
+            ),
+        ),
+        "wordle_rl_turn5": EnvironmentRunSpec(
+            run_type="rl",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_rl_dataset(config),
+            ),
+            rubric=RubricHooks(
+                reward_funcs=get_reward_funcs,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _RL_OVERRIDES,
+                _turn_window_override(4, 4),
+            ),
+        ),
+        "wordle_eval_mixed": EnvironmentRunSpec(
+            run_type="eval",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_eval_dataset(config),
+            ),
+            rubric=RubricHooks(
+                compute_metrics=compute_metrics,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _EVAL_OVERRIDES,
+                _turn_window_override(1, 5),
+            ),
+        ),
+        "wordle_eval_turn2": EnvironmentRunSpec(
+            run_type="eval",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_eval_dataset(config),
+            ),
+            rubric=RubricHooks(
+                compute_metrics=compute_metrics,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _EVAL_OVERRIDES,
+                _turn_window_override(1, 1, eval_exact_turns=[2]),
+            ),
+        ),
+        "wordle_eval_turn3": EnvironmentRunSpec(
+            run_type="eval",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_eval_dataset(config),
+            ),
+            rubric=RubricHooks(
+                compute_metrics=compute_metrics,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _EVAL_OVERRIDES,
+                _turn_window_override(2, 2, eval_exact_turns=[3]),
+            ),
+        ),
+        "wordle_eval_turn4": EnvironmentRunSpec(
+            run_type="eval",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_eval_dataset(config),
+            ),
+            rubric=RubricHooks(
+                compute_metrics=compute_metrics,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _EVAL_OVERRIDES,
+                _turn_window_override(3, 3, eval_exact_turns=[4]),
+            ),
+        ),
+        "wordle_eval_turn5": EnvironmentRunSpec(
+            run_type="eval",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_eval_dataset(config),
+            ),
+            rubric=RubricHooks(
+                compute_metrics=compute_metrics,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _EVAL_OVERRIDES,
+                _turn_window_override(4, 4, eval_exact_turns=[5]),
+            ),
+        ),
+    },
+)
+
+
+def load_environment_definition() -> EnvironmentDefinition:
+    return ENVIRONMENT
+
+
+class WordleTask(EnvironmentTaskAdapter):
+    def __init__(self):
+        super().__init__(ENVIRONMENT)

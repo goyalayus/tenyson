@@ -28,14 +28,6 @@ training:
   save_total_limit: 1
   optim: "adamw_8bit"
   packing: false
-  # Train only on assistant tokens (mask system/user). Requires response_template for your chat format.
-  loss_on_assistant_only: true
-  response_template: "<|im_start|>assistant\n"
-  run_name: "lora_sft_qwen3-4b"
-  output_dir: "./outputs/lora_sft_qwen3-4b"
-  report_to: ["wandb"]
-  # Stable repo per run lineage: <hf_repo_base>-<run_name>. Replace with your HF username.
-  hf_repo_base: "username/wordle-lora"
   # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 20
   val_size: 100
@@ -43,10 +35,6 @@ training:
   early_stopping_patience: 2        # N: number of consecutive evals with no improvement.
   early_stopping_min_delta: 0.0     # X: minimum absolute improvement in eval_loss.
 
-task:
-  sft_dataset: "goyalayus/wordle-reasoning-sft-prefix-keep-think"
-
-# Required: SQL telemetry for metrics/control and canonical run results.
 telemetry:
-  db_url: "postgresql+psycopg://user:password@db.example.com:5432/tenyson"
+  backend: "wandb"
   experiment_id: "wordle_research_2026_03_07"

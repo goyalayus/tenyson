@@ -3,9 +3,6 @@ model:
   max_seq_length: 4096
   load_in_4bit: true
   fast_inference: true
-  # Set by pipeline before_step from previous step's hf_repo_id.
-  init_adapter_repo: ""
-  init_adapter_revision: "main"
 
 lora:
   r: 16
@@ -34,28 +31,9 @@ training:
   num_generations: 4
   max_prompt_length: 2048
   max_completion_length: 2048
-  run_name: "wordle_rl_vllm_config_test"
-  output_dir: "./outputs/rl_grpo"
-  report_to: ["wandb"]
-  # Stable repo per run lineage: <hf_repo_base>-<run_name>. Required.
-  hf_repo_base: "username/wordle-lora"
   # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 50
 
-task:
-  synthetic_samples: 4096
-  min_history_turns: 1
-  max_history_turns: 4
-  wordlists:
-    solutions: "tenyson/examples/wordle/wordlists/wordle_solutions.txt"
-    allowed: "tenyson/examples/wordle/wordlists/wordle_allowed_guesses.txt"
-  rewards:
-    format: 0.2
-    dict: 0.2
-    repeat_penalty: -0.5
-    constraint: 0.1
-    overlength_penalty: -0.5
-
 telemetry:
-  db_url: "postgresql+psycopg://user:password@db.example.com:5432/tenyson"
+  backend: "wandb"
   experiment_id: "wordle_research_2026_03_07"
