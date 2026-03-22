@@ -1,6 +1,7 @@
 """
 Pipeline runner with human-in-the-loop on failure: wait for user to choose
-resume from checkpoint, restart from scratch, or abort.
+resume from checkpoint, restart from scratch, continue after a manual stop,
+or abort.
 """
 
 import sys
@@ -12,7 +13,13 @@ from tenyson.cloud.base import _red_print
 from tenyson.core.control import request_stop
 from tenyson.core.notify import notify_failure
 from tenyson.core.run_name import resolve_required_run_name_for_job_class
-from tenyson.core.telemetry import resolve_experiment_id, resolve_telemetry_context
+from tenyson.core.telemetry import (
+    TelemetryClient,
+    record_run_result,
+    record_run_summary,
+    resolve_experiment_id,
+    resolve_telemetry_context,
+)
 from tenyson.jobs.result import JobResult
 from tenyson.reporting.builder import ReportBuilder
 
@@ -39,6 +46,45 @@ def _report_update_data(label: str, result: JobResult) -> Dict[str, Any]:
         metric_precision=None,
         wandb_text=f"{label} run (WandB)",
     )
+
+
+def _accept_stopped_result(
+    result: JobResult,
+    *,
+    config: dict,
+    job_type: str,
+) -> None:
+    """
+    Mark a manually stopped run as an accepted partial result so downstream
+    orchestration can move on while still preserving stopped_early metadata.
+    When telemetry is configured, mirror that accepted state back into the
+    canonical run summary/result store so reports and controller lookups agree.
+    """
+    result.status = "partial"
+    try:
+        backend_ref, experiment_id = resolve_telemetry_context(config)
+        if not backend_ref or not experiment_id:
+            return
+        client = TelemetryClient(db_url=backend_ref)
+        record_run_summary(
+            client=client,
+            experiment_id=experiment_id,
+            phase=job_type,
+            result=result,
+        )
+        record_run_result(
+            client=client,
+            experiment_id=experiment_id,
+            run_id=result.run_id,
+            phase=job_type,
+            results_payload=result,
+            job_result_payload=result,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _red_print(
+            "[TENYSON] Warning: accepted stopped result was promoted to partial "
+            f"locally, but telemetry sync failed: {exc}"
+        )
 
 
 def _run_step(
@@ -94,7 +140,9 @@ def _prompt_failure_action(
     hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
     hf_revision = str(getattr(last_result, "hf_revision", "") or "").strip()
     run_id = str(getattr(last_result, "run_id", "") or "").strip() or "unknown"
+    status = str(getattr(last_result, "status", "") or "").strip().lower()
     can_resume = job_type in ("sft", "rl") and bool(hf_repo_id and hf_revision)
+    can_continue = status == "stopped" and can_resume
 
     with _FAILURE_PROMPT_LOCK:
         while True:
@@ -109,8 +157,16 @@ def _prompt_failure_action(
                 )
             else:
                 sys.stderr.write(f"  [restart] Restart step from scratch\n")
+            if can_continue:
+                sys.stderr.write(
+                    "  [continue] Accept the stopped checkpoint and move to the next stage\n"
+                )
             sys.stderr.write("  [abort] Abort pipeline\n")
-            sys.stderr.write("Choice (resume/restart/abort): ")
+            choices = ["resume", "restart"] if can_resume else ["restart"]
+            if can_continue:
+                choices.append("continue")
+            choices.append("abort")
+            sys.stderr.write(f"Choice ({'/'.join(choices)}): ")
             sys.stderr.flush()
             try:
                 choice = sys.stdin.readline().strip().lower()
@@ -124,6 +180,9 @@ def _prompt_failure_action(
             if choice == "resume" and can_resume:
                 train_cfg["resume_from_checkpoint"] = f"{hf_repo_id}:{hf_revision}"
                 return "resume"
+            if choice == "continue" and can_continue:
+                train_cfg.pop("resume_from_checkpoint", None)
+                return "continue"
             sys.stderr.write("  Invalid choice.\n")
 
 
@@ -173,6 +232,7 @@ def _abort_parallel_stage_runs(
                 db_url=db_url,
                 run_id=run_id,
                 experiment_id=experiment_id,
+                phase=_job_type,
                 create_if_missing=True,
             )
             _red_print(
@@ -347,6 +407,13 @@ def run_pipeline(
                                 source_run_id=getattr(result, "run_id", None),
                             )
                             return results
+                        if action == "continue":
+                            _accept_stopped_result(
+                                result,
+                                config=config,
+                                job_type=job_type,
+                            )
+                            break
                         result = _run_step(label, config, job_class, step_task, cloud)
             finally:
                 executor.shutdown(
@@ -395,5 +462,12 @@ def run_pipeline(
             )
             if action == "abort":
                 return results
+            if action == "continue":
+                _accept_stopped_result(
+                    result,
+                    config=config,
+                    job_type=job_type,
+                )
+                break
 
     return results

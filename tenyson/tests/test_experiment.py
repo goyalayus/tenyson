@@ -30,8 +30,13 @@ def _templates() -> ConfigTemplates:
     )
 
 
-def _result(run_id: str, *, status: str = "success") -> JobResult:
-    return JobResult(run_id=run_id, status=status, total_time_seconds=1.0)
+def _result(run_id: str, *, status: str = "success", **kwargs) -> JobResult:
+    return JobResult(
+        run_id=run_id,
+        status=status,
+        total_time_seconds=1.0,
+        **kwargs,
+    )
 
 
 class ExperimentSessionTests(unittest.TestCase):
@@ -186,6 +191,34 @@ class ExperimentSessionTests(unittest.TestCase):
                 branch.run(stage)
 
         self.assertEqual(branch.result("sft_main").status, "failed")
+
+    def test_branch_keeps_partial_result_without_aborting(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+        branch = session.branch(cloud=object())
+        stage = branch.sft("sft_main", run_name="wordle_sft_main")
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            return [
+                _result(
+                    "wordle_sft_main",
+                    status="partial",
+                    stopped_early=True,
+                    failure_reason="Manual stop requested at step 12.",
+                    hf_repo_id="repo/id",
+                    hf_revision="sha123",
+                )
+            ]
+
+        with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
+            result = branch.run(stage)
+
+        self.assertEqual(result.status, "partial")
+        self.assertTrue(result.stopped_early)
+        self.assertEqual(branch.result("sft_main").status, "partial")
 
     def test_run_branches_returns_each_branch_result_map(self) -> None:
         session = ExperimentSession(

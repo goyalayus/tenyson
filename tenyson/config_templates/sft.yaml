@@ -32,6 +32,7 @@ training:
   hf_push_every_steps: 20
   val_size: 100
   # Early stopping based on eval_loss: stop if constant or increasing for N evals.
+  # Keep eval_steps aligned with hf_push_every_steps so the best checkpoint can be restored exactly.
   early_stopping_patience: 2        # N: number of consecutive evals with no improvement.
   early_stopping_min_delta: 0.0     # X: minimum absolute improvement in eval_loss.
 

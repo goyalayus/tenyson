@@ -12,8 +12,99 @@ from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
+from tenyson.jobs.reporting_utils import normalize_report_to
 from tenyson.jobs.result import JobResult
 from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
+
+
+def _resolve_eval_steps(
+    train_cfg: Dict[str, Any],
+    *,
+    has_eval_dataset: bool,
+) -> int | None:
+    if not has_eval_dataset:
+        return None
+
+    eval_steps = int(train_cfg.get("eval_steps", 100))
+    if eval_steps <= 0:
+        raise ValueError(
+            "training.eval_steps must be >= 1 when an SFT eval dataset is configured."
+        )
+    return eval_steps
+
+
+def _resolve_early_stopping_settings(
+    train_cfg: Dict[str, Any],
+    *,
+    has_eval_dataset: bool,
+    save_steps: int,
+    eval_steps: int | None,
+) -> Dict[str, Any] | None:
+    patience_value = train_cfg.get("early_stopping_patience")
+    if patience_value is None:
+        return None
+
+    if not has_eval_dataset:
+        raise ValueError(
+            "training.early_stopping_patience requires an SFT eval dataset so "
+            "eval_loss can be tracked."
+        )
+
+    patience = int(patience_value)
+    if patience <= 0:
+        raise ValueError("training.early_stopping_patience must be >= 1.")
+
+    resolved_eval_steps = int(eval_steps or 0)
+    if resolved_eval_steps <= 0:
+        raise ValueError(
+            "training.eval_steps must be >= 1 when early stopping is enabled."
+        )
+
+    resolved_save_steps = int(save_steps)
+    if resolved_save_steps != resolved_eval_steps:
+        raise ValueError(
+            "training.hf_push_every_steps and training.eval_steps must match when "
+            "early stopping is enabled so every evaluated checkpoint is saved and "
+            "the best checkpoint can be restored."
+        )
+
+    return {
+        "patience": patience,
+        "min_delta": float(train_cfg.get("early_stopping_min_delta", 0.0)),
+    }
+
+
+def _enable_best_model_tracking(training_args: Any) -> None:
+    training_args.load_best_model_at_end = True
+    training_args.metric_for_best_model = "eval_loss"
+    training_args.greater_is_better = False
+
+
+def _push_final_adapter_snapshot(
+    *,
+    repo_id: str,
+    run_name: str,
+    model: Any,
+    tokenizer: Any,
+    step: int,
+    best_checkpoint: str | None = None,
+) -> None:
+    checkpoint_name = os.path.basename(str(best_checkpoint or "").rstrip("/"))
+    if checkpoint_name:
+        reason = f"final best-model sync from {checkpoint_name}"
+    else:
+        reason = "final model sync"
+    commit_message = f"[{run_name}] {reason} (step={int(step)})"
+
+    try:
+        model.push_to_hub(repo_id, commit_message=commit_message)
+        if tokenizer is not None:
+            tokenizer.push_to_hub(repo_id, commit_message=commit_message)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Failed pushing final SFT adapter snapshot to Hugging Face repo "
+            f"'{repo_id}': {exc}"
+        ) from exc
 
 
 class SFTJob:
@@ -166,6 +257,10 @@ class SFTJob:
         print("[SFTJob] Loading datasets via TaskPlugin...", flush=True)
         train_dataset = self.task.get_sft_dataset(self.config, tokenizer)
         eval_dataset = self.task.get_sft_eval_dataset(self.config, tokenizer)
+        eval_steps = _resolve_eval_steps(
+            train_cfg,
+            has_eval_dataset=eval_dataset is not None,
+        )
 
         if train_dataset is None or len(train_dataset) == 0:
             raise ValueError("Training dataset is empty.")
@@ -173,16 +268,10 @@ class SFTJob:
         print(f"[SFTJob] Train size: {len(train_dataset)}", flush=True)
 
         formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
-        report_to = train_cfg.get("report_to", "none")
-        if telemetry_client.backend == "wandb":
-            if report_to == "none":
-                report_to = ["wandb"]
-            elif isinstance(report_to, list):
-                report_to = list(report_to)
-                if "wandb" not in report_to:
-                    report_to.append("wandb")
-            elif report_to != "wandb":
-                report_to = [report_to, "wandb"]
+        report_to = normalize_report_to(
+            train_cfg.get("report_to", "none"),
+            telemetry_backend=telemetry_client.backend,
+        )
 
         cfg_kwargs: Dict[str, Any] = dict(
             output_dir=output_dir,
@@ -241,7 +330,7 @@ class SFTJob:
         if eval_dataset is not None:
             # Align evaluation and saving to step-based cadence.
             training_args.eval_strategy = "steps"
-            training_args.eval_steps = train_cfg.get("eval_steps", 100)
+            training_args.eval_steps = eval_steps
             training_args.per_device_eval_batch_size = train_cfg.get(
                 "per_device_eval_batch_size", 2
             )
@@ -316,18 +405,18 @@ class SFTJob:
             )
 
         # Optional eval-loss early stopping.
-        patience = train_cfg.get("early_stopping_patience")
-        if eval_dataset is not None and patience is not None:
-            min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
-            # Configure best-model tracking on eval_loss.
-            training_args.load_best_model_at_end = False
-            training_args.metric_for_best_model = "eval_loss"
-            training_args.greater_is_better = False
-
+        early_stopping_settings = _resolve_early_stopping_settings(
+            train_cfg,
+            has_eval_dataset=eval_dataset is not None,
+            save_steps=hf_push_every_steps,
+            eval_steps=eval_steps,
+        )
+        if early_stopping_settings is not None:
+            _enable_best_model_tracking(training_args)
             callbacks.append(
                 EarlyStoppingCallback(
-                    early_stopping_patience=int(patience),
-                    early_stopping_threshold=min_delta,
+                    early_stopping_patience=early_stopping_settings["patience"],
+                    early_stopping_threshold=early_stopping_settings["min_delta"],
                 )
             )
 
@@ -362,15 +451,32 @@ class SFTJob:
         metrics: Dict[str, Any] = {}
         if hasattr(train_result, "metrics") and isinstance(train_result.metrics, dict):
             metrics.update(train_result.metrics)
-        if hasattr(trainer, "state"):
+        trainer_state = getattr(trainer, "state", None)
+        if trainer_state is not None:
             metrics.setdefault(
-                "train_runtime", getattr(trainer.state, "train_runtime", None)
+                "train_runtime", getattr(trainer_state, "train_runtime", None)
             )
             metrics.setdefault(
-                "train_samples", getattr(trainer.state, "num_train_samples", None)
+                "train_samples", getattr(trainer_state, "num_train_samples", None)
             )
             metrics.setdefault(
-                "global_step", getattr(trainer.state, "global_step", None)
+                "global_step", getattr(trainer_state, "global_step", None)
+            )
+
+        stop_requested = bool(getattr(manual_stop_callback, "stop_requested", False))
+        stop_step = getattr(manual_stop_callback, "stop_step", None)
+        if early_stopping_settings is not None and not stop_requested and push_repo_id:
+            _push_final_adapter_snapshot(
+                repo_id=push_repo_id,
+                run_name=run_name,
+                model=getattr(trainer, "model", model),
+                tokenizer=tokenizer,
+                step=int(getattr(trainer_state, "global_step", 0) or 0),
+                best_checkpoint=getattr(
+                    trainer_state,
+                    "best_model_checkpoint",
+                    None,
+                ),
             )
 
         # Best-effort capture of the active WandB run URL, if any.
@@ -384,8 +490,6 @@ class SFTJob:
         except Exception:  # noqa: BLE001
             wandb_url = None
 
-        stop_requested = bool(getattr(manual_stop_callback, "stop_requested", False))
-        stop_step = getattr(manual_stop_callback, "stop_step", None)
         if stop_requested:
             try:
                 hf_revision = (

@@ -7,7 +7,7 @@ The core idea is simple:
 - put one environment in one Python file
 - give that environment explicit named runs
 - let `experiment.py` only orchestrate those runs
-- let Tenyson handle cloud execution, telemetry, adapter lineage, stop/resume/abort, and a fixed report
+- let Tenyson handle cloud execution, telemetry, adapter lineage, stop/continue/resume/abort, and a fixed report
 
 The current repo is laid out with the actual Python project inside [`tenyson/`](./tenyson). That is the directory you should think of as the package root.
 
@@ -70,6 +70,6 @@ The current Wordle flow is the reference environment for the library shape. It e
 - thin experiment orchestration
 - W&B-backed telemetry
 - fixed report generation
-- stop, resume, restart, and abort control flow
+- stop, continue, resume, restart, and abort control flow
 
 If you want the full package-level details, start in [`tenyson/README.md`](./tenyson/README.md).

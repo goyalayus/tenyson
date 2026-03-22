@@ -21,7 +21,7 @@ The visible starter templates live in [`config_templates/`](./config_templates),
 - W&B-first telemetry, with SQL still available as a fallback
 - Fixed markdown reporting with W&B project/run links
 - Hugging Face adapter pushes for SFT and RL runs
-- Stop, resume, restart, and abort control flow across experiments
+- Stop, continue, resume, restart, and abort control flow across experiments
 
 ## The Shape Of An Environment
 
@@ -175,7 +175,22 @@ SFT and RL use Hub-managed checkpoints.
 - resume uses `training.resume_from_checkpoint: "repo_id:revision"`
 - the revision is resolved to an immutable Hugging Face commit SHA before restore
 
-That gives you a clean lineage story for stop, resume, and restart flows.
+That gives you a clean lineage story for stop, continue, resume, and restart flows.
+
+If you manually stop an SFT or RL run, the pipeline can now do four different things:
+
+- `continue`: accept the stopped checkpoint and move on to the next stage
+- `resume`: restart from the latest saved HF checkpoint
+- `restart`: run the stage again from scratch
+- `abort`: stop the experiment
+
+`continue` is only offered when the stopped run already has a concrete Hugging Face repo + revision, so later stages can still seed from an exact adapter lineage.
+
+For SFT early stopping specifically, Tenyson now treats it as a strict best-model flow instead of a soft hint:
+
+- early stopping requires an eval dataset
+- `training.eval_steps` must match `training.hf_push_every_steps`
+- the best checkpoint is re-synced to HF at the end so downstream stages use the actual best adapter revision
 
 ## Runner CLI
 
