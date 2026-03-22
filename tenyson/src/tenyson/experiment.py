@@ -97,9 +97,9 @@ class ConfigTemplates:
         cls,
         config_dir: str | Path,
         *,
-        sft: str = "sft_config.yaml",
-        rl: str = "rl_config.yaml",
-        eval: str = "eval_config.yaml",
+        sft: str = "sft.yaml",
+        rl: str = "rl.yaml",
+        eval: str = "eval.yaml",
     ) -> "ConfigTemplates":
         config_root = Path(config_dir)
         return cls.from_paths(

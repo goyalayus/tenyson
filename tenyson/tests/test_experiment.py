@@ -92,15 +92,15 @@ class ExperimentSessionTests(unittest.TestCase):
     def test_config_templates_from_directory_uses_default_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
-            (config_dir / "sft_config.yaml").write_text(
+            (config_dir / "sft.yaml").write_text(
                 "training:\n  epochs: 1\n",
                 encoding="utf-8",
             )
-            (config_dir / "rl_config.yaml").write_text(
+            (config_dir / "rl.yaml").write_text(
                 "training:\n  epochs: 2\n",
                 encoding="utf-8",
             )
-            (config_dir / "eval_config.yaml").write_text(
+            (config_dir / "eval.yaml").write_text(
                 "evaluation:\n  batch_size: 4\n",
                 encoding="utf-8",
             )

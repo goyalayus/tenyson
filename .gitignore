@@ -8,5 +8,11 @@ tenyson/.tenyson_runs/
 .tenyson_modal_configs/
 tenyson/.tenyson_modal_configs/
 
+# Local experiment artifacts
+experiments/
+wandb/
+history_len
+tenyson/examples/wordle/final_report.md
+
 # Local run environment secrets
 tenyson/examples/wordle/run.env

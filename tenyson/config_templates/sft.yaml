@@ -37,4 +37,3 @@ training:
 
 telemetry:
   backend: "wandb"
-  experiment_id: "wordle_research_2026_03_07"

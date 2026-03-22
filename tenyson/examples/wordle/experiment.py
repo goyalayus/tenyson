@@ -163,7 +163,7 @@ def main() -> None:
 
     session = ExperimentSession(
         task=task,
-        templates=ConfigTemplates.from_directory(base_dir / "configs"),
+        templates=ConfigTemplates.from_directory(_REPO_ROOT / "config_templates"),
         cloud_factory=ModalManager.factory_from_env(
             auto_terminate=True,
             gpu=modal_gpu,
