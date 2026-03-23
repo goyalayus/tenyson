@@ -9,6 +9,7 @@ from unittest.mock import patch
 from tenyson.cloud.manager import CloudManager
 from tenyson.cloud.modal import (
     ModalManager,
+    _build_clone_repo_command,
     _normalize_git_clone_url,
     _run_subprocess_with_streaming_logs,
 )
@@ -64,6 +65,11 @@ class ModalTaskSpecTests(unittest.TestCase):
 
 
 class ModalGitSourceTests(unittest.TestCase):
+    def test_clone_repo_command_is_single_line_shell_safe(self) -> None:
+        command = _build_clone_repo_command()
+        self.assertIn("python3 -c", command)
+        self.assertNotIn("\n", command)
+
     def test_normalize_git_clone_url_converts_github_ssh(self) -> None:
         clone_url = _normalize_git_clone_url("git@github.com:goyalayus/tenyson.git")
         self.assertEqual(clone_url, "https://github.com/goyalayus/tenyson.git")

@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import modal
 
-from tenyson.cloud.modal import ModalManager
+from tenyson.cloud.modal import ModalManager, _build_clone_repo_command
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
 
 
@@ -36,40 +36,13 @@ _RUNTIME_SECRETS = (
     [modal.Secret.from_dict(_RUNTIME_SECRET_ENV)] if _RUNTIME_SECRET_ENV else []
 )
 
-_CLONE_REPO_COMMAND = """
-python3 - <<'PY'
-import os
-import shutil
-import subprocess
-from pathlib import Path
-from urllib.parse import quote
-
-repo_url = os.environ["TENYSON_GIT_REPO_URL"]
-repo_commit = os.environ["TENYSON_GIT_COMMIT"]
-git_token = str(os.environ.get("TENYSON_GIT_AUTH_TOKEN") or "").strip()
-if git_token and repo_url.startswith(("https://", "http://")):
-    scheme, rest = repo_url.split("://", 1)
-    repo_url = f"{scheme}://x-access-token:{quote(git_token, safe='')}@{rest}"
-
-workspace = Path("/workspace")
-if workspace.exists():
-    shutil.rmtree(workspace)
-
-subprocess.run(["git", "clone", repo_url, str(workspace)], check=True)
-subprocess.run(
-    ["git", "-C", str(workspace), "checkout", "--detach", repo_commit],
-    check=True,
-)
-PY
-""".strip()
-
 app = modal.App("tenyson-packed-attention-probe")
 image = (
     modal.Image.debian_slim(python_version=_PYTHON_VERSION)
     .run_commands("apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*")
     .run_commands(runtime_pip_install_command())
     .run_commands(
-        _CLONE_REPO_COMMAND,
+        _build_clone_repo_command(),
         env={
             "TENYSON_GIT_REPO_URL": _GIT_SOURCE.clone_url,
             "TENYSON_GIT_COMMIT": _GIT_SOURCE.commit,

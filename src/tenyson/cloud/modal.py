@@ -3,6 +3,7 @@ import inspect
 import os
 from collections import deque
 from dataclasses import dataclass
+import shlex
 import subprocess
 import sys
 import threading
@@ -91,6 +92,34 @@ def _run_subprocess_with_streaming_logs(
 class GitRepoSource:
     clone_url: str
     commit: str
+
+
+def _build_clone_repo_command() -> str:
+    script = """
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from urllib.parse import quote
+
+repo_url = os.environ["TENYSON_GIT_REPO_URL"]
+repo_commit = os.environ["TENYSON_GIT_COMMIT"]
+git_token = str(os.environ.get("TENYSON_GIT_AUTH_TOKEN") or "").strip()
+if git_token and repo_url.startswith(("https://", "http://")):
+    scheme, rest = repo_url.split("://", 1)
+    repo_url = f"{scheme}://x-access-token:{quote(git_token, safe='')}@{rest}"
+
+workspace = Path("/workspace")
+if workspace.exists():
+    shutil.rmtree(workspace)
+
+subprocess.run(["git", "clone", repo_url, str(workspace)], check=True)
+subprocess.run(
+    ["git", "-C", str(workspace), "checkout", "--detach", repo_commit],
+    check=True,
+)
+""".strip()
+    return "python3 -c " + shlex.quote(f"exec({script!r})")
 
 
 def _normalize_git_clone_url(raw_url: str) -> str:
@@ -275,39 +304,12 @@ class ModalManager(BaseCloudManager):
             [modal.Secret.from_dict(build_secret_env)] if build_secret_env else None
         )
 
-        clone_repo_command = """
-python3 - <<'PY'
-import os
-import shutil
-import subprocess
-from pathlib import Path
-from urllib.parse import quote
-
-repo_url = os.environ["TENYSON_GIT_REPO_URL"]
-repo_commit = os.environ["TENYSON_GIT_COMMIT"]
-git_token = str(os.environ.get("TENYSON_GIT_AUTH_TOKEN") or "").strip()
-if git_token and repo_url.startswith(("https://", "http://")):
-    scheme, rest = repo_url.split("://", 1)
-    repo_url = f"{scheme}://x-access-token:{quote(git_token, safe='')}@{rest}"
-
-workspace = Path("/workspace")
-if workspace.exists():
-    shutil.rmtree(workspace)
-
-subprocess.run(["git", "clone", repo_url, str(workspace)], check=True)
-subprocess.run(
-    ["git", "-C", str(workspace), "checkout", "--detach", repo_commit],
-    check=True,
-)
-PY
-""".strip()
-
         image = (
             modal.Image.debian_slim(python_version=local_python_version)
             .run_commands("apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*")
             .run_commands(runtime_pip_install_command())
             .run_commands(
-                clone_repo_command,
+                _build_clone_repo_command(),
                 env={
                     "TENYSON_GIT_REPO_URL": git_source.clone_url,
                     "TENYSON_GIT_COMMIT": git_source.commit,
