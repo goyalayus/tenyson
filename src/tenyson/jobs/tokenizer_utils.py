@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 
@@ -10,20 +9,6 @@ _FALLBACK_EOS_TOKENS = (
     "</s>",
     "<|eot_id|>",
 )
-
-_GENERATION_BLOCK_RE = re.compile(r"\{%-?\s*generation\s*-?%\}")
-_ENDGENERATION_BLOCK_RE = re.compile(r"\{%-?\s*endgeneration\s*-?%\}")
-
-_QWEN_ASSISTANT_MASK_CHAT_TEMPLATE = """
-{% for message in messages %}
-{% if message.role == 'assistant' %}
-{{ '<|im_start|>assistant\n' }}{% generation %}{{ message.content }}{% endgeneration %}{{ '<|im_end|>\n' }}
-{% else %}
-{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}
-{% endif %}
-{% endfor %}
-{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}
-""".strip()
 
 
 def _is_valid_token(tokenizer: Any, token: Any) -> bool:
@@ -73,28 +58,6 @@ def _resolve_eos_token(tokenizer: Any) -> str:
         "Could not resolve a valid EOS token for tokenizer "
         f"{tokenizer.__class__.__name__}."
     )
-
-
-def _chat_template_supports_assistant_masks(template: Any) -> bool:
-    if not isinstance(template, str) or not template:
-        return False
-    return bool(_GENERATION_BLOCK_RE.search(template)) and bool(
-        _ENDGENERATION_BLOCK_RE.search(template)
-    )
-
-
-def ensure_assistant_mask_chat_template(tokenizer: Any) -> Any:
-    template = getattr(tokenizer, "chat_template", None)
-    if _chat_template_supports_assistant_masks(template):
-        return tokenizer
-
-    tokenizer.chat_template = _QWEN_ASSISTANT_MASK_CHAT_TEMPLATE
-    print(
-        "[Tokenizer] Installed assistant-mask-compatible Qwen chat template "
-        "for conversational SFT.",
-        flush=True,
-    )
-    return tokenizer
 
 
 def normalize_tokenizer_special_tokens(

@@ -10,6 +10,8 @@ from tenyson.core.plugin import TaskPlugin
 
 
 DatasetFactory = Callable[[Dict[str, Any], Any], Optional[Dataset]]
+FormattingFactory = Callable[[Dict[str, Any], Any], Optional[Callable[..., Any]]]
+CollatorFactory = Callable[[Dict[str, Any], Any], Optional[Any]]
 RewardFactory = Callable[[Dict[str, Any], Any], List[Callable[..., Any]]]
 MetricFactory = Callable[
     [List[str], List[str], Dataset, Dict[str, Any], Any],
@@ -24,6 +26,8 @@ _ENV_RUN_NAME_KEY = "environment_run"
 class DatasetHooks:
     primary: Optional[DatasetFactory] = None
     evaluation: Optional[DatasetFactory] = None
+    formatting: Optional[FormattingFactory] = None
+    collator: Optional[CollatorFactory] = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +220,18 @@ class EnvironmentTaskAdapter(TaskPlugin):
         if spec.datasets.evaluation is None:
             return None
         return spec.datasets.evaluation(config, tokenizer)
+
+    def get_sft_formatting_func(self, config: Dict[str, Any], tokenizer: Any):
+        spec = self._runtime_spec("sft", config)
+        if spec.datasets.formatting is None:
+            return None
+        return spec.datasets.formatting(config, tokenizer)
+
+    def get_sft_data_collator(self, config: Dict[str, Any], tokenizer: Any) -> Optional[Any]:
+        spec = self._runtime_spec("sft", config)
+        if spec.datasets.collator is None:
+            return None
+        return spec.datasets.collator(config, tokenizer)
 
     def get_rl_dataset(self, config: Dict[str, Any]) -> Dataset:
         spec = self._runtime_spec("rl", config)

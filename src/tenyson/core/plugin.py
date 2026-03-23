@@ -35,6 +35,12 @@ class TaskPlugin(ABC):
     def get_sft_eval_dataset(self, config: Dict[str, Any], tokenizer: Any) -> Optional[Dataset]:
         return None
 
+    def get_sft_formatting_func(self, config: Dict[str, Any], tokenizer: Any) -> Optional[Callable]:
+        return None
+
+    def get_sft_data_collator(self, config: Dict[str, Any], tokenizer: Any) -> Optional[Any]:
+        return None
+
     @abstractmethod
     def get_rl_dataset(self, config: Dict[str, Any]) -> Dataset:
         raise NotImplementedError

@@ -15,23 +15,7 @@ from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.reporting_utils import normalize_report_to
 from tenyson.jobs.result import JobResult
-from tenyson.jobs.sft_dataset import (
-    build_builtin_sft_formatting_func,
-    normalize_builtin_sft_dataset,
-    supports_builtin_sft_schema,
-)
-from tenyson.jobs.tokenizer_utils import (
-    ensure_assistant_mask_chat_template,
-    normalize_tokenizer_special_tokens,
-)
-
-_PACKING_FLASH_ATTENTION_IMPLEMENTATIONS = {
-    "flash_attention_2",
-    "flash_attention_3",
-    "kernels-community/flash-attn2",
-    "kernels-community/flash-attn3",
-    "kernels-community/vllm-flash-attn3",
-}
+from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
 
 
 def _resolve_eval_steps(
@@ -97,239 +81,17 @@ def _enable_best_model_tracking(training_args: Any) -> None:
     training_args.greater_is_better = False
 
 
-def _is_conversational_message_list(value: Any) -> bool:
-    if not isinstance(value, list) or not value:
-        return False
-    first = value[0]
-    return isinstance(first, dict) and "role" in first and "content" in first
-
-
-def _is_pretokenized_sft_row(row: Any) -> bool:
-    return isinstance(row, dict) and "input_ids" in row
-
-
-def _resolve_assistant_only_strategy(
-    train_cfg: Dict[str, Any],
-    *,
-    train_sample: Any,
-) -> Dict[str, Any]:
-    loss_on_assistant_only = bool(train_cfg.get("loss_on_assistant_only", False))
-    response_template = str(train_cfg.get("response_template") or "").strip()
-    packing_enabled = bool(train_cfg.get("packing", False))
-    supports_builtin_schema = supports_builtin_sft_schema(train_sample)
-
-    if not loss_on_assistant_only:
-        return {
-            "use_native_assistant_only_loss": False,
-            "use_manual_assistant_masks": False,
-            "use_response_template_collator": False,
-        }
-
-    if supports_builtin_schema:
-        return {
-            "use_native_assistant_only_loss": False,
-            "use_manual_assistant_masks": True,
-            "use_response_template_collator": False,
-        }
-
-    if response_template and not packing_enabled:
-        return {
-            "use_native_assistant_only_loss": False,
-            "use_manual_assistant_masks": False,
-            "use_response_template_collator": True,
-        }
-
-    raise ValueError(
-        "loss_on_assistant_only requires one of Tenyson's built-in SFT dataset "
-        "schemas (`messages`, conversational `prompt`/`completion`, string "
-        "`prompt`/`answer`, string `prompt`/`completion`, string "
-        "`question`/`answer`, or `instruction`/`output` with optional `input`). "
-        "Legacy preformatted text runs can still use training.response_template "
-        "when packing is disabled."
-    )
-
-
-def _resolve_sft_special_tokens_kwargs(
-    tokenizer: Any,
-    *,
-    accepted_fields: set[str],
-) -> Dict[str, str]:
-    kwargs: Dict[str, str] = {}
-    eos_token = getattr(tokenizer, "eos_token", None)
-    pad_token = getattr(tokenizer, "pad_token", None)
-    if "eos_token" in accepted_fields and isinstance(eos_token, str) and eos_token:
-        kwargs["eos_token"] = eos_token
-    if "pad_token" in accepted_fields and isinstance(pad_token, str) and pad_token:
-        kwargs["pad_token"] = pad_token
-    return kwargs
-
-
-def _resolve_requested_attn_implementation(
-    train_cfg: Dict[str, Any],
-    model_cfg: Dict[str, Any],
-) -> str | None:
-    configured = str(model_cfg.get("attn_implementation") or "").strip()
-    if configured:
-        return configured
-    if bool(train_cfg.get("packing", False)):
-        return "flash_attention_2"
-    return None
-
-
-def _validate_packing_attention_implementation(
-    train_cfg: Dict[str, Any],
-    model: Any,
-) -> None:
-    if not bool(train_cfg.get("packing", False)):
+def _validate_completion_only_training_settings(train_cfg: Dict[str, Any]) -> None:
+    if not train_cfg.get("loss_on_assistant_only", False):
         return
-
-    actual = str(getattr(model.config, "_attn_implementation", None) or "").strip()
-    if actual in _PACKING_FLASH_ATTENTION_IMPLEMENTATIONS:
+    if not train_cfg.get("response_template"):
         return
-
-    supported = ", ".join(sorted(_PACKING_FLASH_ATTENTION_IMPLEMENTATIONS))
-    raise RuntimeError(
-        "Packed SFT requires a flash-attention backend that safely preserves "
-        f"packed-sequence boundaries. Got attn_implementation={actual!r}. "
-        "TRL warns that other attention implementations can cross-contaminate "
-        f"packed samples. Use one of: {supported}."
-    )
-
-
-def _fallback_sft_formatting_func(_example: Dict[str, Any]) -> list[str]:
-    # Unsloth requires a formatting_func in some conversational SFT paths even
-    # when the dataset is already tokenized and dataset preparation is skipped.
-    return [""]
-
-
-def _extract_conversational_sft_messages(example: Dict[str, Any]) -> list[Dict[str, Any]]:
-    messages = example.get("messages")
-    if _is_conversational_message_list(messages):
-        return list(messages)
-
-    prompt = example.get("prompt")
-    completion = example.get("completion")
-    merged_messages: list[Dict[str, Any]] = []
-    if _is_conversational_message_list(prompt):
-        merged_messages.extend(list(prompt))
-    if _is_conversational_message_list(completion):
-        merged_messages.extend(list(completion))
-    if merged_messages:
-        return merged_messages
-
+    if not train_cfg.get("packing", False):
+        return
     raise ValueError(
-        "Packed assistant-only SFT requires conversational rows exposed through "
-        "`messages` or conversational `prompt`/`completion` fields."
+        "loss_on_assistant_only is not supported with packing=True in Tenyson's "
+        "built-in response-template masking path. Set training.packing to false."
     )
-
-
-def _tokenize_assistant_only_conversation(
-    example: Dict[str, Any],
-    *,
-    tokenizer: Any,
-) -> Dict[str, Any]:
-    messages = _extract_conversational_sft_messages(example)
-    processed = tokenizer.apply_chat_template(
-        messages,
-        tools=example.get("tools"),
-        tokenize=True,
-        return_dict=True,
-        add_generation_prompt=False,
-        return_assistant_tokens_mask=True,
-        **example.get("chat_template_kwargs", {}),
-    )
-
-    input_ids = processed.get("input_ids")
-    assistant_masks = processed.get("assistant_masks")
-    if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
-        input_ids = input_ids[0]
-    if (
-        isinstance(assistant_masks, list)
-        and assistant_masks
-        and isinstance(assistant_masks[0], list)
-    ):
-        assistant_masks = assistant_masks[0]
-
-    if not isinstance(input_ids, list) or not input_ids:
-        raise RuntimeError("Packed assistant-only SFT produced no input_ids.")
-    if not isinstance(assistant_masks, list):
-        raise RuntimeError(
-            "Packed assistant-only SFT expected assistant_masks from the tokenizer, "
-            "but none were returned. Check the chat template."
-        )
-    if 1 not in assistant_masks:
-        raise RuntimeError(
-            "Packed assistant-only SFT found a conversational example with no "
-            "assistant-supervised tokens."
-        )
-
-    return {
-        "input_ids": list(input_ids),
-        "assistant_masks": list(assistant_masks),
-    }
-
-
-def _prepare_manual_assistant_only_dataset(
-    dataset: Any,
-    *,
-    tokenizer: Any,
-    max_length: int,
-    packing: bool,
-    packing_strategy: str,
-    shuffle: bool,
-    seed: int,
-    dataset_name: str,
-) -> Any:
-    from datasets import Dataset, IterableDataset
-    from trl.data_utils import pack_dataset
-    from trl.trainer.sft_trainer import truncate_dataset
-
-    if isinstance(dataset, IterableDataset):
-        raise ValueError(
-            "Packed assistant-only SFT currently requires a map-style Hugging Face "
-            "Dataset, not an IterableDataset."
-        )
-
-    column_names = list(getattr(dataset, "column_names", []) or [])
-    map_kwargs: Dict[str, Any] = {}
-    if isinstance(dataset, Dataset):
-        map_kwargs["desc"] = (
-            f"Tokenizing {dataset_name} dataset for manual assistant-only SFT"
-        )
-
-    prepared = dataset.map(
-        lambda row: _tokenize_assistant_only_conversation(row, tokenizer=tokenizer),
-        remove_columns=column_names or None,
-        **map_kwargs,
-    )
-
-    if shuffle:
-        prepared = prepared.shuffle(seed=seed)
-
-    if packing:
-        pack_kwargs: Dict[str, Any] = {}
-        if isinstance(prepared, Dataset):
-            pack_kwargs["desc"] = (
-                f"Packing {dataset_name} dataset for manual assistant-only SFT"
-            )
-        prepared = pack_dataset(
-            prepared.select_columns(["input_ids", "assistant_masks"]),
-            max_length,
-            packing_strategy,
-            pack_kwargs,
-        )
-    else:
-        truncate_kwargs: Dict[str, Any] = {}
-        if isinstance(prepared, Dataset):
-            truncate_kwargs["desc"] = (
-                f"Truncating {dataset_name} dataset for manual assistant-only SFT"
-            )
-        prepared = truncate_dataset(prepared, max_length, truncate_kwargs)
-
-    if shuffle:
-        prepared = prepared.shuffle(seed=seed)
-
-    return prepared
 
 
 def _push_final_adapter_snapshot(
@@ -386,7 +148,7 @@ class SFTJob:
         seq_len = model_cfg.get("max_seq_length", 2048)
 
         print(f"[SFTJob] Loading model {model_name}...", flush=True)
-        load_kwargs: Dict[str, Any] = dict(
+        model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
             max_seq_length=seq_len,
             load_in_4bit=model_cfg.get("load_in_4bit", True),
@@ -394,17 +156,8 @@ class SFTJob:
             fast_inference=model_cfg.get("fast_inference", False),
             trust_remote_code=True,
         )
-        attn_implementation = _resolve_requested_attn_implementation(
-            train_cfg,
-            model_cfg,
-        )
-        if attn_implementation:
-            load_kwargs["attn_implementation"] = attn_implementation
-
-        model, tokenizer = FastLanguageModel.from_pretrained(**load_kwargs)
 
         normalize_tokenizer_special_tokens(tokenizer)
-        _validate_packing_attention_implementation(train_cfg, model)
 
         print("[SFTJob] Applying LoRA...", flush=True)
         lora_cfg = self.config.get("lora", {})
@@ -450,6 +203,7 @@ class SFTJob:
         attempt_token = str(
             self.config.get("telemetry", {}).get("attempt_token") or ""
         ).strip() or None
+        _validate_completion_only_training_settings(train_cfg)
         backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=backend_ref)
         ensure_wandb_telemetry_run(
@@ -530,104 +284,11 @@ class SFTJob:
 
         print(f"[SFTJob] Train size: {len(train_dataset)}", flush=True)
 
-        train_sample = train_dataset[0]
-        if (
-            not _is_pretokenized_sft_row(train_sample)
-            and supports_builtin_sft_schema(train_sample)
-        ):
-            train_dataset = normalize_builtin_sft_dataset(
-                train_dataset,
-                config=self.config,
-                dataset_name="train",
-            )
-            if (
-                eval_dataset is not None
-                and not _is_pretokenized_sft_row(eval_dataset[0])
-                and supports_builtin_sft_schema(eval_dataset[0])
-            ):
-                eval_dataset = normalize_builtin_sft_dataset(
-                    eval_dataset,
-                    config=self.config,
-                    dataset_name="eval",
-                )
-            print(
-                "[SFTJob] Normalized supported SFT rows into canonical chat messages.",
-                flush=True,
-            )
-            train_sample = train_dataset[0]
-        formatting_func = None
-        assistant_only_strategy = _resolve_assistant_only_strategy(
-            train_cfg,
-            train_sample=train_sample,
-        )
-        use_manual_assistant_masks = assistant_only_strategy[
-            "use_manual_assistant_masks"
-        ]
-        if (
-            formatting_func is None
-            and not use_manual_assistant_masks
-            and supports_builtin_sft_schema(train_sample)
-        ):
-            formatting_func = build_builtin_sft_formatting_func(tokenizer)
-        if use_manual_assistant_masks:
-            ensure_assistant_mask_chat_template(tokenizer)
-            formatting_func = formatting_func or _fallback_sft_formatting_func
-            packing_strategy = (
-                str(train_cfg.get("packing_strategy", "bfd")).strip() or "bfd"
-            )
-            seed = int(train_cfg.get("seed", 3407))
-            eval_packing = train_cfg.get("eval_packing")
-            if eval_packing is None:
-                eval_packing = bool(train_cfg.get("packing", False))
-            else:
-                eval_packing = bool(eval_packing)
-
-            train_dataset = _prepare_manual_assistant_only_dataset(
-                train_dataset,
-                tokenizer=tokenizer,
-                max_length=seq_len,
-                packing=bool(train_cfg.get("packing", False)),
-                packing_strategy=packing_strategy,
-                shuffle=True,
-                seed=seed,
-                dataset_name="train",
-            )
-            if eval_dataset is not None:
-                eval_dataset = _prepare_manual_assistant_only_dataset(
-                    eval_dataset,
-                    tokenizer=tokenizer,
-                    max_length=seq_len,
-                    packing=eval_packing,
-                    packing_strategy=packing_strategy,
-                    shuffle=False,
-                    seed=seed,
-                    dataset_name="eval",
-                )
-            print(
-                "[SFTJob] Using manual assistant masks for packed conversational "
-                f"SFT. Prepared train rows: {len(train_dataset)}"
-                + (
-                    f", eval rows: {len(eval_dataset)}"
-                    if eval_dataset is not None
-                    else ""
-                ),
-                flush=True,
-            )
-        if assistant_only_strategy["use_native_assistant_only_loss"]:
-            ensure_assistant_mask_chat_template(tokenizer)
-            print(
-                "[SFTJob] Using TRL native assistant-only masking for "
-                "conversational SFT.",
-                flush=True,
-            )
+        formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
         report_to = normalize_report_to(
             train_cfg.get("report_to", "none"),
             telemetry_backend=telemetry_client.backend,
         )
-        manual_dataset_kwargs = train_cfg.get("dataset_kwargs")
-        if use_manual_assistant_masks:
-            manual_dataset_kwargs = dict(manual_dataset_kwargs or {})
-            manual_dataset_kwargs["skip_prepare_dataset"] = True
 
         cfg_kwargs: Dict[str, Any] = dict(
             output_dir=output_dir,
@@ -649,34 +310,14 @@ class SFTJob:
             report_to=report_to,
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
-            packing=(
-                False
-                if use_manual_assistant_masks
-                else train_cfg.get("packing", False)
-            ),
-            padding_free=bool(
-                use_manual_assistant_masks and bool(train_cfg.get("packing", False))
-            ),
-            assistant_only_loss=assistant_only_strategy[
-                "use_native_assistant_only_loss"
-            ],
+            packing=train_cfg.get("packing", False),
             dataset_text_field=(
                 train_cfg.get("dataset_text_field", "text")
-                if (
-                    not formatting_func
-                    and not _is_pretokenized_sft_row(train_dataset[0])
-                )
+                if not formatting_func
                 else None
             ),
-            dataset_kwargs=manual_dataset_kwargs,
         )
         accepted = set(inspect.signature(SFTConfig.__init__).parameters.keys())
-        cfg_kwargs.update(
-            _resolve_sft_special_tokens_kwargs(
-                tokenizer,
-                accepted_fields=accepted,
-            )
-        )
         required_hub_fields = {
             "save_strategy",
             "save_steps",
@@ -689,14 +330,6 @@ class SFTJob:
             raise RuntimeError(
                 "Installed SFTConfig does not expose required Hub checkpoint args "
                 f"for full-state push: {sorted(missing_hub_fields)}. "
-                "Upgrade TRL/Transformers runtime on the worker."
-            )
-        if (
-            assistant_only_strategy["use_native_assistant_only_loss"]
-            and "assistant_only_loss" not in accepted
-        ):
-            raise RuntimeError(
-                "Installed SFTConfig does not expose assistant_only_loss. "
                 "Upgrade TRL/Transformers runtime on the worker."
             )
         if "save_only_model" in accepted:
@@ -730,8 +363,8 @@ class SFTJob:
         if formatting_func is not None:
             trainer_kwargs["formatting_func"] = formatting_func
 
-        collator = None
-        if assistant_only_strategy["use_response_template_collator"]:
+        collator = self.task.get_sft_data_collator(self.config, tokenizer)
+        if collator is None:
             loss_on_assistant_only = train_cfg.get("loss_on_assistant_only", False)
             response_template = train_cfg.get("response_template") or ""
             if loss_on_assistant_only and response_template:
