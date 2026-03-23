@@ -104,6 +104,10 @@ def run_probe() -> Dict[str, Any]:
     model.eval()
 
     raw = load_dataset(dataset_name, split="train[:2]")
+    raw_rows = [
+        {"messages": list(raw[0]["messages"])},
+        {"messages": list(raw[1]["messages"])},
+    ]
 
     def tokenize_messages(row: Dict[str, Any]) -> Dict[str, Any]:
         processed = tokenizer.apply_chat_template(
@@ -118,8 +122,8 @@ def run_probe() -> Dict[str, Any]:
             "assistant_masks": list(processed["assistant_masks"]),
         }
 
-    ex1 = tokenize_messages(raw[0])
-    ex2 = tokenize_messages(raw[1])
+    ex1 = tokenize_messages(raw_rows[0])
+    ex2 = tokenize_messages(raw_rows[1])
 
     replacement_tokens = tokenizer.encode(" the", add_special_tokens=False)
     replacement_id = (
@@ -168,14 +172,22 @@ def run_probe() -> Dict[str, Any]:
         prepared_row = trainer.train_dataset[0]
         return batch, prepared_row
 
-    batch_a, prepared_a = build_batch([ex1, ex2])
-    batch_b, prepared_b = build_batch([ex1_mut, ex2])
+    batch_a, prepared_a = build_batch(raw_rows)
+
+    batch_b: Dict[str, Any] = {}
+    for key, value in batch_a.items():
+        batch_b[key] = value.clone() if hasattr(value, "clone") else value
 
     def to_device(batch: Dict[str, Any]) -> Dict[str, Any]:
         moved: Dict[str, Any] = {}
         for key, value in batch.items():
             moved[key] = value.to(model.device) if hasattr(value, "to") else value
         return moved
+
+    input_ids_a = batch_a["input_ids"][0].tolist()
+    ex1_start = _find_subsequence(input_ids_a, ex1["input_ids"])
+    ex2_start = _find_subsequence(input_ids_a, ex2["input_ids"])
+    batch_b["input_ids"][0, ex1_start : ex1_start + len(ex1["input_ids"])] = replacement_id
 
     with torch.inference_mode():
         moved_a = to_device(batch_a)
@@ -191,49 +203,34 @@ def run_probe() -> Dict[str, Any]:
             use_cache=False,
         )
 
-    input_ids_a = batch_a["input_ids"][0].tolist()
-    input_ids_b = batch_b["input_ids"][0].tolist()
-    ex2_start_a = _find_subsequence(input_ids_a, ex2["input_ids"])
-    ex2_start_b = _find_subsequence(input_ids_b, ex2["input_ids"])
     ex2_len = len(ex2["input_ids"])
 
-    logits_a = outputs_a.logits[0, ex2_start_a : ex2_start_a + ex2_len].float().cpu()
-    logits_b = outputs_b.logits[0, ex2_start_b : ex2_start_b + ex2_len].float().cpu()
+    logits_a = outputs_a.logits[0, ex2_start : ex2_start + ex2_len].float().cpu()
+    logits_b = outputs_b.logits[0, ex2_start : ex2_start + ex2_len].float().cpu()
     logit_diff = (logits_a - logits_b).abs()
 
     assistant_mask_a = list(prepared_a["assistant_masks"])
     supervised_mask_a = [
         0 if token == -100 else 1 for token in batch_a["labels"][0].tolist()
     ]
-    assistant_mask_b = list(prepared_b["assistant_masks"])
-    supervised_mask_b = [
-        0 if token == -100 else 1 for token in batch_b["labels"][0].tolist()
-    ]
 
     result = {
         "model_name": model_name,
         "attn_implementation": getattr(model.config, "_attn_implementation", None),
         "batch_a_keys": sorted(batch_a.keys()),
-        "batch_b_keys": sorted(batch_b.keys()),
-        "prepared_seq_lengths_a": list(prepared_a["seq_lengths"]),
-        "prepared_seq_lengths_b": list(prepared_b["seq_lengths"]),
+        "prepared_seq_lengths": list(prepared_a["seq_lengths"]),
+        "example1_start": int(ex1_start),
         "assistant_token_count_a": int(sum(assistant_mask_a)),
         "supervised_label_count_a": int(sum(supervised_mask_a)),
         "assistant_mask_matches_labels_a": assistant_mask_a == supervised_mask_a,
-        "assistant_token_count_b": int(sum(assistant_mask_b)),
-        "supervised_label_count_b": int(sum(supervised_mask_b)),
-        "assistant_mask_matches_labels_b": assistant_mask_b == supervised_mask_b,
-        "ex2_start_a": int(ex2_start_a),
-        "ex2_start_b": int(ex2_start_b),
-        "position_id_at_ex2_start_a": int(batch_a["position_ids"][0, ex2_start_a].item()),
-        "position_id_at_ex2_start_b": int(batch_b["position_ids"][0, ex2_start_b].item()),
+        "batch_b_keys": sorted(batch_b.keys()),
+        "ex2_start": int(ex2_start),
+        "position_id_at_ex2_start": int(batch_a["position_ids"][0, ex2_start].item()),
+        "example1_mutation_token_id": int(replacement_id),
         "max_abs_logit_diff_on_example2": float(logit_diff.max().item()),
         "mean_abs_logit_diff_on_example2": float(logit_diff.mean().item()),
     }
-    result["assistant_only_loss_verified"] = bool(
-        result["assistant_mask_matches_labels_a"]
-        and result["assistant_mask_matches_labels_b"]
-    )
+    result["assistant_only_loss_verified"] = bool(result["assistant_mask_matches_labels_a"])
     result["attention_isolated_for_example2"] = bool(
         result["max_abs_logit_diff_on_example2"] < 1e-5
     )
