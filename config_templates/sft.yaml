@@ -32,7 +32,8 @@ training:
   eval_steps: 20
   save_total_limit: 1
   optim: "adamw_8bit"
-  # If your run enables loss_on_assistant_only with a response_template, do not set this to true.
+  # Response-template masking does not support packing. Packed assistant-only SFT
+  # should use a conversational dataset so TRL can build native assistant masks.
   packing: false
   # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 20

@@ -3,8 +3,8 @@ import unittest
 
 from tenyson.jobs.sft import (
     _enable_best_model_tracking,
+    _resolve_assistant_only_strategy,
     _push_final_adapter_snapshot,
-    _validate_completion_only_training_settings,
     _resolve_early_stopping_settings,
 )
 
@@ -88,24 +88,77 @@ class SFTJobHelperTests(unittest.TestCase):
         self.assertIn("checkpoint-40", model.calls[0][1])
         self.assertIn("step=42", model.calls[0][1])
 
-    def test_validate_completion_only_training_settings_rejects_packing(self) -> None:
-        with self.assertRaisesRegex(ValueError, "packing=True"):
-            _validate_completion_only_training_settings(
-                {
-                    "loss_on_assistant_only": True,
-                    "response_template": "<|im_start|>assistant\n",
-                    "packing": True,
-                }
-            )
-
-    def test_validate_completion_only_training_settings_allows_non_packed(self) -> None:
-        _validate_completion_only_training_settings(
+    def test_assistant_only_strategy_uses_response_template_collator_for_text_runs(self) -> None:
+        strategy = _resolve_assistant_only_strategy(
             {
                 "loss_on_assistant_only": True,
                 "response_template": "<|im_start|>assistant\n",
                 "packing": False,
-            }
+            },
+            train_sample={"text": "plain formatted sample"},
+            formatting_func="formatter",
+            task_collator=None,
         )
+
+        self.assertFalse(strategy["use_native_assistant_only_loss"])
+        self.assertTrue(strategy["use_response_template_collator"])
+        self.assertEqual(strategy["formatting_func"], "formatter")
+
+    def test_assistant_only_strategy_uses_native_masks_for_packed_conversations(self) -> None:
+        strategy = _resolve_assistant_only_strategy(
+            {
+                "loss_on_assistant_only": True,
+                "response_template": "<|im_start|>assistant\n",
+                "packing": True,
+            },
+            train_sample={
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "u"},
+                    {"role": "assistant", "content": "a"},
+                ]
+            },
+            formatting_func="formatter",
+            task_collator=None,
+        )
+
+        self.assertTrue(strategy["use_native_assistant_only_loss"])
+        self.assertFalse(strategy["use_response_template_collator"])
+        self.assertIsNone(strategy["formatting_func"])
+
+    def test_assistant_only_strategy_rejects_packed_non_conversational_runs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a conversational SFT dataset"):
+            _resolve_assistant_only_strategy(
+                {
+                    "loss_on_assistant_only": True,
+                    "response_template": "<|im_start|>assistant\n",
+                    "packing": True,
+                },
+                train_sample={"text": "plain formatted sample"},
+                formatting_func="formatter",
+                task_collator=None,
+            )
+
+    def test_assistant_only_strategy_allows_native_masks_without_response_template(self) -> None:
+        strategy = _resolve_assistant_only_strategy(
+            {
+                "loss_on_assistant_only": True,
+                "packing": False,
+            },
+            train_sample={
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "u"},
+                    {"role": "assistant", "content": "a"},
+                ]
+            },
+            formatting_func="formatter",
+            task_collator=None,
+        )
+
+        self.assertTrue(strategy["use_native_assistant_only_loss"])
+        self.assertFalse(strategy["use_response_template_collator"])
+        self.assertIsNone(strategy["formatting_func"])
 
 
 if __name__ == "__main__":

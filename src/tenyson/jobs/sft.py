@@ -15,7 +15,10 @@ from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.reporting_utils import normalize_report_to
 from tenyson.jobs.result import JobResult
-from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
+from tenyson.jobs.tokenizer_utils import (
+    ensure_assistant_mask_chat_template,
+    normalize_tokenizer_special_tokens,
+)
 
 
 def _resolve_eval_steps(
@@ -81,16 +84,85 @@ def _enable_best_model_tracking(training_args: Any) -> None:
     training_args.greater_is_better = False
 
 
-def _validate_completion_only_training_settings(train_cfg: Dict[str, Any]) -> None:
-    if not train_cfg.get("loss_on_assistant_only", False):
-        return
-    if not train_cfg.get("response_template"):
-        return
-    if not train_cfg.get("packing", False):
-        return
+def _is_conversational_message_list(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    first = value[0]
+    return isinstance(first, dict) and "role" in first and "content" in first
+
+
+def _is_conversational_dataset_row(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+
+    for key in ("messages", "prompt", "chosen", "rejected", "completion"):
+        if _is_conversational_message_list(row.get(key)):
+            return True
+    return False
+
+
+def _resolve_assistant_only_strategy(
+    train_cfg: Dict[str, Any],
+    *,
+    train_sample: Any,
+    formatting_func: Any,
+    task_collator: Any,
+) -> Dict[str, Any]:
+    loss_on_assistant_only = bool(train_cfg.get("loss_on_assistant_only", False))
+    response_template = str(train_cfg.get("response_template") or "").strip()
+    packing_enabled = bool(train_cfg.get("packing", False))
+    is_conversational = _is_conversational_dataset_row(train_sample)
+
+    if not loss_on_assistant_only:
+        return {
+            "use_native_assistant_only_loss": False,
+            "use_response_template_collator": False,
+            "formatting_func": formatting_func,
+        }
+
+    if packing_enabled:
+        if task_collator is not None:
+            raise ValueError(
+                "loss_on_assistant_only with packing=True is not supported when a "
+                "task-specific SFT data collator is installed. Use TRL's native "
+                "assistant-only masking on a conversational dataset instead."
+            )
+        if not is_conversational:
+            raise ValueError(
+                "loss_on_assistant_only with packing=True requires a conversational "
+                "SFT dataset so TRL can build assistant masks and packed document "
+                "boundaries safely."
+            )
+        return {
+            "use_native_assistant_only_loss": True,
+            "use_response_template_collator": False,
+            "formatting_func": None,
+        }
+
+    if task_collator is not None:
+        return {
+            "use_native_assistant_only_loss": False,
+            "use_response_template_collator": False,
+            "formatting_func": formatting_func,
+        }
+
+    if response_template:
+        return {
+            "use_native_assistant_only_loss": False,
+            "use_response_template_collator": True,
+            "formatting_func": formatting_func,
+        }
+
+    if is_conversational:
+        return {
+            "use_native_assistant_only_loss": True,
+            "use_response_template_collator": False,
+            "formatting_func": None,
+        }
+
     raise ValueError(
-        "loss_on_assistant_only is not supported with packing=True in Tenyson's "
-        "built-in response-template masking path. Set training.packing to false."
+        "loss_on_assistant_only requires either training.response_template or a "
+        "conversational SFT dataset that exposes assistant turns directly."
     )
 
 
@@ -203,7 +275,6 @@ class SFTJob:
         attempt_token = str(
             self.config.get("telemetry", {}).get("attempt_token") or ""
         ).strip() or None
-        _validate_completion_only_training_settings(train_cfg)
         backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=backend_ref)
         ensure_wandb_telemetry_run(
@@ -285,6 +356,21 @@ class SFTJob:
         print(f"[SFTJob] Train size: {len(train_dataset)}", flush=True)
 
         formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
+        task_collator = self.task.get_sft_data_collator(self.config, tokenizer)
+        assistant_only_strategy = _resolve_assistant_only_strategy(
+            train_cfg,
+            train_sample=train_dataset[0],
+            formatting_func=formatting_func,
+            task_collator=task_collator,
+        )
+        formatting_func = assistant_only_strategy["formatting_func"]
+        if assistant_only_strategy["use_native_assistant_only_loss"]:
+            ensure_assistant_mask_chat_template(tokenizer)
+            print(
+                "[SFTJob] Using TRL native assistant-only masking for "
+                "conversational SFT.",
+                flush=True,
+            )
         report_to = normalize_report_to(
             train_cfg.get("report_to", "none"),
             telemetry_backend=telemetry_client.backend,
@@ -311,6 +397,9 @@ class SFTJob:
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
             packing=train_cfg.get("packing", False),
+            assistant_only_loss=assistant_only_strategy[
+                "use_native_assistant_only_loss"
+            ],
             dataset_text_field=(
                 train_cfg.get("dataset_text_field", "text")
                 if not formatting_func
@@ -330,6 +419,14 @@ class SFTJob:
             raise RuntimeError(
                 "Installed SFTConfig does not expose required Hub checkpoint args "
                 f"for full-state push: {sorted(missing_hub_fields)}. "
+                "Upgrade TRL/Transformers runtime on the worker."
+            )
+        if (
+            assistant_only_strategy["use_native_assistant_only_loss"]
+            and "assistant_only_loss" not in accepted
+        ):
+            raise RuntimeError(
+                "Installed SFTConfig does not expose assistant_only_loss. "
                 "Upgrade TRL/Transformers runtime on the worker."
             )
         if "save_only_model" in accepted:
@@ -363,8 +460,8 @@ class SFTJob:
         if formatting_func is not None:
             trainer_kwargs["formatting_func"] = formatting_func
 
-        collator = self.task.get_sft_data_collator(self.config, tokenizer)
-        if collator is None:
+        collator = task_collator
+        if collator is None and assistant_only_strategy["use_response_template_collator"]:
             loss_on_assistant_only = train_cfg.get("loss_on_assistant_only", False)
             response_template = train_cfg.get("response_template") or ""
             if loss_on_assistant_only and response_template:
