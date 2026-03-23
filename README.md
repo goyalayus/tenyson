@@ -62,6 +62,7 @@ That file is not supposed to contain reward logic, dataset construction logic, o
 Jobs run through a cloud manager. The manager launches `python -m tenyson.runner` remotely, waits for the canonical run result in telemetry, and returns a `JobResult`.
 
 Local GPU execution is intentionally not the default path. Tenyson expects to run through a supported remote provider.
+Modal execution is git-backed: commit and push your code first, then the worker checks out that exact commit remotely.
 
 ```python
 from pathlib import Path
@@ -115,6 +116,7 @@ python3 examples/wordle/experiment.py
 The experiment entrypoint auto-loads `examples/wordle/.env` when present, auto-adds `src/` to `PYTHONPATH`, and can install missing controller-side dependencies on a fresh local checkout. Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable dependency bootstrap behavior.
 
 For a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in `examples/wordle/.env`.
+If your GitHub remote is private, also provide `TENYSON_GIT_AUTH_TOKEN` or `GITHUB_TOKEN` so Modal can clone the repo during image build.
 
 Useful environment variables:
 

@@ -3,6 +3,7 @@ import inspect
 import os
 from collections import deque
 from contextlib import nullcontext
+from dataclasses import dataclass
 import subprocess
 import sys
 import threading
@@ -13,7 +14,6 @@ from tenyson.cloud.rds_access import prepare_modal_rds_access
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core.run_name import resolve_required_run_name
-from tenyson.core.run_config import materialize_run_config
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
@@ -86,6 +86,42 @@ def _run_subprocess_with_streaming_logs(
     detail_lines = list(stderr_tail) or list(stdout_tail)
     details = "\n".join(detail_lines).strip()
     return returncode, details
+
+
+@dataclass(frozen=True)
+class GitRepoSource:
+    clone_url: str
+    commit: str
+
+
+def _normalize_git_clone_url(raw_url: str) -> str:
+    url = str(raw_url or "").strip()
+    if url.startswith("git@") and ":" in url:
+        user_host, repo_path = url.split(":", 1)
+        host = user_host.split("@", 1)[1]
+        return f"https://{host}/{repo_path}"
+    if url.startswith("ssh://git@"):
+        without_scheme = url[len("ssh://git@") :]
+        if "/" in without_scheme:
+            host, repo_path = without_scheme.split("/", 1)
+            return f"https://{host}/{repo_path}"
+    return url
+
+
+def _run_git_command(repo_root: str, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        details = stderr or stdout or f"exit code {result.returncode}"
+        raise RuntimeError(f"Git command failed ({' '.join(args)}): {details}")
+    return (result.stdout or "").strip()
 
 
 class ModalManager(BaseCloudManager):
@@ -194,6 +230,34 @@ class ModalManager(BaseCloudManager):
             pass
         return f"{module_path}:{class_name}"
 
+    def _resolve_git_source(self, repo_root: str) -> GitRepoSource:
+        remote_name = str(os.getenv("TENYSON_GIT_REMOTE", "origin")).strip() or "origin"
+        override_url = str(os.getenv("TENYSON_GIT_REPO_URL") or "").strip()
+        raw_url = override_url or _run_git_command(repo_root, "remote", "get-url", remote_name)
+        clone_url = _normalize_git_clone_url(raw_url)
+        if not clone_url.startswith(("https://", "http://")):
+            raise ValueError(
+                "Modal git-backed execution requires an HTTP(S) clone URL. "
+                "Set TENYSON_GIT_REPO_URL if your git remote uses an unsupported format."
+            )
+
+        tracked_status = _run_git_command(
+            repo_root,
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        )
+        if tracked_status:
+            raise RuntimeError(
+                "Modal execution is git-backed only. Commit tracked changes before launching "
+                "so the remote worker can run the exact pushed code."
+            )
+
+        commit = str(os.getenv("TENYSON_GIT_COMMIT") or "").strip() or _run_git_command(
+            repo_root, "rev-parse", "HEAD"
+        )
+        return GitRepoSource(clone_url=clone_url, commit=commit)
+
     def run(self, job: Any) -> JobResult:
         try:
             import modal
@@ -204,11 +268,64 @@ class ModalManager(BaseCloudManager):
 
         app = modal.App("tenyson-job-runner")
         local_python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        local_project_root = self._resolve_local_project_root()
+        git_source = self._resolve_git_source(local_project_root)
+
+        build_secret_env: Dict[str, str] = {}
+        git_auth_token = str(
+            os.getenv("TENYSON_GIT_AUTH_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
+        ).strip()
+        if git_auth_token:
+            build_secret_env["TENYSON_GIT_AUTH_TOKEN"] = git_auth_token
+        build_secrets = (
+            [modal.Secret.from_dict(build_secret_env)] if build_secret_env else None
+        )
+
+        clone_repo_command = """
+python3 - <<'PY'
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from urllib.parse import quote
+
+repo_url = os.environ["TENYSON_GIT_REPO_URL"]
+repo_commit = os.environ["TENYSON_GIT_COMMIT"]
+git_token = str(os.environ.get("TENYSON_GIT_AUTH_TOKEN") or "").strip()
+if git_token and repo_url.startswith(("https://", "http://")):
+    scheme, rest = repo_url.split("://", 1)
+    repo_url = f"{scheme}://x-access-token:{quote(git_token, safe='')}@{rest}"
+
+workspace = Path("/workspace")
+if workspace.exists():
+    shutil.rmtree(workspace)
+
+subprocess.run(["git", "clone", repo_url, str(workspace)], check=True)
+subprocess.run(
+    ["git", "-C", str(workspace), "checkout", "--detach", repo_commit],
+    check=True,
+)
+PY
+""".strip()
 
         image = (
             modal.Image.debian_slim(python_version=local_python_version)
+            .run_commands("apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*")
             .run_commands(runtime_pip_install_command())
-            .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+            .run_commands(
+                clone_repo_command,
+                env={
+                    "TENYSON_GIT_REPO_URL": git_source.clone_url,
+                    "TENYSON_GIT_COMMIT": git_source.commit,
+                },
+                secrets=build_secrets,
+            )
+            .env(
+                {
+                    "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                    "PYTHONPATH": "/workspace/src",
+                }
+            )
         )
 
         secrets: List[Any] = []
@@ -222,8 +339,6 @@ class ModalManager(BaseCloudManager):
         if runtime_secret_env:
             secrets.append(modal.Secret.from_dict(runtime_secret_env))
 
-        local_project_root = self._resolve_local_project_root()
-        image = image.add_local_dir(local_project_root, "/workspace")
         gpu_request = self._resolve_modal_gpu_request()
 
         @app.function(
@@ -233,14 +348,21 @@ class ModalManager(BaseCloudManager):
             secrets=secrets,
             serialized=True,
         )
-        def run_remote(job_type: str, config_rel_path: str, task_spec: str) -> None:
+        def run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: str) -> None:
+            import tempfile
             import os
             import sys
+            import yaml
 
             os.chdir("/workspace")
-            os.environ["PYTHONPATH"] = f"src:{os.environ.get('PYTHONPATH', '')}"
             os.environ["TENYSON_EXECUTION_MODE"] = "cloud"
             os.environ["TENYSON_GPU_PROVIDER"] = "modal"
+            config_path = os.path.join(
+                tempfile.gettempdir(),
+                f"tenyson-{job_type}-config.yaml",
+            )
+            with open(config_path, "w", encoding="utf-8") as handle:
+                yaml.safe_dump(config_payload, handle, sort_keys=False)
             cmd = [
                 sys.executable,
                 "-m",
@@ -248,7 +370,7 @@ class ModalManager(BaseCloudManager):
                 "--job-type",
                 job_type,
                 "--config",
-                config_rel_path,
+                config_path,
                 "--task-module",
                 task_spec,
             ]
@@ -265,7 +387,6 @@ class ModalManager(BaseCloudManager):
                     f"{result_code}. {details}"
                 )
 
-        from pathlib import Path
         from tenyson.core.telemetry import (
             TelemetryClient,
             record_run_result,
@@ -314,14 +435,6 @@ class ModalManager(BaseCloudManager):
             except Exception:  # noqa: BLE001
                 return None, None
 
-        config_path = materialize_run_config(
-            config=job.config,
-            project_root=Path(local_project_root),
-            job_type=job_type,
-            run_name=run_name,
-        )
-        config_rel_path = os.path.relpath(str(config_path), local_project_root)
-
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
             try:
@@ -335,7 +448,7 @@ class ModalManager(BaseCloudManager):
                 )
                 with output_context:
                     with app.run():
-                        run_remote.remote(job_type, config_rel_path, task_spec)
+                        run_remote.remote(job_type, job.config, task_spec)
             except Exception as exc:  # noqa: BLE001
                 hf_repo_id, hf_revision = _resolve_failed_resume_target()
                 result = JobResult(

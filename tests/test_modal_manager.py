@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import patch
 
 from tenyson.cloud.manager import CloudManager
-from tenyson.cloud.modal import ModalManager, _run_subprocess_with_streaming_logs
+from tenyson.cloud.modal import (
+    ModalManager,
+    _normalize_git_clone_url,
+    _run_subprocess_with_streaming_logs,
+)
 from tenyson.cloud.runtime_deps import REMOTE_RUNTIME_PACKAGES, runtime_pip_install_command
 from tenyson.loader import load_task
 
@@ -57,6 +61,47 @@ class ModalTaskSpecTests(unittest.TestCase):
         task_spec = manager._resolve_task_spec(task, str(repo_root))
 
         self.assertEqual(task_spec, "examples/wordle/wordle_task.py")
+
+
+class ModalGitSourceTests(unittest.TestCase):
+    def test_normalize_git_clone_url_converts_github_ssh(self) -> None:
+        clone_url = _normalize_git_clone_url("git@github.com:goyalayus/tenyson.git")
+        self.assertEqual(clone_url, "https://github.com/goyalayus/tenyson.git")
+
+    def test_resolve_git_source_uses_clean_head_commit(self) -> None:
+        manager = ModalManager()
+
+        def fake_git(repo_root: str, *args: str) -> str:
+            mapping = {
+                ("remote", "get-url", "origin"): "git@github.com:goyalayus/tenyson.git",
+                ("status", "--porcelain", "--untracked-files=no"): "",
+                ("rev-parse", "HEAD"): "abc123",
+            }
+            return mapping[args]
+
+        with patch("tenyson.cloud.modal._run_git_command", side_effect=fake_git), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            source = manager._resolve_git_source("/repo")
+
+        self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
+        self.assertEqual(source.commit, "abc123")
+
+    def test_resolve_git_source_rejects_dirty_tracked_changes(self) -> None:
+        manager = ModalManager()
+
+        def fake_git(repo_root: str, *args: str) -> str:
+            mapping = {
+                ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
+                ("status", "--porcelain", "--untracked-files=no"): " M src/tenyson/cloud/modal.py",
+            }
+            return mapping[args]
+
+        with patch("tenyson.cloud.modal._run_git_command", side_effect=fake_git), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "git-backed only"):
+                manager._resolve_git_source("/repo")
 
 
 class ModalOutputTests(unittest.TestCase):
