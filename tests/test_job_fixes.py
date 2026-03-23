@@ -44,6 +44,14 @@ class WordleParserTests(unittest.TestCase):
 
         self.assertEqual(history_rows, [("crane", "XXGGG")])
 
+    def test_build_constraints_accepts_spaced_feedback(self) -> None:
+        wordle_task = _load_wordle_task_module()
+
+        compact = wordle_task.build_constraints("crane", "XXGGG")
+        spaced = wordle_task.build_constraints("crane", "X X G G G")
+
+        self.assertEqual(compact, spaced)
+
     def test_wordlists_relative_paths_resolve_from_task_file(self) -> None:
         wordle_task = _load_wordle_task_module()
 
@@ -83,6 +91,77 @@ class WordleParserTests(unittest.TestCase):
 
         self.assertEqual(row["history_len"], 1)
         self.assertIn("This is turn 2 of the game.", prompt)
+
+    def test_generated_secret_satisfies_constraints_from_raw_history_rows(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        config = {
+            "task": {
+                "wordlists": {
+                    "solutions": "wordlists/wordle_solutions.txt",
+                    "allowed": "wordlists/wordle_allowed_guesses.txt",
+                },
+                "min_history_turns": 1,
+                "max_history_turns": 5,
+            },
+            "training": {"seed": 123},
+        }
+
+        dataset = wordle_task.generate_synthetic_wordle_dataset(
+            config, seed=123, n_samples=25
+        )
+
+        for row in dataset:
+            ac = wordle_task.aggregate_constraints(row["history_rows"])
+            sat, totals, _ = wordle_task.compute_sat_count(row["secret"], ac)
+            self.assertEqual(sat, sum(totals.values()))
+
+    def test_invalid_word_gets_no_constraint_reward(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        config = {
+            "task": {
+                "wordlists": {
+                    "solutions": "wordlists/wordle_solutions.txt",
+                    "allowed": "wordlists/wordle_allowed_guesses.txt",
+                },
+                "rewards": {
+                    "format": 0.2,
+                    "dict": 0.2,
+                    "repeat_penalty": -0.5,
+                    "constraint": 0.1,
+                    "overlength_penalty": -0.5,
+                },
+            }
+        }
+        solutions, allowed = wordle_task.get_wordlists(config)
+        valid_set = set(solutions) | set(allowed)
+        self.assertNotIn("irkls", valid_set)
+
+        prompt = wordle_task.build_prompt_text(
+            [
+                ("bravo", "X G X X X"),
+                ("wooer", "X X X X Y"),
+                ("mambo", "X X X X X"),
+            ]
+        )
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return list(text)
+
+        scored = wordle_task.score_completion(
+            prompt,
+            "<think>test</think><guess>[irkls]</guess>",
+            valid_set,
+            config["task"],
+            FakeTokenizer(),
+        )
+
+        self.assertEqual(scored["is_wordle_valid"], 0)
+        self.assertEqual(scored["reward_constraints"], 0.0)
+        self.assertEqual(
+            scored["reward_total"],
+            scored["reward_format"] + scored["reward_overlength"],
+        )
 
 
 class RLConfigHelpersTests(unittest.TestCase):

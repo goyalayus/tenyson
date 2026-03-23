@@ -53,6 +53,16 @@ TURN_LINE_RE = re.compile(
 )
 
 
+def _normalize_feedback_string(feedback: str) -> str:
+    compact = "".join(ch for ch in str(feedback).upper() if ch in {"G", "Y", "X"})
+    if len(compact) != 5:
+        raise ValueError(
+            "Wordle feedback must resolve to exactly 5 G/Y/X markers, "
+            f"got {feedback!r}."
+        )
+    return compact
+
+
 def render_user_prompt(history_rows: Sequence[Tuple[str, str]]) -> str:
     turn_idx = len(history_rows) + 1
     # Count remaining attempts including the current turn.
@@ -126,6 +136,7 @@ class ConstraintSet:
 
 
 def build_constraints(turn_guess: str, feedback: str) -> ConstraintSet:
+    feedback = _normalize_feedback_string(feedback)
     green_positions: Dict[int, str] = {}
     yellow_banned_positions: Dict[str, set] = defaultdict(set)
 
@@ -307,10 +318,15 @@ def score_completion(
 
     ac = aggregate_constraints(history_rows)
     sat_count, totals, sats = compute_sat_count(guess, ac)
+    is_wordle_valid = int(guess in valid_set)
 
     # Normalize by number of prior turns to reduce reward variance across prompts.
-    reward_constraints = constraint_reward * float(sat_count) / float(history_len)
-    reward_dict = dict_reward if (guess in valid_set) else 0.0
+    reward_constraints = (
+        constraint_reward * float(sat_count) / float(history_len)
+        if is_wordle_valid
+        else 0.0
+    )
+    reward_dict = dict_reward if is_wordle_valid else 0.0
     is_repeat = int(guess in history_guesses)
     reward_repeat = repeat_penalty if is_repeat else 0.0
 
@@ -325,7 +341,7 @@ def score_completion(
     return {
         "strict_ok": True,
         "parsed_guess": guess,
-        "is_wordle_valid": int(guess in valid_set),
+        "is_wordle_valid": is_wordle_valid,
         "is_repeat": is_repeat,
         "is_overlength": is_overlength,
         "completion_tokens": completion_tokens,
