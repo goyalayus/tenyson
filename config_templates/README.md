@@ -12,4 +12,9 @@ The idea is:
 - task-specific overrides live in the environment file
 - experiment-specific tweaks live in `experiment.py`
 
+Notes:
+
+- telemetry is always W&B, so the starter templates do not expose a backend field
+- the current runtime only accepts Qwen 3 family base models
+
 The Wordle example uses these templates and then applies its own environment run overrides on top.

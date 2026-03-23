@@ -133,12 +133,13 @@ For Hugging Face pushes, `TENYSON_HF_REPO_BASE` must point at a namespace that t
 ## Telemetry
 
 Telemetry is mandatory. Every run needs an experiment id.
-Telemetry backend: W&B.
+Telemetry is always sent to W&B. You do not need to set a backend field in normal configs.
 
 ```yaml
 telemetry:
-  backend: "wandb"
   experiment_id: "wordle_research_2026_03_01"
+  entity: "your-wandb-entity"
+  project: "wordle-research"
 ```
 
 You can provide the W&B destination either in config or through env vars:

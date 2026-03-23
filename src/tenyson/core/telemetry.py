@@ -56,8 +56,8 @@ def _validate_shared_db_url(db_url: str) -> None:
     backend_ref = str(db_url or "").strip()
     if not backend_ref:
         raise ValueError(
-            "Missing telemetry backend ref. Set telemetry.backend=wandb and "
-            "configure telemetry.entity / telemetry.project."
+            "Missing telemetry backend ref. Configure W&B via telemetry.entity / "
+            "telemetry.project or set telemetry.db_url to wandb://<entity>/<project>."
         )
     if not wandb_store.is_wandb_backend_ref(backend_ref):
         raise ValueError(
@@ -685,7 +685,7 @@ def resolve_telemetry_context(
     backend = str(telemetry_cfg.get("backend") or "").strip().lower()
     if backend and backend != "wandb":
         raise ValueError(
-            "Telemetry only supports telemetry.backend=wandb."
+            "Telemetry is W&B-only. Remove telemetry.backend or leave it as 'wandb'."
         )
 
     db_url_ref = str(telemetry_cfg.get("db_url") or "").strip()
@@ -746,8 +746,8 @@ def resolve_required_telemetry_context(config: Dict[str, Any]) -> Tuple[str, str
     backend_ref, experiment_id = resolve_telemetry_context(config)
     if not backend_ref:
         raise ValueError(
-            "Missing telemetry backend. Set telemetry.backend=wandb with "
-            "telemetry.entity/project."
+            "Missing telemetry configuration. Set telemetry.entity/project or "
+            "TENYSON_WANDB_ENTITY / TENYSON_WANDB_PROJECT."
         )
     if not experiment_id:
         raise ValueError(

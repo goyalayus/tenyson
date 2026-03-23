@@ -6,6 +6,7 @@ from tenyson.core.hf_adapter import (
     resolve_hf_lora_runtime_kwargs,
     strict_load_hf_lora_adapter_weights,
 )
+from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -56,7 +57,9 @@ class EvalJob:
                 flush=True,
             )
 
-        model_name = model_cfg.get("name", "Qwen/Qwen3-4B")
+        model_name = require_qwen3_model_name(
+            model_cfg.get("name", "Qwen/Qwen3-4B")
+        )
         seq_len = model_cfg.get("max_seq_length", 4096)
         max_lora_rank = (
             int(lora_runtime_kwargs["r"])

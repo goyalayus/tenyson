@@ -4,6 +4,7 @@ import unittest
 from tenyson.jobs.sft import (
     _enable_best_model_tracking,
     _push_final_adapter_snapshot,
+    _validate_completion_only_training_settings,
     _resolve_early_stopping_settings,
 )
 
@@ -86,6 +87,25 @@ class SFTJobHelperTests(unittest.TestCase):
         self.assertIn("final best-model sync", model.calls[0][1])
         self.assertIn("checkpoint-40", model.calls[0][1])
         self.assertIn("step=42", model.calls[0][1])
+
+    def test_validate_completion_only_training_settings_rejects_packing(self) -> None:
+        with self.assertRaisesRegex(ValueError, "packing=True"):
+            _validate_completion_only_training_settings(
+                {
+                    "loss_on_assistant_only": True,
+                    "response_template": "<|im_start|>assistant\n",
+                    "packing": True,
+                }
+            )
+
+    def test_validate_completion_only_training_settings_allows_non_packed(self) -> None:
+        _validate_completion_only_training_settings(
+            {
+                "loss_on_assistant_only": True,
+                "response_template": "<|im_start|>assistant\n",
+                "packing": False,
+            }
+        )
 
 
 if __name__ == "__main__":

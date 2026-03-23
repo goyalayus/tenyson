@@ -72,6 +72,31 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
             [[-100, -100, -100, 4, -100, -100, -100, 4]],
         )
 
+    def test_packed_style_multi_example_sequence_has_no_boundary_attention_mask(self) -> None:
+        tokenizer = SimpleTokenizer()
+        collator = CompletionOnlyDataCollator(
+            tokenizer,
+            response_template="<A>",
+            instruction_template="<U>",
+        )
+
+        # This simulates two short prompt/response examples concatenated into one
+        # packed sequence. The collator can still mask labels correctly, but it
+        # only emits a flat token-vs-padding attention mask, not per-example
+        # sequence boundaries.
+        batch = collator([
+            {"text": "<U> hello <A> world <U> again <A> world"},
+        ])
+
+        self.assertEqual(
+            batch["labels"].tolist(),
+            [[-100, -100, -100, 4, -100, -100, -100, 4]],
+        )
+        self.assertEqual(
+            batch["attention_mask"].tolist(),
+            [[1, 1, 1, 1, 1, 1, 1, 1]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

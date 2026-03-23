@@ -21,6 +21,7 @@ from tenyson.core.hf_checkpoint import (
     resolve_hf_resume_revision,
 )
 from tenyson.core.plugin import TaskPlugin
+from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
@@ -545,7 +546,9 @@ class RLJob:
                 flush=True,
             )
 
-        model_name = model_cfg.get("name", "Qwen/Qwen3-4B")
+        model_name = require_qwen3_model_name(
+            model_cfg.get("name", "Qwen/Qwen3-4B")
+        )
         seq_len = model_cfg.get("max_seq_length", 4096)
         load_in_4bit = model_cfg.get("load_in_4bit", True)
         unsloth_load_kwargs = _resolve_unsloth_model_load_kwargs(model_cfg, vllm_cfg)

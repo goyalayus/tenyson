@@ -8,6 +8,7 @@ from tenyson.core.hf_checkpoint import (
     resolve_hf_repo_revision,
     resolve_hf_resume_revision,
 )
+from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
@@ -80,6 +81,19 @@ def _enable_best_model_tracking(training_args: Any) -> None:
     training_args.greater_is_better = False
 
 
+def _validate_completion_only_training_settings(train_cfg: Dict[str, Any]) -> None:
+    if not train_cfg.get("loss_on_assistant_only", False):
+        return
+    if not train_cfg.get("response_template"):
+        return
+    if not train_cfg.get("packing", False):
+        return
+    raise ValueError(
+        "loss_on_assistant_only is not supported with packing=True in Tenyson's "
+        "built-in response-template masking path. Set training.packing to false."
+    )
+
+
 def _push_final_adapter_snapshot(
     *,
     repo_id: str,
@@ -128,7 +142,9 @@ class SFTJob:
         model_cfg = self.config.get("model", {})
         train_cfg = self.config.get("training", {})
 
-        model_name = model_cfg.get("name", "Qwen/Qwen3-4B")
+        model_name = require_qwen3_model_name(
+            model_cfg.get("name", "Qwen/Qwen3-4B")
+        )
         seq_len = model_cfg.get("max_seq_length", 2048)
 
         print(f"[SFTJob] Loading model {model_name}...", flush=True)
@@ -187,6 +203,7 @@ class SFTJob:
         attempt_token = str(
             self.config.get("telemetry", {}).get("attempt_token") or ""
         ).strip() or None
+        _validate_completion_only_training_settings(train_cfg)
         backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=backend_ref)
         ensure_wandb_telemetry_run(
@@ -351,11 +368,6 @@ class SFTJob:
             loss_on_assistant_only = train_cfg.get("loss_on_assistant_only", False)
             response_template = train_cfg.get("response_template") or ""
             if loss_on_assistant_only and response_template:
-                if train_cfg.get("packing", False):
-                    raise ValueError(
-                        "loss_on_assistant_only is not supported with packing=True. "
-                        "Set training.packing to false."
-                    )
                 from tenyson.jobs.sft_collator import CompletionOnlyDataCollator
 
                 instruction_template = train_cfg.get("instruction_template")
