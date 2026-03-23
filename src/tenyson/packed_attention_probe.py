@@ -75,10 +75,14 @@ def _find_subsequence(haystack: list[int], needle: list[int]) -> int:
 def run_probe() -> Dict[str, Any]:
     import torch
     from datasets import Dataset, load_dataset
+    from trl import SFTConfig, SFTTrainer
     from trl.data_utils import pack_dataset
     from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
     from unsloth import FastLanguageModel
 
+    from tenyson.jobs.sft import (
+        _prepare_manual_assistant_only_dataset,
+    )
     from tenyson.jobs.tokenizer_utils import (
         ensure_assistant_mask_chat_template,
         normalize_tokenizer_special_tokens,
@@ -200,6 +204,125 @@ def run_probe() -> Dict[str, Any]:
     result["attention_isolated_for_example2"] = bool(
         result["max_abs_logit_diff_on_example2"] < 1e-5
     )
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        target_modules=["gate_proj", "up_proj", "down_proj"],
+        lora_alpha=32,
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=3407,
+        max_seq_length=max_length,
+    )
+    model.eval()
+
+    formatting_func_calls = {"count": 0}
+
+    def trainer_formatting_func(_example: Dict[str, Any]) -> list[str]:
+        formatting_func_calls["count"] += 1
+        return [""]
+
+    trainer_dataset = _prepare_manual_assistant_only_dataset(
+        raw,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        packing=True,
+        packing_strategy="bfd",
+        shuffle=False,
+        seed=3407,
+        dataset_name="probe",
+    )
+    trainer_args = SFTConfig(
+        output_dir="/tmp/tenyson-packed-attention-probe",
+        report_to="none",
+        disable_tqdm=True,
+        max_length=max_length,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=1,
+        max_steps=1,
+        learning_rate=1.0e-5,
+        logging_steps=1,
+        save_strategy="no",
+        packing=False,
+        padding_free=True,
+        assistant_only_loss=False,
+        dataset_kwargs={"skip_prepare_dataset": True},
+        eos_token=tokenizer.eos_token,
+        pad_token=tokenizer.pad_token,
+    )
+    trainer = SFTTrainer(
+        model=model,
+        args=trainer_args,
+        train_dataset=trainer_dataset,
+        processing_class=tokenizer,
+        formatting_func=trainer_formatting_func,
+    )
+    trainer_batch = next(iter(trainer.get_train_dataloader()))
+
+    trainer_input_ids = trainer_batch["input_ids"][0].tolist()
+    trainer_ex1_start = _find_subsequence(trainer_input_ids, ex1["input_ids"])
+    trainer_ex2_start = _find_subsequence(trainer_input_ids, ex2["input_ids"])
+
+    trainer_batch_b: Dict[str, Any] = {}
+    for key, value in trainer_batch.items():
+        trainer_batch_b[key] = value.clone() if hasattr(value, "clone") else value
+    trainer_batch_b["input_ids"][
+        0, trainer_ex1_start : trainer_ex1_start + len(ex1["input_ids"])
+    ] = replacement_id
+
+    with torch.inference_mode():
+        trainer_outputs_a = model(
+            input_ids=trainer_batch["input_ids"].to(model.device),
+            position_ids=trainer_batch.get("position_ids").to(model.device),
+            use_cache=False,
+        )
+        trainer_outputs_b = model(
+            input_ids=trainer_batch_b["input_ids"].to(model.device),
+            position_ids=trainer_batch_b.get("position_ids").to(model.device),
+            use_cache=False,
+        )
+
+    trainer_row = trainer_dataset[0]
+    trainer_labels_mask = [
+        0 if token == -100 else 1 for token in trainer_batch["labels"][0].tolist()
+    ]
+    trainer_logit_diff = (
+        trainer_outputs_a.logits[
+            0, trainer_ex2_start : trainer_ex2_start + len(ex2["input_ids"])
+        ].float().cpu()
+        - trainer_outputs_b.logits[
+            0, trainer_ex2_start : trainer_ex2_start + len(ex2["input_ids"])
+        ].float().cpu()
+    ).abs()
+
+    result.update(
+        {
+            "trainer_formatting_func_calls": int(formatting_func_calls["count"]),
+            "trainer_dataset_keys": sorted(trainer_row.keys()),
+            "trainer_prepared_seq_lengths": list(trainer_row["seq_lengths"]),
+            "trainer_batch_keys": sorted(trainer_batch.keys()),
+            "trainer_example1_start": int(trainer_ex1_start),
+            "trainer_ex2_start": int(trainer_ex2_start),
+            "trainer_position_id_at_ex2_start": int(
+                trainer_batch["position_ids"][0, trainer_ex2_start].item()
+            ),
+            "trainer_assistant_mask_matches_labels": list(
+                trainer_row["assistant_masks"]
+            )
+            == trainer_labels_mask,
+            "trainer_max_abs_logit_diff_on_example2": float(
+                trainer_logit_diff.max().item()
+            ),
+            "trainer_mean_abs_logit_diff_on_example2": float(
+                trainer_logit_diff.mean().item()
+            ),
+        }
+    )
+    result["trainer_attention_isolated_for_example2"] = bool(
+        result["trainer_max_abs_logit_diff_on_example2"] < 1e-5
+    )
     return result
 
 
@@ -211,3 +334,9 @@ def main() -> None:
         raise SystemExit("assistant-only loss verification failed")
     if not result.get("attention_isolated_for_example2"):
         raise SystemExit("cross-example attention leakage detected")
+    if result.get("trainer_formatting_func_calls") != 0:
+        raise SystemExit("trainer unexpectedly invoked formatting_func")
+    if not result.get("trainer_assistant_mask_matches_labels"):
+        raise SystemExit("trainer assistant-mask verification failed")
+    if not result.get("trainer_attention_isolated_for_example2"):
+        raise SystemExit("trainer cross-example attention leakage detected")

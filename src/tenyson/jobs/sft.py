@@ -116,6 +116,7 @@ def _resolve_assistant_only_strategy(
     if not loss_on_assistant_only:
         return {
             "use_native_assistant_only_loss": False,
+            "use_manual_assistant_masks": False,
             "use_response_template_collator": False,
             "formatting_func": formatting_func,
         }
@@ -134,14 +135,16 @@ def _resolve_assistant_only_strategy(
                 "boundaries safely."
             )
         return {
-            "use_native_assistant_only_loss": True,
+            "use_native_assistant_only_loss": False,
+            "use_manual_assistant_masks": True,
             "use_response_template_collator": False,
-            "formatting_func": None,
+            "formatting_func": formatting_func,
         }
 
     if task_collator is not None:
         return {
             "use_native_assistant_only_loss": False,
+            "use_manual_assistant_masks": False,
             "use_response_template_collator": False,
             "formatting_func": formatting_func,
         }
@@ -149,6 +152,7 @@ def _resolve_assistant_only_strategy(
     if response_template:
         return {
             "use_native_assistant_only_loss": False,
+            "use_manual_assistant_masks": False,
             "use_response_template_collator": True,
             "formatting_func": formatting_func,
         }
@@ -156,6 +160,7 @@ def _resolve_assistant_only_strategy(
     if is_conversational:
         return {
             "use_native_assistant_only_loss": True,
+            "use_manual_assistant_masks": False,
             "use_response_template_collator": False,
             "formatting_func": None,
         }
@@ -179,6 +184,142 @@ def _resolve_sft_special_tokens_kwargs(
     if "pad_token" in accepted_fields and isinstance(pad_token, str) and pad_token:
         kwargs["pad_token"] = pad_token
     return kwargs
+
+
+def _fallback_sft_formatting_func(_example: Dict[str, Any]) -> list[str]:
+    # Unsloth requires a formatting_func in some conversational SFT paths even
+    # when the dataset is already tokenized and dataset preparation is skipped.
+    return [""]
+
+
+def _extract_conversational_sft_messages(example: Dict[str, Any]) -> list[Dict[str, Any]]:
+    messages = example.get("messages")
+    if _is_conversational_message_list(messages):
+        return list(messages)
+
+    prompt = example.get("prompt")
+    completion = example.get("completion")
+    merged_messages: list[Dict[str, Any]] = []
+    if _is_conversational_message_list(prompt):
+        merged_messages.extend(list(prompt))
+    if _is_conversational_message_list(completion):
+        merged_messages.extend(list(completion))
+    if merged_messages:
+        return merged_messages
+
+    raise ValueError(
+        "Packed assistant-only SFT requires conversational rows exposed through "
+        "`messages` or conversational `prompt`/`completion` fields."
+    )
+
+
+def _tokenize_assistant_only_conversation(
+    example: Dict[str, Any],
+    *,
+    tokenizer: Any,
+) -> Dict[str, Any]:
+    messages = _extract_conversational_sft_messages(example)
+    processed = tokenizer.apply_chat_template(
+        messages,
+        tools=example.get("tools"),
+        tokenize=True,
+        return_dict=True,
+        add_generation_prompt=False,
+        return_assistant_tokens_mask=True,
+        **example.get("chat_template_kwargs", {}),
+    )
+
+    input_ids = processed.get("input_ids")
+    assistant_masks = processed.get("assistant_masks")
+    if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+        input_ids = input_ids[0]
+    if (
+        isinstance(assistant_masks, list)
+        and assistant_masks
+        and isinstance(assistant_masks[0], list)
+    ):
+        assistant_masks = assistant_masks[0]
+
+    if not isinstance(input_ids, list) or not input_ids:
+        raise RuntimeError("Packed assistant-only SFT produced no input_ids.")
+    if not isinstance(assistant_masks, list):
+        raise RuntimeError(
+            "Packed assistant-only SFT expected assistant_masks from the tokenizer, "
+            "but none were returned. Check the chat template."
+        )
+    if 1 not in assistant_masks:
+        raise RuntimeError(
+            "Packed assistant-only SFT found a conversational example with no "
+            "assistant-supervised tokens."
+        )
+
+    return {
+        "input_ids": list(input_ids),
+        "assistant_masks": list(assistant_masks),
+    }
+
+
+def _prepare_manual_assistant_only_dataset(
+    dataset: Any,
+    *,
+    tokenizer: Any,
+    max_length: int,
+    packing: bool,
+    packing_strategy: str,
+    shuffle: bool,
+    seed: int,
+    dataset_name: str,
+) -> Any:
+    from datasets import Dataset, IterableDataset
+    from trl.data_utils import pack_dataset
+    from trl.trainer.sft_trainer import truncate_dataset
+
+    if isinstance(dataset, IterableDataset):
+        raise ValueError(
+            "Packed assistant-only SFT currently requires a map-style Hugging Face "
+            "Dataset, not an IterableDataset."
+        )
+
+    column_names = list(getattr(dataset, "column_names", []) or [])
+    map_kwargs: Dict[str, Any] = {}
+    if isinstance(dataset, Dataset):
+        map_kwargs["desc"] = (
+            f"Tokenizing {dataset_name} dataset for manual assistant-only SFT"
+        )
+
+    prepared = dataset.map(
+        lambda row: _tokenize_assistant_only_conversation(row, tokenizer=tokenizer),
+        remove_columns=column_names or None,
+        **map_kwargs,
+    )
+
+    if shuffle:
+        prepared = prepared.shuffle(seed=seed)
+
+    if packing:
+        pack_kwargs: Dict[str, Any] = {}
+        if isinstance(prepared, Dataset):
+            pack_kwargs["desc"] = (
+                f"Packing {dataset_name} dataset for manual assistant-only SFT"
+            )
+        prepared = pack_dataset(
+            prepared.select_columns(["input_ids", "assistant_masks"]),
+            max_length,
+            packing_strategy,
+            pack_kwargs,
+        )
+    else:
+        truncate_kwargs: Dict[str, Any] = {}
+        if isinstance(prepared, Dataset):
+            truncate_kwargs["desc"] = (
+                f"Truncating {dataset_name} dataset for manual assistant-only SFT"
+            )
+        prepared = truncate_dataset(prepared, max_length, truncate_kwargs)
+
+    if shuffle:
+        prepared = prepared.shuffle(seed=seed)
+
+    return prepared
 
 
 def _push_final_adapter_snapshot(
@@ -379,6 +520,53 @@ class SFTJob:
             task_collator=task_collator,
         )
         formatting_func = assistant_only_strategy["formatting_func"]
+        use_manual_assistant_masks = assistant_only_strategy[
+            "use_manual_assistant_masks"
+        ]
+        if use_manual_assistant_masks:
+            ensure_assistant_mask_chat_template(tokenizer)
+            formatting_func = formatting_func or _fallback_sft_formatting_func
+            packing_strategy = (
+                str(train_cfg.get("packing_strategy", "bfd")).strip() or "bfd"
+            )
+            seed = int(train_cfg.get("seed", 3407))
+            eval_packing = train_cfg.get("eval_packing")
+            if eval_packing is None:
+                eval_packing = bool(train_cfg.get("packing", False))
+            else:
+                eval_packing = bool(eval_packing)
+
+            train_dataset = _prepare_manual_assistant_only_dataset(
+                train_dataset,
+                tokenizer=tokenizer,
+                max_length=seq_len,
+                packing=bool(train_cfg.get("packing", False)),
+                packing_strategy=packing_strategy,
+                shuffle=True,
+                seed=seed,
+                dataset_name="train",
+            )
+            if eval_dataset is not None:
+                eval_dataset = _prepare_manual_assistant_only_dataset(
+                    eval_dataset,
+                    tokenizer=tokenizer,
+                    max_length=seq_len,
+                    packing=eval_packing,
+                    packing_strategy=packing_strategy,
+                    shuffle=False,
+                    seed=seed,
+                    dataset_name="eval",
+                )
+            print(
+                "[SFTJob] Using manual assistant masks for packed conversational "
+                f"SFT. Prepared train rows: {len(train_dataset)}"
+                + (
+                    f", eval rows: {len(eval_dataset)}"
+                    if eval_dataset is not None
+                    else ""
+                ),
+                flush=True,
+            )
         if assistant_only_strategy["use_native_assistant_only_loss"]:
             ensure_assistant_mask_chat_template(tokenizer)
             print(
@@ -390,6 +578,10 @@ class SFTJob:
             train_cfg.get("report_to", "none"),
             telemetry_backend=telemetry_client.backend,
         )
+        manual_dataset_kwargs = train_cfg.get("dataset_kwargs")
+        if use_manual_assistant_masks:
+            manual_dataset_kwargs = dict(manual_dataset_kwargs or {})
+            manual_dataset_kwargs["skip_prepare_dataset"] = True
 
         cfg_kwargs: Dict[str, Any] = dict(
             output_dir=output_dir,
@@ -411,7 +603,12 @@ class SFTJob:
             report_to=report_to,
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
-            packing=train_cfg.get("packing", False),
+            packing=(
+                False
+                if use_manual_assistant_masks
+                else train_cfg.get("packing", False)
+            ),
+            padding_free=bool(use_manual_assistant_masks),
             assistant_only_loss=assistant_only_strategy[
                 "use_native_assistant_only_loss"
             ],
@@ -420,6 +617,7 @@ class SFTJob:
                 if not formatting_func
                 else None
             ),
+            dataset_kwargs=manual_dataset_kwargs,
         )
         accepted = set(inspect.signature(SFTConfig.__init__).parameters.keys())
         cfg_kwargs.update(
