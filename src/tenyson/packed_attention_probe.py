@@ -75,10 +75,10 @@ def _find_subsequence(haystack: list[int], needle: list[int]) -> int:
 def run_probe() -> Dict[str, Any]:
     import torch
     from datasets import Dataset, load_dataset
+    from unsloth import FastLanguageModel
     from trl import SFTConfig, SFTTrainer
     from trl.data_utils import pack_dataset
     from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
-    from unsloth import FastLanguageModel
 
     from tenyson.jobs.sft import (
         _prepare_manual_assistant_only_dataset,
@@ -249,8 +249,6 @@ def run_probe() -> Dict[str, Any]:
         padding_free=True,
         assistant_only_loss=False,
         dataset_kwargs={"skip_prepare_dataset": True},
-        eos_token=tokenizer.eos_token,
-        pad_token=tokenizer.pad_token,
     )
     trainer = SFTTrainer(
         model=model,
