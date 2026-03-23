@@ -76,7 +76,7 @@ def _find_subsequence(haystack: list[int], needle: list[int]) -> int:
 )
 def run_probe() -> Dict[str, Any]:
     import torch
-    from datasets import Dataset, load_dataset
+    from datasets import load_dataset
     from unsloth import FastLanguageModel
     from trl import SFTConfig, SFTTrainer
 
@@ -104,10 +104,6 @@ def run_probe() -> Dict[str, Any]:
     model.eval()
 
     raw = load_dataset(dataset_name, split="train[:2]")
-    raw_rows = [
-        {"messages": list(raw[0]["messages"])},
-        {"messages": list(raw[1]["messages"])},
-    ]
 
     def tokenize_messages(row: Dict[str, Any]) -> Dict[str, Any]:
         processed = tokenizer.apply_chat_template(
@@ -122,8 +118,8 @@ def run_probe() -> Dict[str, Any]:
             "assistant_masks": list(processed["assistant_masks"]),
         }
 
-    ex1 = tokenize_messages(raw_rows[0])
-    ex2 = tokenize_messages(raw_rows[1])
+    ex1 = tokenize_messages(raw[0])
+    ex2 = tokenize_messages(raw[1])
 
     replacement_tokens = tokenizer.encode(" the", add_special_tokens=False)
     replacement_id = (
@@ -161,18 +157,18 @@ def run_probe() -> Dict[str, Any]:
     )
     args = SFTConfig(**{key: value for key, value in config_kwargs.items() if key in accepted})
 
-    def build_batch(rows: list[Dict[str, Any]]):
+    def build_batch(dataset):
         trainer = SFTTrainer(
             model=model,
             args=args,
-            train_dataset=Dataset.from_list(rows),
+            train_dataset=dataset,
             processing_class=tokenizer,
         )
         batch = next(iter(trainer.get_train_dataloader()))
         prepared_row = trainer.train_dataset[0]
         return batch, prepared_row
 
-    batch_a, prepared_a = build_batch(raw_rows)
+    batch_a, prepared_a = build_batch(raw)
 
     batch_b: Dict[str, Any] = {}
     for key, value in batch_a.items():
