@@ -15,6 +15,11 @@ from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.reporting_utils import normalize_report_to
 from tenyson.jobs.result import JobResult
+from tenyson.jobs.sft_dataset import (
+    build_builtin_sft_formatting_func,
+    normalize_builtin_sft_dataset,
+    supports_builtin_sft_schema,
+)
 from tenyson.jobs.tokenizer_utils import (
     ensure_assistant_mask_chat_template,
     normalize_tokenizer_special_tokens,
@@ -91,83 +96,48 @@ def _is_conversational_message_list(value: Any) -> bool:
     return isinstance(first, dict) and "role" in first and "content" in first
 
 
-def _is_conversational_dataset_row(row: Any) -> bool:
-    if not isinstance(row, dict):
-        return False
-
-    for key in ("messages", "prompt", "chosen", "rejected", "completion"):
-        if _is_conversational_message_list(row.get(key)):
-            return True
-    return False
+def _is_pretokenized_sft_row(row: Any) -> bool:
+    return isinstance(row, dict) and "input_ids" in row
 
 
 def _resolve_assistant_only_strategy(
     train_cfg: Dict[str, Any],
     *,
     train_sample: Any,
-    formatting_func: Any,
-    task_collator: Any,
 ) -> Dict[str, Any]:
     loss_on_assistant_only = bool(train_cfg.get("loss_on_assistant_only", False))
     response_template = str(train_cfg.get("response_template") or "").strip()
     packing_enabled = bool(train_cfg.get("packing", False))
-    is_conversational = _is_conversational_dataset_row(train_sample)
+    supports_builtin_schema = supports_builtin_sft_schema(train_sample)
 
     if not loss_on_assistant_only:
         return {
             "use_native_assistant_only_loss": False,
             "use_manual_assistant_masks": False,
             "use_response_template_collator": False,
-            "formatting_func": formatting_func,
         }
 
-    if packing_enabled:
-        if task_collator is not None:
-            raise ValueError(
-                "loss_on_assistant_only with packing=True is not supported when a "
-                "task-specific SFT data collator is installed. Use TRL's native "
-                "assistant-only masking on a conversational dataset instead."
-            )
-        if not is_conversational:
-            raise ValueError(
-                "loss_on_assistant_only with packing=True requires a conversational "
-                "SFT dataset so TRL can build assistant masks and packed document "
-                "boundaries safely."
-            )
+    if supports_builtin_schema:
         return {
             "use_native_assistant_only_loss": False,
             "use_manual_assistant_masks": True,
             "use_response_template_collator": False,
-            "formatting_func": formatting_func,
         }
 
-    if task_collator is not None:
-        return {
-            "use_native_assistant_only_loss": False,
-            "use_manual_assistant_masks": False,
-            "use_response_template_collator": False,
-            "formatting_func": formatting_func,
-        }
-
-    if response_template:
+    if response_template and not packing_enabled:
         return {
             "use_native_assistant_only_loss": False,
             "use_manual_assistant_masks": False,
             "use_response_template_collator": True,
-            "formatting_func": formatting_func,
-        }
-
-    if is_conversational:
-        return {
-            "use_native_assistant_only_loss": True,
-            "use_manual_assistant_masks": False,
-            "use_response_template_collator": False,
-            "formatting_func": None,
         }
 
     raise ValueError(
-        "loss_on_assistant_only requires either training.response_template or a "
-        "conversational SFT dataset that exposes assistant turns directly."
+        "loss_on_assistant_only requires one of Tenyson's built-in SFT dataset "
+        "schemas (`messages`, conversational `prompt`/`completion`, string "
+        "`prompt`/`answer`, string `prompt`/`completion`, string "
+        "`question`/`answer`, or `instruction`/`output` with optional `input`). "
+        "Legacy preformatted text runs can still use training.response_template "
+        "when packing is disabled."
     )
 
 
@@ -511,18 +481,45 @@ class SFTJob:
 
         print(f"[SFTJob] Train size: {len(train_dataset)}", flush=True)
 
-        formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
-        task_collator = self.task.get_sft_data_collator(self.config, tokenizer)
+        train_sample = train_dataset[0]
+        if (
+            not _is_pretokenized_sft_row(train_sample)
+            and supports_builtin_sft_schema(train_sample)
+        ):
+            train_dataset = normalize_builtin_sft_dataset(
+                train_dataset,
+                config=self.config,
+                dataset_name="train",
+            )
+            if (
+                eval_dataset is not None
+                and not _is_pretokenized_sft_row(eval_dataset[0])
+                and supports_builtin_sft_schema(eval_dataset[0])
+            ):
+                eval_dataset = normalize_builtin_sft_dataset(
+                    eval_dataset,
+                    config=self.config,
+                    dataset_name="eval",
+                )
+            print(
+                "[SFTJob] Normalized supported SFT rows into canonical chat messages.",
+                flush=True,
+            )
+            train_sample = train_dataset[0]
+        formatting_func = None
         assistant_only_strategy = _resolve_assistant_only_strategy(
             train_cfg,
-            train_sample=train_dataset[0],
-            formatting_func=formatting_func,
-            task_collator=task_collator,
+            train_sample=train_sample,
         )
-        formatting_func = assistant_only_strategy["formatting_func"]
         use_manual_assistant_masks = assistant_only_strategy[
             "use_manual_assistant_masks"
         ]
+        if (
+            formatting_func is None
+            and not use_manual_assistant_masks
+            and supports_builtin_sft_schema(train_sample)
+        ):
+            formatting_func = build_builtin_sft_formatting_func(tokenizer)
         if use_manual_assistant_masks:
             ensure_assistant_mask_chat_template(tokenizer)
             formatting_func = formatting_func or _fallback_sft_formatting_func
@@ -608,13 +605,18 @@ class SFTJob:
                 if use_manual_assistant_masks
                 else train_cfg.get("packing", False)
             ),
-            padding_free=bool(use_manual_assistant_masks),
+            padding_free=bool(
+                use_manual_assistant_masks and bool(train_cfg.get("packing", False))
+            ),
             assistant_only_loss=assistant_only_strategy[
                 "use_native_assistant_only_loss"
             ],
             dataset_text_field=(
                 train_cfg.get("dataset_text_field", "text")
-                if not formatting_func
+                if (
+                    not formatting_func
+                    and not _is_pretokenized_sft_row(train_dataset[0])
+                )
                 else None
             ),
             dataset_kwargs=manual_dataset_kwargs,
@@ -679,8 +681,8 @@ class SFTJob:
         if formatting_func is not None:
             trainer_kwargs["formatting_func"] = formatting_func
 
-        collator = task_collator
-        if collator is None and assistant_only_strategy["use_response_template_collator"]:
+        collator = None
+        if assistant_only_strategy["use_response_template_collator"]:
             loss_on_assistant_only = train_cfg.get("loss_on_assistant_only", False)
             response_template = train_cfg.get("response_template") or ""
             if loss_on_assistant_only and response_template:

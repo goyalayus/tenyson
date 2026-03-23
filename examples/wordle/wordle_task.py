@@ -488,27 +488,6 @@ def get_sft_eval_dataset(config: Dict[str, Any], tokenizer: Any) -> Optional[Dat
     return eval_dataset
 
 
-def get_sft_formatting_func(config: Dict[str, Any], tokenizer: Any):
-    """Applies the chat template during SFT."""
-
-    def format_conversation(example):
-        messages = example["messages"]
-        if messages and isinstance(messages[0], list):
-            return [
-                tokenizer.apply_chat_template(
-                    m, tokenize=False, add_generation_prompt=False
-                )
-                for m in messages
-            ]
-        return [
-            tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
-            )
-        ]
-
-    return format_conversation
-
-
 # ==============================================================================
 # RL PLUGIN HOOKS
 # ==============================================================================
@@ -753,7 +732,6 @@ _WORDLE_ENV = {
 _SFT_OVERRIDES: Dict[str, Any] = {
     "training": {
         "loss_on_assistant_only": True,
-        "response_template": "<|im_start|>assistant\n",
     },
     "task": {
         "sft_dataset": "goyalayus/wordle-reasoning-sft-prefix-keep-think",
@@ -792,7 +770,6 @@ ENVIRONMENT = EnvironmentDefinition(
             datasets=DatasetHooks(
                 primary=get_sft_dataset,
                 evaluation=get_sft_eval_dataset,
-                formatting=get_sft_formatting_func,
             ),
             env=_WORDLE_ENV,
             config_overrides=_SFT_OVERRIDES,

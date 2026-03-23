@@ -97,15 +97,13 @@ class SFTJobHelperTests(unittest.TestCase):
                 "packing": False,
             },
             train_sample={"text": "plain formatted sample"},
-            formatting_func="formatter",
-            task_collator=None,
         )
 
         self.assertFalse(strategy["use_native_assistant_only_loss"])
+        self.assertFalse(strategy["use_manual_assistant_masks"])
         self.assertTrue(strategy["use_response_template_collator"])
-        self.assertEqual(strategy["formatting_func"], "formatter")
 
-    def test_assistant_only_strategy_uses_native_masks_for_packed_conversations(self) -> None:
+    def test_assistant_only_strategy_uses_manual_masks_for_packed_builtin_rows(self) -> None:
         strategy = _resolve_assistant_only_strategy(
             {
                 "loss_on_assistant_only": True,
@@ -119,16 +117,17 @@ class SFTJobHelperTests(unittest.TestCase):
                     {"role": "assistant", "content": "a"},
                 ]
             },
-            formatting_func="formatter",
-            task_collator=None,
         )
 
-        self.assertTrue(strategy["use_native_assistant_only_loss"])
+        self.assertFalse(strategy["use_native_assistant_only_loss"])
+        self.assertTrue(strategy["use_manual_assistant_masks"])
         self.assertFalse(strategy["use_response_template_collator"])
-        self.assertIsNone(strategy["formatting_func"])
 
-    def test_assistant_only_strategy_rejects_packed_non_conversational_runs(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires a conversational SFT dataset"):
+    def test_assistant_only_strategy_rejects_packed_non_builtin_runs(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires one of Tenyson's built-in SFT dataset schemas",
+        ):
             _resolve_assistant_only_strategy(
                 {
                     "loss_on_assistant_only": True,
@@ -136,11 +135,9 @@ class SFTJobHelperTests(unittest.TestCase):
                     "packing": True,
                 },
                 train_sample={"text": "plain formatted sample"},
-                formatting_func="formatter",
-                task_collator=None,
             )
 
-    def test_assistant_only_strategy_allows_native_masks_without_response_template(self) -> None:
+    def test_assistant_only_strategy_uses_manual_masks_without_response_template_for_builtin_rows(self) -> None:
         strategy = _resolve_assistant_only_strategy(
             {
                 "loss_on_assistant_only": True,
@@ -153,13 +150,11 @@ class SFTJobHelperTests(unittest.TestCase):
                     {"role": "assistant", "content": "a"},
                 ]
             },
-            formatting_func="formatter",
-            task_collator=None,
         )
 
-        self.assertTrue(strategy["use_native_assistant_only_loss"])
+        self.assertFalse(strategy["use_native_assistant_only_loss"])
+        self.assertTrue(strategy["use_manual_assistant_masks"])
         self.assertFalse(strategy["use_response_template_collator"])
-        self.assertIsNone(strategy["formatting_func"])
 
     def test_resolve_sft_special_tokens_kwargs_uses_tokenizer_tokens(self) -> None:
         tokenizer = SimpleNamespace(eos_token="<|im_end|>", pad_token="<|PAD_TOKEN|>")

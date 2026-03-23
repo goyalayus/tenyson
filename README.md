@@ -45,6 +45,21 @@ Each named run carries:
 
 That is the big design point: task logic stays in the environment file, while experiment files stay focused on orchestration.
 
+For SFT specifically, the task only returns dataset rows. It does not provide a custom formatting hook.
+Tenyson owns the SFT chat-formatting path internally so packed assistant-only loss behaves the same way across environments.
+
+Supported built-in SFT row shapes are:
+
+- `messages`: list of `{role, content}`
+- conversational `prompt` + `completion` lists of messages
+- string `prompt` + `answer`
+- string `prompt` + `completion`
+- string `question` + `answer`
+- `instruction` + `output`, with optional `input`
+- optional `system` or `system_prompt` on the string-based schemas
+
+Tenyson converts those rows into canonical chat messages internally, then applies tokenization, assistant-token masking, and packing inside the library.
+
 ## The Shape Of An Experiment
 
 The Wordle experiment entrypoint in [`examples/wordle/experiment.py`](./examples/wordle/experiment.py) is the intended style.

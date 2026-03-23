@@ -16,5 +16,6 @@ Notes:
 
 - telemetry is always W&B, so the starter templates do not expose a backend field
 - the current runtime only accepts Qwen 3 family base models
+- SFT tasks should return one of Tenyson's built-in simple row schemas; Tenyson handles chat formatting, assistant-only masking, and packing internally
 
 The Wordle example uses these templates and then applies its own environment run overrides on top.

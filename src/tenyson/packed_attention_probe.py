@@ -74,7 +74,7 @@ def _find_subsequence(haystack: list[int], needle: list[int]) -> int:
 )
 def run_probe() -> Dict[str, Any]:
     import torch
-    from datasets import Dataset, load_dataset
+    from datasets import Dataset
     from unsloth import FastLanguageModel
     from trl import SFTConfig, SFTTrainer
     from trl.data_utils import pack_dataset
@@ -83,6 +83,7 @@ def run_probe() -> Dict[str, Any]:
     from tenyson.jobs.sft import (
         _prepare_manual_assistant_only_dataset,
     )
+    from tenyson.jobs.sft_dataset import normalize_builtin_sft_dataset
     from tenyson.jobs.tokenizer_utils import (
         ensure_assistant_mask_chat_template,
         normalize_tokenizer_special_tokens,
@@ -91,7 +92,6 @@ def run_probe() -> Dict[str, Any]:
     os.chdir("/workspace")
 
     model_name = "Qwen/Qwen3-0.6B"
-    dataset_name = "goyalayus/wordle-reasoning-sft-prefix-keep-think"
     max_length = 2048
 
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -106,7 +106,25 @@ def run_probe() -> Dict[str, Any]:
     ensure_assistant_mask_chat_template(tokenizer)
     model.eval()
 
-    raw = load_dataset(dataset_name, split="train[:2]")
+    raw = Dataset.from_list(
+        [
+            {
+                "system": "You are a careful sorting assistant.",
+                "prompt": "Sort these letters into alphabetical order: c b a",
+                "answer": "abc",
+            },
+            {
+                "system": "You are a careful sorting assistant.",
+                "prompt": "Sort these letters into alphabetical order: f d e",
+                "answer": "def",
+            },
+        ]
+    )
+    normalized = normalize_builtin_sft_dataset(
+        raw,
+        config={},
+        dataset_name="probe",
+    )
 
     def tokenize_messages(row: Dict[str, Any]) -> Dict[str, Any]:
         processed = tokenizer.apply_chat_template(
@@ -121,8 +139,8 @@ def run_probe() -> Dict[str, Any]:
             "assistant_masks": list(processed["assistant_masks"]),
         }
 
-    ex1 = tokenize_messages(raw[0])
-    ex2 = tokenize_messages(raw[1])
+    ex1 = tokenize_messages(normalized[0])
+    ex2 = tokenize_messages(normalized[1])
 
     replacement_tokens = tokenizer.encode(" the", add_special_tokens=False)
     replacement_id = (
@@ -185,6 +203,9 @@ def run_probe() -> Dict[str, Any]:
 
     result = {
         "model_name": model_name,
+        "raw_dataset_columns": list(raw.column_names),
+        "normalized_dataset_columns": list(normalized.column_names),
+        "normalized_messages_example_0": normalized[0]["messages"],
         "attn_implementation": getattr(model.config, "_attn_implementation", None),
         "batch_a_keys": sorted(batch_a.keys()),
         "packed_row_count": int(len(packed)),
@@ -225,7 +246,7 @@ def run_probe() -> Dict[str, Any]:
         return [""]
 
     trainer_dataset = _prepare_manual_assistant_only_dataset(
-        raw,
+        normalized,
         tokenizer=tokenizer,
         max_length=max_length,
         packing=True,
@@ -321,6 +342,12 @@ def run_probe() -> Dict[str, Any]:
     result["trainer_attention_isolated_for_example2"] = bool(
         result["trainer_max_abs_logit_diff_on_example2"] < 1e-5
     )
+    trainer_train_result = trainer.train()
+    result["trainer_global_step"] = int(trainer.state.global_step)
+    result["trainer_train_runtime"] = float(
+        trainer_train_result.metrics.get("train_runtime", 0.0)
+    )
+    result["trainer_train_completed"] = bool(result["trainer_global_step"] >= 1)
     return result
 
 
@@ -338,3 +365,5 @@ def main() -> None:
         raise SystemExit("trainer assistant-mask verification failed")
     if not result.get("trainer_attention_isolated_for_example2"):
         raise SystemExit("trainer cross-example attention leakage detected")
+    if not result.get("trainer_train_completed"):
+        raise SystemExit("trainer failed to complete a training step")
