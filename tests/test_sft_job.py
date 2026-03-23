@@ -3,8 +3,10 @@ import unittest
 
 from tenyson.jobs.sft import (
     _enable_best_model_tracking,
+    _resolve_requested_attn_implementation,
     _resolve_assistant_only_strategy,
     _resolve_sft_special_tokens_kwargs,
+    _validate_packing_attention_implementation,
     _push_final_adapter_snapshot,
     _resolve_early_stopping_settings,
 )
@@ -19,6 +21,43 @@ class FakePusher:
 
 
 class SFTJobHelperTests(unittest.TestCase):
+    def test_resolve_requested_attn_implementation_defaults_to_flash_attention_for_packing(self) -> None:
+        resolved = _resolve_requested_attn_implementation(
+            {"packing": True},
+            {},
+        )
+
+        self.assertEqual(resolved, "flash_attention_2")
+
+    def test_resolve_requested_attn_implementation_respects_explicit_override(self) -> None:
+        resolved = _resolve_requested_attn_implementation(
+            {"packing": True},
+            {"attn_implementation": "flash_attention_3"},
+        )
+
+        self.assertEqual(resolved, "flash_attention_3")
+
+    def test_validate_packing_attention_implementation_rejects_non_flash_attention(self) -> None:
+        model = SimpleNamespace(
+            config=SimpleNamespace(_attn_implementation="flex_attention")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "cross-contaminate packed samples"):
+            _validate_packing_attention_implementation(
+                {"packing": True},
+                model,
+            )
+
+    def test_validate_packing_attention_implementation_allows_supported_flash_attention(self) -> None:
+        model = SimpleNamespace(
+            config=SimpleNamespace(_attn_implementation="flash_attention_2")
+        )
+
+        _validate_packing_attention_implementation(
+            {"packing": True},
+            model,
+        )
+
     def test_resolve_early_stopping_settings_requires_eval_dataset(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires an SFT eval dataset"):
             _resolve_early_stopping_settings(

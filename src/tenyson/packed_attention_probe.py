@@ -101,6 +101,7 @@ def run_probe() -> Dict[str, Any]:
         load_in_4bit=True,
         load_in_8bit=False,
         fast_inference=False,
+        attn_implementation="flash_attention_2",
         trust_remote_code=True,
     )
     normalize_tokenizer_special_tokens(tokenizer)

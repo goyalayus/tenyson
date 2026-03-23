@@ -25,6 +25,14 @@ from tenyson.jobs.tokenizer_utils import (
     normalize_tokenizer_special_tokens,
 )
 
+_PACKING_FLASH_ATTENTION_IMPLEMENTATIONS = {
+    "flash_attention_2",
+    "flash_attention_3",
+    "kernels-community/flash-attn2",
+    "kernels-community/flash-attn3",
+    "kernels-community/vllm-flash-attn3",
+}
+
 
 def _resolve_eval_steps(
     train_cfg: Dict[str, Any],
@@ -154,6 +162,38 @@ def _resolve_sft_special_tokens_kwargs(
     if "pad_token" in accepted_fields and isinstance(pad_token, str) and pad_token:
         kwargs["pad_token"] = pad_token
     return kwargs
+
+
+def _resolve_requested_attn_implementation(
+    train_cfg: Dict[str, Any],
+    model_cfg: Dict[str, Any],
+) -> str | None:
+    configured = str(model_cfg.get("attn_implementation") or "").strip()
+    if configured:
+        return configured
+    if bool(train_cfg.get("packing", False)):
+        return "flash_attention_2"
+    return None
+
+
+def _validate_packing_attention_implementation(
+    train_cfg: Dict[str, Any],
+    model: Any,
+) -> None:
+    if not bool(train_cfg.get("packing", False)):
+        return
+
+    actual = str(getattr(model.config, "_attn_implementation", None) or "").strip()
+    if actual in _PACKING_FLASH_ATTENTION_IMPLEMENTATIONS:
+        return
+
+    supported = ", ".join(sorted(_PACKING_FLASH_ATTENTION_IMPLEMENTATIONS))
+    raise RuntimeError(
+        "Packed SFT requires a flash-attention backend that safely preserves "
+        f"packed-sequence boundaries. Got attn_implementation={actual!r}. "
+        "TRL warns that other attention implementations can cross-contaminate "
+        f"packed samples. Use one of: {supported}."
+    )
 
 
 def _fallback_sft_formatting_func(_example: Dict[str, Any]) -> list[str]:
@@ -346,7 +386,7 @@ class SFTJob:
         seq_len = model_cfg.get("max_seq_length", 2048)
 
         print(f"[SFTJob] Loading model {model_name}...", flush=True)
-        model, tokenizer = FastLanguageModel.from_pretrained(
+        load_kwargs: Dict[str, Any] = dict(
             model_name=model_name,
             max_seq_length=seq_len,
             load_in_4bit=model_cfg.get("load_in_4bit", True),
@@ -354,8 +394,17 @@ class SFTJob:
             fast_inference=model_cfg.get("fast_inference", False),
             trust_remote_code=True,
         )
+        attn_implementation = _resolve_requested_attn_implementation(
+            train_cfg,
+            model_cfg,
+        )
+        if attn_implementation:
+            load_kwargs["attn_implementation"] = attn_implementation
+
+        model, tokenizer = FastLanguageModel.from_pretrained(**load_kwargs)
 
         normalize_tokenizer_special_tokens(tokenizer)
+        _validate_packing_attention_implementation(train_cfg, model)
 
         print("[SFTJob] Applying LoRA...", flush=True)
         lora_cfg = self.config.get("lora", {})
