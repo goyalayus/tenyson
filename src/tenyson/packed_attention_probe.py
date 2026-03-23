@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import sys
@@ -11,7 +10,6 @@ import modal
 
 from tenyson.cloud.modal import ModalManager, _build_clone_repo_command
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
-from tenyson.jobs.sft import _resolve_sft_special_tokens_kwargs
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -76,9 +74,10 @@ def _find_subsequence(haystack: list[int], needle: list[int]) -> int:
 )
 def run_probe() -> Dict[str, Any]:
     import torch
-    from datasets import load_dataset
+    from datasets import Dataset, load_dataset
+    from trl.data_utils import pack_dataset
+    from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
     from unsloth import FastLanguageModel
-    from trl import SFTConfig, SFTTrainer
 
     from tenyson.jobs.tokenizer_utils import (
         ensure_assistant_mask_chat_template,
@@ -127,48 +126,18 @@ def run_probe() -> Dict[str, Any]:
         if replacement_tokens
         else int(tokenizer.eos_token_id)
     )
-    ex1_mut = {
-        "input_ids": [replacement_id] * len(ex1["input_ids"]),
-        "assistant_masks": list(ex1["assistant_masks"]),
-    }
-
-    config_kwargs = {
-        "output_dir": "/tmp/packed_attention_probe",
-        "max_length": max_length,
-        "packing": True,
-        "assistant_only_loss": True,
-        "per_device_train_batch_size": 1,
-        "gradient_accumulation_steps": 1,
-        "max_steps": 1,
-        "learning_rate": 1.0e-5,
-        "warmup_steps": 0,
-        "logging_steps": 1,
-        "save_strategy": "no",
-        "report_to": "none",
-        "dataset_num_proc": 1,
-        "shuffle_dataset": False,
-    }
-    accepted = set(inspect.signature(SFTConfig.__init__).parameters.keys())
-    config_kwargs.update(
-        _resolve_sft_special_tokens_kwargs(
-            tokenizer,
-            accepted_fields=accepted,
-        )
+    packed = pack_dataset(
+        Dataset.from_list([ex1, ex2]),
+        seq_length=max_length,
+        strategy="bfd",
     )
-    args = SFTConfig(**{key: value for key, value in config_kwargs.items() if key in accepted})
-
-    def build_batch(dataset):
-        trainer = SFTTrainer(
-            model=model,
-            args=args,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-        )
-        batch = next(iter(trainer.get_train_dataloader()))
-        prepared_row = trainer.train_dataset[0]
-        return batch, prepared_row
-
-    batch_a, prepared_a = build_batch(raw)
+    prepared_a = packed[0]
+    collator = DataCollatorForLanguageModeling(
+        pad_token_id=int(tokenizer.pad_token_id),
+        completion_only_loss=True,
+        padding_free=True,
+    )
+    batch_a = collator([prepared_a])
 
     batch_b: Dict[str, Any] = {}
     for key, value in batch_a.items():
@@ -214,6 +183,7 @@ def run_probe() -> Dict[str, Any]:
         "model_name": model_name,
         "attn_implementation": getattr(model.config, "_attn_implementation", None),
         "batch_a_keys": sorted(batch_a.keys()),
+        "packed_row_count": int(len(packed)),
         "prepared_seq_lengths": list(prepared_a["seq_lengths"]),
         "example1_start": int(ex1_start),
         "assistant_token_count_a": int(sum(assistant_mask_a)),
