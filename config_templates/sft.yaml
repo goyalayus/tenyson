@@ -32,9 +32,9 @@ training:
   eval_steps: 20
   save_total_limit: 1
   optim: "adamw_8bit"
-  # Packed assistant-only SFT works when the task returns one of Tenyson's built-in
-  # SFT row schemas. Tenyson converts those rows into canonical chat messages and
-  # builds the assistant masks internally.
+  # Packed assistant-only SFT uses Tenyson's built-in row normalization and
+  # assistant-mask path. The runtime must still resolve to a safe flash-attention
+  # backend; otherwise Tenyson fails fast rather than risk packed-sample leakage.
   packing: false
   # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 20

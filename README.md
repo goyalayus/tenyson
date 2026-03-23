@@ -59,6 +59,7 @@ Supported built-in SFT row shapes are:
 - optional `system` or `system_prompt` on the string-based schemas
 
 Tenyson converts those rows into canonical chat messages internally, then applies tokenization, assistant-token masking, and packing inside the library.
+If packed SFT is enabled, Tenyson also requires the runtime to resolve to a flash-attention backend that TRL considers safe for packed sequences; otherwise it fails fast instead of risking cross-sample leakage.
 
 ## The Shape Of An Experiment
 
