@@ -1,0 +1,20 @@
+model:
+  name: "unsloth/qwen3-4b-unsloth-bnb-4bit"
+  max_seq_length: 4096
+  load_in_4bit: true
+  # These should match the adapter shape you expect to load for evaluation.
+  lora_r: 16
+  lora_alpha: 32
+  lora_target_modules: ["up_proj", "gate_proj", "down_proj"]
+
+vllm:
+  enabled: true
+  # Fraction of GPU memory reserved for vLLM generation.
+  gpu_memory_utilization: 0.9
+  temperature: 0.0  # Greedy decoding for evals
+  top_p: 1.0
+  # Max generation length during evaluation.
+  max_tokens: 1024
+
+telemetry:
+  backend: "wandb"

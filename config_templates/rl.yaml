@@ -1,0 +1,46 @@
+model:
+  name: "unsloth/qwen3-4b-unsloth-bnb-4bit"
+  max_seq_length: 4096
+  load_in_4bit: true
+  # Lets Unsloth use its fast generation path for GRPO rollouts.
+  fast_inference: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  bias: "none"
+  # Adjust these if the base model uses different linear layer names.
+  target_modules: ["up_proj", "gate_proj", "down_proj"]
+  # Unsloth's memory-saving checkpointing mode.
+  gradient_checkpointing: "unsloth"
+
+vllm:
+  enabled: true
+  # Fraction of GPU memory reserved for vLLM generation; lower this first if rollouts OOM.
+  gpu_memory_utilization: 0.9
+  temperature: 1.0
+  min_p: 0.1
+  top_p: 1.0
+  # -1 disables top-k truncation.
+  top_k: -1
+  max_tokens: 2048
+
+training:
+  seed: 3407
+  max_steps: 1000
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-6
+  optim: "adamw_8bit"
+  # Number of sampled completions per prompt in each GRPO rollout batch.
+  num_generations: 4
+  # Prompt token budget before generation starts.
+  max_prompt_length: 2048
+  # Must match vllm.max_tokens when vLLM is enabled.
+  max_completion_length: 2048
+  # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
+  hf_push_every_steps: 50
+
+telemetry:
+  backend: "wandb"
