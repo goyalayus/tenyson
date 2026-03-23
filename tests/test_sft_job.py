@@ -4,6 +4,7 @@ import unittest
 from tenyson.jobs.sft import (
     _enable_best_model_tracking,
     _resolve_assistant_only_strategy,
+    _resolve_sft_special_tokens_kwargs,
     _push_final_adapter_snapshot,
     _resolve_early_stopping_settings,
 )
@@ -159,6 +160,22 @@ class SFTJobHelperTests(unittest.TestCase):
         self.assertTrue(strategy["use_native_assistant_only_loss"])
         self.assertFalse(strategy["use_response_template_collator"])
         self.assertIsNone(strategy["formatting_func"])
+
+    def test_resolve_sft_special_tokens_kwargs_uses_tokenizer_tokens(self) -> None:
+        tokenizer = SimpleNamespace(eos_token="<|im_end|>", pad_token="<|PAD_TOKEN|>")
+
+        resolved = _resolve_sft_special_tokens_kwargs(
+            tokenizer,
+            accepted_fields={"eos_token", "pad_token", "run_name"},
+        )
+
+        self.assertEqual(
+            resolved,
+            {
+                "eos_token": "<|im_end|>",
+                "pad_token": "<|PAD_TOKEN|>",
+            },
+        )
 
 
 if __name__ == "__main__":

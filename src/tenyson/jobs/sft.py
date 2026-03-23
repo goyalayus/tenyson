@@ -166,6 +166,21 @@ def _resolve_assistant_only_strategy(
     )
 
 
+def _resolve_sft_special_tokens_kwargs(
+    tokenizer: Any,
+    *,
+    accepted_fields: set[str],
+) -> Dict[str, str]:
+    kwargs: Dict[str, str] = {}
+    eos_token = getattr(tokenizer, "eos_token", None)
+    pad_token = getattr(tokenizer, "pad_token", None)
+    if "eos_token" in accepted_fields and isinstance(eos_token, str) and eos_token:
+        kwargs["eos_token"] = eos_token
+    if "pad_token" in accepted_fields and isinstance(pad_token, str) and pad_token:
+        kwargs["pad_token"] = pad_token
+    return kwargs
+
+
 def _push_final_adapter_snapshot(
     *,
     repo_id: str,
@@ -407,6 +422,12 @@ class SFTJob:
             ),
         )
         accepted = set(inspect.signature(SFTConfig.__init__).parameters.keys())
+        cfg_kwargs.update(
+            _resolve_sft_special_tokens_kwargs(
+                tokenizer,
+                accepted_fields=accepted,
+            )
+        )
         required_hub_fields = {
             "save_strategy",
             "save_steps",

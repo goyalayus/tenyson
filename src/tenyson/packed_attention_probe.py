@@ -11,6 +11,7 @@ import modal
 
 from tenyson.cloud.modal import ModalManager, _build_clone_repo_command
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
+from tenyson.jobs.sft import _resolve_sft_special_tokens_kwargs
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -76,8 +77,8 @@ def _find_subsequence(haystack: list[int], needle: list[int]) -> int:
 def run_probe() -> Dict[str, Any]:
     import torch
     from datasets import Dataset, load_dataset
-    from trl import SFTConfig, SFTTrainer
     from unsloth import FastLanguageModel
+    from trl import SFTConfig, SFTTrainer
 
     from tenyson.jobs.tokenizer_utils import (
         ensure_assistant_mask_chat_template,
@@ -148,6 +149,12 @@ def run_probe() -> Dict[str, Any]:
         "shuffle_dataset": False,
     }
     accepted = set(inspect.signature(SFTConfig.__init__).parameters.keys())
+    config_kwargs.update(
+        _resolve_sft_special_tokens_kwargs(
+            tokenizer,
+            accepted_fields=accepted,
+        )
+    )
     args = SFTConfig(**{key: value for key, value in config_kwargs.items() if key in accepted})
 
     def build_batch(rows: list[Dict[str, Any]]):
