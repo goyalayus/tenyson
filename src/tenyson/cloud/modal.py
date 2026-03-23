@@ -2,7 +2,6 @@ import importlib
 import inspect
 import os
 from collections import deque
-from contextlib import nullcontext
 from dataclasses import dataclass
 import subprocess
 import sys
@@ -142,11 +141,6 @@ class ModalManager(BaseCloudManager):
         self.gpu = gpu
         self.timeout = timeout
 
-    @staticmethod
-    def _modal_output_enabled() -> bool:
-        raw = str(os.getenv("TENYSON_MODAL_ENABLE_OUTPUT", "false")).strip().lower()
-        return raw in {"1", "true", "yes", "on"}
-
     @classmethod
     def from_env(cls, **overrides: Any) -> "ModalManager":
         timeout_value = os.getenv("TENYSON_MODAL_TIMEOUT", "86400").strip()
@@ -200,7 +194,7 @@ class ModalManager(BaseCloudManager):
     def _resolve_task_spec(self, task: Any, repo_root: str) -> str:
         """
         Prefer module:Class for importable task modules; fall back to a task file path
-        relative to the mounted repo root for file-loaded plugins.
+        relative to the checked-out repo root for file-loaded plugins.
         """
         module_path = task.__class__.__module__
         class_name = task.__class__.__name__
@@ -438,17 +432,8 @@ PY
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
             try:
-                # Modal's local output manager is helpful for interactive use, but
-                # it is not reliable when multiple Modal-backed branches launch in
-                # parallel from the same controller process.
-                output_context = (
-                    modal.enable_output()
-                    if self._modal_output_enabled()
-                    else nullcontext()
-                )
-                with output_context:
-                    with app.run():
-                        run_remote.remote(job_type, job.config, task_spec)
+                with app.run():
+                    run_remote.remote(job_type, job.config, task_spec)
             except Exception as exc:  # noqa: BLE001
                 hf_repo_id, hf_revision = _resolve_failed_resume_target()
                 result = JobResult(

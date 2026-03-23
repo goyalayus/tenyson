@@ -63,6 +63,7 @@ Jobs run through a cloud manager. The manager launches `python -m tenyson.runner
 
 Local GPU execution is intentionally not the default path. Tenyson expects to run through a supported remote provider.
 Modal execution is git-backed: commit and push your code first, then the worker checks out that exact commit remotely.
+There is no local source-sync or dev-mode upload path in the Modal runner.
 
 ```python
 from pathlib import Path

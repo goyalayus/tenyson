@@ -104,16 +104,6 @@ class ModalGitSourceTests(unittest.TestCase):
                 manager._resolve_git_source("/repo")
 
 
-class ModalOutputTests(unittest.TestCase):
-    def test_modal_output_disabled_by_default(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(ModalManager._modal_output_enabled())
-
-    def test_modal_output_can_be_enabled_explicitly(self) -> None:
-        with patch.dict(os.environ, {"TENYSON_MODAL_ENABLE_OUTPUT": "true"}, clear=True):
-            self.assertTrue(ModalManager._modal_output_enabled())
-
-
 class ModalSubprocessStreamingTests(unittest.TestCase):
     def test_streaming_helper_forwards_output_and_keeps_error_tail(self) -> None:
         cmd = [
