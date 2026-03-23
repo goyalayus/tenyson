@@ -4,8 +4,8 @@ import unittest
 from tenyson.jobs.sft import (
     _enable_best_model_tracking,
     _push_final_adapter_snapshot,
-    _validate_completion_only_training_settings,
     _resolve_early_stopping_settings,
+    _reject_removed_sft_packing_setting,
 )
 
 
@@ -88,24 +88,21 @@ class SFTJobHelperTests(unittest.TestCase):
         self.assertIn("checkpoint-40", model.calls[0][1])
         self.assertIn("step=42", model.calls[0][1])
 
-    def test_validate_completion_only_training_settings_rejects_packing(self) -> None:
-        with self.assertRaisesRegex(ValueError, "packing=True"):
-            _validate_completion_only_training_settings(
-                {
-                    "loss_on_assistant_only": True,
-                    "response_template": "<|im_start|>assistant\n",
-                    "packing": True,
-                }
-            )
-
-    def test_validate_completion_only_training_settings_allows_non_packed(self) -> None:
-        _validate_completion_only_training_settings(
+    def test_reject_removed_sft_packing_setting_allows_missing_key(self) -> None:
+        _reject_removed_sft_packing_setting(
             {
                 "loss_on_assistant_only": True,
                 "response_template": "<|im_start|>assistant\n",
-                "packing": False,
             }
         )
+
+    def test_reject_removed_sft_packing_setting_rejects_true(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no longer supported for SFT"):
+            _reject_removed_sft_packing_setting({"packing": True})
+
+    def test_reject_removed_sft_packing_setting_rejects_false_too(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Remove this field from the config"):
+            _reject_removed_sft_packing_setting({"packing": False})
 
 
 if __name__ == "__main__":

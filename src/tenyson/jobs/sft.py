@@ -81,16 +81,12 @@ def _enable_best_model_tracking(training_args: Any) -> None:
     training_args.greater_is_better = False
 
 
-def _validate_completion_only_training_settings(train_cfg: Dict[str, Any]) -> None:
-    if not train_cfg.get("loss_on_assistant_only", False):
-        return
-    if not train_cfg.get("response_template"):
-        return
-    if not train_cfg.get("packing", False):
+def _reject_removed_sft_packing_setting(train_cfg: Dict[str, Any]) -> None:
+    if "packing" not in train_cfg:
         return
     raise ValueError(
-        "loss_on_assistant_only is not supported with packing=True in Tenyson's "
-        "built-in response-template masking path. Set training.packing to false."
+        "training.packing is no longer supported for SFT. Remove this field from "
+        "the config; Tenyson keeps SFT packing disabled internally."
     )
 
 
@@ -203,7 +199,7 @@ class SFTJob:
         attempt_token = str(
             self.config.get("telemetry", {}).get("attempt_token") or ""
         ).strip() or None
-        _validate_completion_only_training_settings(train_cfg)
+        _reject_removed_sft_packing_setting(train_cfg)
         backend_ref, experiment_id = resolve_required_telemetry_context(self.config)
         telemetry_client: Any = TelemetryClient(db_url=backend_ref)
         ensure_wandb_telemetry_run(
@@ -310,7 +306,6 @@ class SFTJob:
             report_to=report_to,
             run_name=run_name,
             seed=train_cfg.get("seed", 3407),
-            packing=train_cfg.get("packing", False),
             dataset_text_field=(
                 train_cfg.get("dataset_text_field", "text")
                 if not formatting_func
