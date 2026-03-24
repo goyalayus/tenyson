@@ -489,6 +489,13 @@ class ModalManager(BaseCloudManager):
             )
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            existing_pythonpath = str(env.get("PYTHONPATH") or "").strip()
+            src_path = os.path.join(local_project_root, "src")
+            env["PYTHONPATH"] = (
+                src_path
+                if not existing_pythonpath
+                else os.pathsep.join([src_path, existing_pythonpath])
+            )
             returncode, details = _run_subprocess_with_streaming_logs(
                 cmd,
                 cwd=local_project_root,

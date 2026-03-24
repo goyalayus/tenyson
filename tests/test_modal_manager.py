@@ -263,6 +263,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         self.assertIn("tenyson.cloud.modal_launcher", cmd)
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
+        self.assertTrue(kwargs["env"]["PYTHONPATH"].startswith("/repo/src"))
         unlink.assert_called_once_with("/tmp/fake-job.yaml")
 
     def test_modal_launcher_raises_with_subprocess_tail(self) -> None:
