@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from tenyson.cloud.modal import (
     _modal_run_remote,
     _normalize_git_clone_url,
     _run_subprocess_with_streaming_logs,
+    _wait_for_modal_function_call,
     _write_temp_config_payload,
 )
 from tenyson.cloud.runtime_deps import REMOTE_RUNTIME_PACKAGES, runtime_pip_install_command
@@ -297,6 +299,141 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                     task_spec="examples/wordle/wordle_task.py",
                     local_project_root="/repo",
                 )
+
+
+class ModalDetachedLaunchTests(unittest.TestCase):
+    def test_wait_for_modal_function_call_retries_timeout_until_success(self) -> None:
+        attempts: list[float] = []
+
+        class FakeFunctionCall:
+            def __init__(self) -> None:
+                self._calls = 0
+
+            def get(self, timeout=None):
+                attempts.append(timeout)
+                self._calls += 1
+                if self._calls == 1:
+                    raise TimeoutError("still running")
+                return {"ok": True}
+
+        fake_call = FakeFunctionCall()
+        fake_modal = SimpleNamespace(
+            FunctionCall=SimpleNamespace(from_id=lambda function_call_id: fake_call)
+        )
+
+        with patch.dict(sys.modules, {"modal": fake_modal}):
+            _wait_for_modal_function_call(
+                "fc-123",
+                poll_timeout_seconds=0.25,
+                overall_timeout_seconds=1.0,
+            )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], 0.25)
+
+    def test_run_modal_job_spawns_detached_app_and_waits_on_function_call(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeImageBuilder:
+            def run_commands(self, *args, **kwargs):
+                return self
+
+            def env(self, *args, **kwargs):
+                return self
+
+        class FakeSecret:
+            @staticmethod
+            def from_dict(value):
+                return {"secret": dict(value)}
+
+        class FakeEnableOutput:
+            def __enter__(self):
+                captured["enable_output_entered"] = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                captured["enable_output_exited"] = True
+                return False
+
+        class FakeBoundFunction:
+            def spawn(self, *args):
+                captured["spawn_args"] = args
+                return SimpleNamespace(object_id="fc-123")
+
+        class FakeRunContext:
+            def __init__(self, app):
+                self.app = app
+
+            def __enter__(self):
+                captured["run_entered"] = True
+                return self.app
+
+            def __exit__(self, exc_type, exc, tb):
+                captured["run_exited"] = True
+                return False
+
+        class FakeApp:
+            def __init__(self, description):
+                captured["app_description"] = description
+                self.app_id = "ap-test"
+
+            def function(self, **options):
+                captured["function_options"] = options
+
+                def decorator(fn):
+                    captured["decorated_function"] = fn
+                    return FakeBoundFunction()
+
+                return decorator
+
+            def run(self, **kwargs):
+                captured["run_kwargs"] = kwargs
+                return FakeRunContext(self)
+
+        fake_modal = SimpleNamespace(
+            App=FakeApp,
+            Image=SimpleNamespace(
+                debian_slim=lambda python_version: FakeImageBuilder()
+            ),
+            Secret=FakeSecret,
+            enable_output=lambda: FakeEnableOutput(),
+        )
+        manager = ModalManager(timeout=7200)
+
+        with patch.dict(sys.modules, {"modal": fake_modal}), patch(
+            "tenyson.cloud.modal.runtime_pip_install_command",
+            return_value="python3 -m pip install unsloth vllm",
+        ), patch.object(
+            manager,
+            "_resolve_local_project_root",
+            return_value="/repo",
+        ), patch.object(
+            manager,
+            "_resolve_git_source",
+            return_value=SimpleNamespace(
+                clone_url="https://github.com/example/repo.git",
+                commit="abc123",
+            ),
+        ), patch(
+            "tenyson.cloud.modal._wait_for_modal_function_call"
+        ) as wait_mock:
+            manager._run_modal_job(
+                job_type="rl",
+                config_payload={"training": {"steps": 4}},
+                task_spec="examples/wordle/wordle_task.py",
+            )
+
+        self.assertTrue(captured["enable_output_entered"])
+        self.assertEqual(captured["run_kwargs"], {"detach": True})
+        self.assertEqual(
+            captured["spawn_args"],
+            ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),
+        )
+        wait_mock.assert_called_once_with(
+            "fc-123",
+            poll_timeout_seconds=30.0,
+            overall_timeout_seconds=7500.0,
+        )
 
 
 class RuntimeDependencyTests(unittest.TestCase):

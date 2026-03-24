@@ -11,9 +11,9 @@ import torch
 import tenyson.jobs.eval as eval_module
 from tenyson.jobs.eval import (
     EvalJob,
+    _require_eval_vllm_config,
     _resolve_eval_fast_inference_requested,
     _resolve_eval_model_load_kwargs,
-    _should_retry_eval_without_vllm,
 )
 from tenyson.jobs.rl import (
     _build_grpo_vllm_overrides,
@@ -21,10 +21,9 @@ from tenyson.jobs.rl import (
     _build_vllm_generation_kwargs,
     _ensure_trl_vllm_guided_decoding_compat,
     _ensure_trl_vllm_sampling_params_compat,
-    _resolve_effective_rl_vllm_config,
+    _require_rl_vllm_config,
     _resolve_unsloth_model_load_kwargs,
     _resolve_grpo_max_completion_length,
-    _should_retry_rl_without_vllm,
     RLJob,
 )
 from tenyson.jobs.reporting_utils import normalize_report_to
@@ -368,22 +367,19 @@ class RLConfigHelpersTests(unittest.TestCase):
             },
         )
 
-    def test_retry_rl_without_vllm_matches_known_unsloth_startup_error(self) -> None:
-        self.assertTrue(
-            _should_retry_rl_without_vllm(
-                RuntimeError("standalone_compile does not have the attribute FakeTensorMode")
+    def test_require_rl_vllm_config_rejects_disabled_vllm(self) -> None:
+        with self.assertRaisesRegex(ValueError, "RL requires vLLM"):
+            _require_rl_vllm_config(
+                {"fast_inference": True},
+                {"enabled": False},
             )
-        )
-        self.assertFalse(_should_retry_rl_without_vllm(RuntimeError("plain boom")))
 
-    def test_resolve_effective_rl_vllm_config_disables_vllm_after_runtime_fallback(self) -> None:
-        effective_cfg = _resolve_effective_rl_vllm_config(
-            {"enabled": True, "gpu_memory_utilization": 0.8},
-            False,
-        )
-
-        self.assertFalse(effective_cfg["enabled"])
-        self.assertEqual(effective_cfg["gpu_memory_utilization"], 0.8)
+    def test_require_rl_vllm_config_rejects_colocate_without_fast_inference(self) -> None:
+        with self.assertRaisesRegex(ValueError, "model.fast_inference=true"):
+            _require_rl_vllm_config(
+                {"fast_inference": False},
+                {"enabled": True, "mode": "colocate"},
+            )
 
     def test_trl_vllm_compat_aliases_guided_decoding_params(self) -> None:
         module_name = "vllm.sampling_params"
@@ -561,54 +557,48 @@ class EvalFallbackTests(unittest.TestCase):
 
         self.assertEqual(kwargs, {"fast_inference": False})
 
-    def test_retry_eval_without_vllm_matches_known_unsloth_startup_error(self) -> None:
-        self.assertTrue(
-            _should_retry_eval_without_vllm(
-                RuntimeError("standalone_compile does not have the attribute FakeTensorMode")
+    def test_require_eval_vllm_config_rejects_disabled_vllm(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Eval requires vLLM"):
+            _require_eval_vllm_config(
+                {},
+                {"enabled": False},
             )
-        )
-        self.assertFalse(_should_retry_eval_without_vllm(RuntimeError("plain boom")))
 
-    def test_build_sampling_params_skips_vllm_when_disabled(self) -> None:
-        job = EvalJob(
-            config={"evaluation": {"run_name": "eval_test"}, "vllm": {"enabled": False}},
-            task=object(),
-        )
+    def test_require_eval_vllm_config_rejects_disabled_fast_inference(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires vLLM fast inference"):
+            _require_eval_vllm_config(
+                {"fast_inference": False},
+                {"enabled": True},
+            )
 
-        sampling_params = job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
-
-        self.assertIsNone(sampling_params)
-
-    def test_build_sampling_params_skips_vllm_after_runtime_fallback(self) -> None:
+    def test_build_sampling_params_requires_vllm_runtime(self) -> None:
         job = EvalJob(
             config={"evaluation": {"run_name": "eval_test"}, "vllm": {"enabled": True}},
             task=object(),
         )
         job._vllm_runtime_enabled = False
 
-        sampling_params = job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
+        with self.assertRaisesRegex(RuntimeError, "Eval requires vLLM"):
+            job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
 
-        self.assertIsNone(sampling_params)
-
-    def test_generate_batch_uses_transformers_path_when_vllm_disabled(self) -> None:
+    def test_generate_batch_refuses_transformers_fallback(self) -> None:
         job = EvalJob(
             config={
                 "evaluation": {"run_name": "eval_test"},
-                "vllm": {"enabled": False, "max_tokens": 2, "temperature": 0.0},
+                "vllm": {"enabled": True, "max_tokens": 2, "temperature": 0.0},
             },
             task=object(),
         )
 
-        completions = job._generate_batch(
-            _DummyModel(),
-            _DummyTokenizer(),
-            ["ab", "c"],
-            sampling_params=None,
-        )
+        with self.assertRaisesRegex(RuntimeError, "Refusing to fall back"):
+            job._generate_batch(
+                _DummyModel(),
+                _DummyTokenizer(),
+                ["ab", "c"],
+                sampling_params=None,
+            )
 
-        self.assertEqual(completions, ["XY", "Z"])
-
-    def test_build_model_and_tokenizer_retries_without_vllm_after_compat_failure(self) -> None:
+    def test_build_model_and_tokenizer_fails_when_vllm_startup_breaks(self) -> None:
         module_name = "unsloth"
         original_module = sys.modules.get(module_name)
         calls = []
@@ -638,7 +628,11 @@ class EvalFallbackTests(unittest.TestCase):
             job = EvalJob(
                 config={
                     "evaluation": {"run_name": "eval_test"},
-                    "model": {"name": "Qwen/Qwen3-4B", "load_in_4bit": True},
+                    "model": {
+                        "name": "Qwen/Qwen3-4B",
+                        "load_in_4bit": True,
+                        "fast_inference": True,
+                    },
                     "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
                 },
                 task=object(),
@@ -647,8 +641,11 @@ class EvalFallbackTests(unittest.TestCase):
             with unittest.mock.patch.object(
                 eval_module,
                 "normalize_tokenizer_special_tokens",
-            ) as normalize_mock:
-                model, _tokenizer = job._build_model_and_tokenizer()
+            ) as normalize_mock, self.assertRaisesRegex(
+                RuntimeError,
+                "Eval requires vLLM and will now abort",
+            ):
+                job._build_model_and_tokenizer()
 
         finally:
             if original_module is None:
@@ -656,19 +653,15 @@ class EvalFallbackTests(unittest.TestCase):
             else:
                 sys.modules[module_name] = original_module
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0]["fast_inference"])
         self.assertEqual(calls[0]["gpu_memory_utilization"], 0.8)
-        self.assertFalse(calls[1]["fast_inference"])
-        self.assertNotIn("gpu_memory_utilization", calls[1])
-        self.assertFalse(job._vllm_runtime_enabled)
-        self.assertFalse(model.mode)
-        self.assertTrue(model.for_inference_called)
-        normalize_mock.assert_called_once()
+        self.assertTrue(job._vllm_runtime_enabled)
+        normalize_mock.assert_not_called()
 
 
 class RLFallbackTests(unittest.TestCase):
-    def test_build_model_and_tokenizer_retries_without_fast_inference_after_compat_failure(self) -> None:
+    def test_build_model_and_tokenizer_fails_when_vllm_startup_breaks(self) -> None:
         module_name = "unsloth"
         original_module = sys.modules.get(module_name)
         original_standby = os.environ.get("UNSLOTH_VLLM_STANDBY")
@@ -721,8 +714,11 @@ class RLFallbackTests(unittest.TestCase):
 
             with unittest.mock.patch(
                 "tenyson.jobs.rl.normalize_tokenizer_special_tokens"
-            ) as normalize_mock:
-                model, _tokenizer = job._build_model_and_tokenizer()
+            ) as normalize_mock, self.assertRaisesRegex(
+                RuntimeError,
+                "RL requires vLLM and will now abort",
+            ):
+                job._build_model_and_tokenizer()
         finally:
             if original_standby is None:
                 os.environ.pop("UNSLOTH_VLLM_STANDBY", None)
@@ -734,19 +730,12 @@ class RLFallbackTests(unittest.TestCase):
                 sys.modules[module_name] = original_module
 
         self.assertEqual(os.environ.get("UNSLOTH_VLLM_STANDBY"), original_standby)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(standby_values, ["1", "1"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(standby_values, ["1"])
         self.assertTrue(calls[0]["fast_inference"])
         self.assertEqual(calls[0]["gpu_memory_utilization"], 0.8)
-        self.assertFalse(calls[1]["fast_inference"])
-        self.assertNotIn("gpu_memory_utilization", calls[1])
-        self.assertFalse(job._vllm_runtime_enabled)
-        self.assertEqual(model.mode, "train")
-        self.assertEqual(
-            model.peft_kwargs["target_modules"],
-            ["up_proj", "gate_proj", "down_proj"],
-        )
-        normalize_mock.assert_called_once()
+        self.assertTrue(job._vllm_runtime_enabled)
+        normalize_mock.assert_not_called()
 
 
 if __name__ == "__main__":

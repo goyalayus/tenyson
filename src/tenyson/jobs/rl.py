@@ -186,27 +186,21 @@ def _resolve_unsloth_model_load_kwargs(
     return kwargs
 
 
-def _should_retry_rl_without_vllm(exc: Exception) -> bool:
-    message = str(exc)
-    return any(
-        token in message
-        for token in (
-            "FakeTensorMode",
-            "load_vllm",
-            "standalone_compile",
-            "vllm",
-        )
-    )
-
-
-def _resolve_effective_rl_vllm_config(
+def _require_rl_vllm_config(
+    model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
-    runtime_enabled: bool | None,
-) -> Dict[str, Any]:
-    effective_cfg = dict(vllm_cfg)
-    if runtime_enabled is False:
-        effective_cfg["enabled"] = False
-    return effective_cfg
+) -> None:
+    if not bool(vllm_cfg.get("enabled", False)):
+        raise ValueError(
+            "RL requires vLLM. Set vllm.enabled=true for RL runs."
+        )
+
+    mode = str(vllm_cfg.get("mode", "colocate") or "colocate").strip().lower()
+    if mode == "colocate" and not bool(model_cfg.get("fast_inference", False)):
+        raise ValueError(
+            "RL vLLM colocate mode requires model.fast_inference=true. "
+            "Tenyson now fails instead of silently falling back to non-vLLM generation."
+        )
 
 
 def _ensure_trl_vllm_guided_decoding_compat() -> None:
@@ -536,6 +530,7 @@ class RLJob:
         lora_cfg = self.config.get("lora", {})
         train_cfg = self.config.get("training", {})
         vllm_cfg = self.config.get("vllm", {})
+        _require_rl_vllm_config(model_cfg, vllm_cfg)
 
         init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
         init_adapter = None
@@ -599,22 +594,13 @@ class RLJob:
                 **unsloth_load_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
-            if not requested_fast_inference or not _should_retry_rl_without_vllm(exc):
-                raise
-            self._vllm_runtime_enabled = False
-            print(
-                "[RLJob] Warning: Unsloth vLLM startup failed during RL model load; "
-                "retrying without fast inference and disabling GRPO vLLM for this "
-                f"attempt. {exc}",
-                flush=True,
-            )
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=model_name,
-                max_seq_length=seq_len,
-                load_in_4bit=load_in_4bit,
-                max_lora_rank=int(lora_runtime_kwargs["r"]),
-                fast_inference=False,
-            )
+            if requested_fast_inference:
+                raise RuntimeError(
+                    "[RLJob] Unsloth vLLM startup failed during RL model load. "
+                    "RL requires vLLM and will now abort instead of retrying "
+                    f"without fast inference. {exc}"
+                ) from exc
+            raise
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
@@ -675,18 +661,7 @@ class RLJob:
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
 
         model, tokenizer = self._build_model_and_tokenizer()
-        effective_vllm_cfg = _resolve_effective_rl_vllm_config(
-            vllm_cfg,
-            self._vllm_runtime_enabled,
-        )
-        if vllm_cfg.get("enabled", False) and not effective_vllm_cfg.get(
-            "enabled", False
-        ):
-            print(
-                "[RLJob] Falling back to standard GRPO generation for this attempt "
-                "because the worker vLLM runtime failed to initialize cleanly.",
-                flush=True,
-            )
+        effective_vllm_cfg = dict(vllm_cfg)
         # Import helpers that pull in Transformers only after Unsloth has had a
         # chance to patch the runtime via model construction above.
         from tenyson.core.hub_push import ensure_hf_repo
@@ -815,6 +790,10 @@ class RLJob:
                     "generation-kwargs path.",
                     flush=True,
                 )
+        else:
+            raise RuntimeError(
+                "RL requires vLLM, but GRPOConfig resolved use_vllm=False."
+            )
         required_hub_fields = {
             "save_strategy",
             "save_steps",

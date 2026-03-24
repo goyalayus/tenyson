@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any, Callable, Dict, List
 import yaml
 
@@ -150,6 +151,39 @@ def _write_temp_config_payload(job_type: str, config_payload: Dict[str, Any]) ->
     ) as handle:
         yaml.safe_dump(config_payload, handle, sort_keys=False)
         return handle.name
+
+
+def _wait_for_modal_function_call(
+    function_call_id: str,
+    *,
+    poll_timeout_seconds: float = 30.0,
+    overall_timeout_seconds: float | None = None,
+) -> None:
+    import modal
+
+    function_call = modal.FunctionCall.from_id(function_call_id)
+    poll_timeout_seconds = max(0.1, float(poll_timeout_seconds))
+    deadline = (
+        None
+        if overall_timeout_seconds is None
+        else time.monotonic() + max(0.1, float(overall_timeout_seconds))
+    )
+
+    while True:
+        timeout = poll_timeout_seconds
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError(
+                    "Timed out waiting for Modal function call "
+                    f"{function_call_id} to complete."
+                )
+            timeout = min(timeout, remaining)
+        try:
+            function_call.get(timeout=timeout)
+            return
+        except TimeoutError:
+            continue
 
 
 def _build_modal_launcher_command(
@@ -468,8 +502,36 @@ class ModalManager(BaseCloudManager):
                 secrets=secrets,
             ),
         )
-        with app.run():
-            run_remote.remote(job_type, config_payload, task_spec)
+        function_call_id = None
+        app_id = None
+        with modal.enable_output():
+            with app.run(detach=True):
+                function_call = run_remote.spawn(job_type, config_payload, task_spec)
+                function_call_id = str(function_call.object_id)
+                app_id = str(app.app_id)
+                print(
+                    "[ModalManager] Spawned detached Modal app "
+                    f"{app_id} with function call {function_call_id}.",
+                    flush=True,
+                )
+
+        if not function_call_id:
+            raise RuntimeError("Modal job launch did not return a function call id.")
+
+        poll_timeout_seconds = min(30.0, max(1.0, float(self.timeout)))
+        overall_timeout_seconds = float(self.timeout) + 300.0
+        try:
+            _wait_for_modal_function_call(
+                function_call_id,
+                poll_timeout_seconds=poll_timeout_seconds,
+                overall_timeout_seconds=overall_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            app_hint = f" app_id={app_id}." if app_id else ""
+            raise RuntimeError(
+                "Detached Modal function call failed"
+                f"{app_hint} function_call_id={function_call_id}. {exc}"
+            ) from exc
 
     def _run_modal_job_via_launcher(
         self,

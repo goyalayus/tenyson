@@ -41,17 +41,19 @@ def _resolve_eval_model_load_kwargs(
     return kwargs
 
 
-def _should_retry_eval_without_vllm(exc: Exception) -> bool:
-    message = str(exc)
-    return any(
-        token in message
-        for token in (
-            "FakeTensorMode",
-            "load_vllm",
-            "standalone_compile",
-            "vllm",
+def _require_eval_vllm_config(
+    model_cfg: Dict[str, Any],
+    vllm_cfg: Dict[str, Any],
+) -> None:
+    if not bool(vllm_cfg.get("enabled", False)):
+        raise ValueError(
+            "Eval requires vLLM. Set vllm.enabled=true for eval runs."
         )
-    )
+    if not _resolve_eval_fast_inference_requested(model_cfg, vllm_cfg):
+        raise ValueError(
+            "Eval requires vLLM fast inference. Do not disable model.fast_inference "
+            "while vllm.enabled=true."
+        )
 
 
 class EvalJob:
@@ -72,6 +74,7 @@ class EvalJob:
 
         model_cfg = self.config.get("model", {})
         vllm_cfg = self.config.get("vllm", {})
+        _require_eval_vllm_config(model_cfg, vllm_cfg)
 
         init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
         init_adapter = None
@@ -123,22 +126,13 @@ class EvalJob:
                 **unsloth_load_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
-            if not requested_fast_inference or not _should_retry_eval_without_vllm(exc):
-                raise
-            self._vllm_runtime_enabled = False
-            print(
-                "[EvalJob] Warning: Unsloth vLLM startup failed during eval model load; "
-                "retrying without vLLM fast inference. "
-                f"{exc}",
-                flush=True,
-            )
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=model_name,
-                max_seq_length=seq_len,
-                load_in_4bit=model_cfg.get("load_in_4bit", True),
-                max_lora_rank=max_lora_rank,
-                fast_inference=False,
-            )
+            if requested_fast_inference:
+                raise RuntimeError(
+                    "[EvalJob] Unsloth vLLM startup failed during eval model load. "
+                    "Eval requires vLLM and will now abort instead of retrying "
+                    f"without fast inference. {exc}"
+                ) from exc
+            raise
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
@@ -174,7 +168,10 @@ class EvalJob:
                 vllm_cfg,
             )
         if not vllm_cfg.get("enabled", False) or not runtime_vllm_enabled:
-            return None
+            raise RuntimeError(
+                "Eval requires vLLM, but the runtime is not currently configured "
+                "for vLLM fast inference."
+            )
 
         from vllm import SamplingParams
 
@@ -210,41 +207,18 @@ class EvalJob:
         batch_prompts: Sequence[str],
         sampling_params: Any,
     ) -> List[str]:
-        if sampling_params is not None:
-            outputs = model.fast_generate(
-                list(batch_prompts),
-                sampling_params=sampling_params,
-                use_tqdm=True,
+        if sampling_params is None:
+            raise RuntimeError(
+                "Eval requires vLLM SamplingParams. Refusing to fall back to "
+                "Transformers generation."
             )
-            return [out.outputs[0].text for out in outputs]
 
-        tokenized = tokenizer(list(batch_prompts), return_tensors="pt", padding=True)
-        if hasattr(tokenized, "to"):
-            tokenized = tokenized.to(self._resolve_model_device(model))
-
-        input_length = tokenized["input_ids"].shape[1]
-        vllm_cfg = self.config.get("vllm", {})
-        temperature = float(vllm_cfg.get("temperature", 0.0))
-        generation_kwargs: Dict[str, Any] = {
-            "max_new_tokens": int(vllm_cfg.get("max_tokens", 1024)),
-            "pad_token_id": getattr(tokenizer, "pad_token_id", None),
-            "eos_token_id": getattr(tokenizer, "eos_token_id", None),
-        }
-        if temperature > 0.0:
-            generation_kwargs["do_sample"] = True
-            generation_kwargs["temperature"] = temperature
-            generation_kwargs["top_p"] = float(vllm_cfg.get("top_p", 1.0))
-            if "top_k" in vllm_cfg:
-                generation_kwargs["top_k"] = int(vllm_cfg["top_k"])
-        else:
-            generation_kwargs["do_sample"] = False
-
-        generated = model.generate(**tokenized, **generation_kwargs)
-        completion_ids = generated[:, input_length:]
-        return [
-            tokenizer.decode(ids, skip_special_tokens=True)
-            for ids in completion_ids
-        ]
+        outputs = model.fast_generate(
+            list(batch_prompts),
+            sampling_params=sampling_params,
+            use_tqdm=True,
+        )
+        return [out.outputs[0].text for out in outputs]
 
     def _extract_prompts(self, dataset: Any) -> List[str]:
         return [row["prompt"] for row in dataset]
@@ -352,12 +326,8 @@ class EvalJob:
                 phase="eval",
             )
 
-        backend = "vLLM" if sampling_params is not None else "transformers"
-        temperature = (
-            sampling_params.temperature
-            if sampling_params is not None
-            else float(self.config.get("vllm", {}).get("temperature", 0.0))
-        )
+        backend = "vLLM"
+        temperature = sampling_params.temperature
         print(
             f"[EvalJob] Starting batched generation with {backend} (temp={temperature})...",
             flush=True,
