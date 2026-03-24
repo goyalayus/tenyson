@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -20,8 +21,11 @@ from tenyson.jobs.rl import (
     _build_vllm_generation_kwargs,
     _ensure_trl_vllm_guided_decoding_compat,
     _ensure_trl_vllm_sampling_params_compat,
+    _resolve_effective_rl_vllm_config,
     _resolve_unsloth_model_load_kwargs,
     _resolve_grpo_max_completion_length,
+    _should_retry_rl_without_vllm,
+    RLJob,
 )
 from tenyson.jobs.reporting_utils import normalize_report_to
 
@@ -364,6 +368,23 @@ class RLConfigHelpersTests(unittest.TestCase):
             },
         )
 
+    def test_retry_rl_without_vllm_matches_known_unsloth_startup_error(self) -> None:
+        self.assertTrue(
+            _should_retry_rl_without_vllm(
+                RuntimeError("standalone_compile does not have the attribute FakeTensorMode")
+            )
+        )
+        self.assertFalse(_should_retry_rl_without_vllm(RuntimeError("plain boom")))
+
+    def test_resolve_effective_rl_vllm_config_disables_vllm_after_runtime_fallback(self) -> None:
+        effective_cfg = _resolve_effective_rl_vllm_config(
+            {"enabled": True, "gpu_memory_utilization": 0.8},
+            False,
+        )
+
+        self.assertFalse(effective_cfg["enabled"])
+        self.assertEqual(effective_cfg["gpu_memory_utilization"], 0.8)
+
     def test_trl_vllm_compat_aliases_guided_decoding_params(self) -> None:
         module_name = "vllm.sampling_params"
         original_module = sys.modules.get(module_name)
@@ -643,6 +664,88 @@ class EvalFallbackTests(unittest.TestCase):
         self.assertFalse(job._vllm_runtime_enabled)
         self.assertFalse(model.mode)
         self.assertTrue(model.for_inference_called)
+        normalize_mock.assert_called_once()
+
+
+class RLFallbackTests(unittest.TestCase):
+    def test_build_model_and_tokenizer_retries_without_fast_inference_after_compat_failure(self) -> None:
+        module_name = "unsloth"
+        original_module = sys.modules.get(module_name)
+        original_standby = os.environ.get("UNSLOTH_VLLM_STANDBY")
+        calls = []
+        standby_values = []
+
+        class FakeModel:
+            def train(self):
+                self.mode = "train"
+                return self
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                standby_values.append(os.environ.get("UNSLOTH_VLLM_STANDBY"))
+                calls.append(kwargs)
+                if kwargs.get("fast_inference", False):
+                    raise RuntimeError(
+                        "<function standalone_compile> does not have the attribute 'FakeTensorMode'"
+                    )
+                return FakeModel(), SimpleNamespace()
+
+            @staticmethod
+            def get_peft_model(model, **kwargs):
+                model.peft_kwargs = kwargs
+                return model
+
+        sys.modules[module_name] = SimpleNamespace(FastLanguageModel=FakeFastLanguageModel)
+        try:
+            os.environ.pop("UNSLOTH_VLLM_STANDBY", None)
+            job = RLJob(
+                config={
+                    "training": {"run_name": "rl_test", "seed": 3407},
+                    "model": {
+                        "name": "Qwen/Qwen3-4B",
+                        "load_in_4bit": True,
+                        "fast_inference": True,
+                    },
+                    "lora": {
+                        "r": 16,
+                        "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                        "alpha": 32,
+                        "dropout": 0.0,
+                        "bias": "none",
+                    },
+                    "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch(
+                "tenyson.jobs.rl.normalize_tokenizer_special_tokens"
+            ) as normalize_mock:
+                model, _tokenizer = job._build_model_and_tokenizer()
+        finally:
+            if original_standby is None:
+                os.environ.pop("UNSLOTH_VLLM_STANDBY", None)
+            else:
+                os.environ["UNSLOTH_VLLM_STANDBY"] = original_standby
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
+
+        self.assertEqual(os.environ.get("UNSLOTH_VLLM_STANDBY"), original_standby)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(standby_values, ["1", "1"])
+        self.assertTrue(calls[0]["fast_inference"])
+        self.assertEqual(calls[0]["gpu_memory_utilization"], 0.8)
+        self.assertFalse(calls[1]["fast_inference"])
+        self.assertNotIn("gpu_memory_utilization", calls[1])
+        self.assertFalse(job._vllm_runtime_enabled)
+        self.assertEqual(model.mode, "train")
+        self.assertEqual(
+            model.peft_kwargs["target_modules"],
+            ["up_proj", "gate_proj", "down_proj"],
+        )
         normalize_mock.assert_called_once()
 
 

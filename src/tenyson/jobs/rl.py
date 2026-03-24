@@ -186,6 +186,29 @@ def _resolve_unsloth_model_load_kwargs(
     return kwargs
 
 
+def _should_retry_rl_without_vllm(exc: Exception) -> bool:
+    message = str(exc)
+    return any(
+        token in message
+        for token in (
+            "FakeTensorMode",
+            "load_vllm",
+            "standalone_compile",
+            "vllm",
+        )
+    )
+
+
+def _resolve_effective_rl_vllm_config(
+    vllm_cfg: Dict[str, Any],
+    runtime_enabled: bool | None,
+) -> Dict[str, Any]:
+    effective_cfg = dict(vllm_cfg)
+    if runtime_enabled is False:
+        effective_cfg["enabled"] = False
+    return effective_cfg
+
+
 def _ensure_trl_vllm_guided_decoding_compat() -> None:
     """
     Older remote TRL builds still import GuidedDecodingParams even when paired
@@ -502,8 +525,11 @@ class RLJob:
         self.config = config
         self.task = task
         self.run_id = resolve_required_run_name(self.config, "rl")
+        self._vllm_runtime_enabled: bool | None = None
 
     def _build_model_and_tokenizer(self) -> Any:
+        # Mirror the Unsloth GRPO notebook's standby mode before importing Unsloth.
+        os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
         from unsloth import FastLanguageModel
 
         model_cfg = self.config.get("model", {})
@@ -552,22 +578,43 @@ class RLJob:
         seq_len = model_cfg.get("max_seq_length", 4096)
         load_in_4bit = model_cfg.get("load_in_4bit", True)
         unsloth_load_kwargs = _resolve_unsloth_model_load_kwargs(model_cfg, vllm_cfg)
+        requested_fast_inference = bool(
+            unsloth_load_kwargs.get("fast_inference", False)
+        )
+        self._vllm_runtime_enabled = bool(vllm_cfg.get("enabled", False))
 
         print("[RLJob] Loading model and tokenizer via Unsloth...", flush=True)
-        if vllm_cfg.get("enabled", False):
+        if requested_fast_inference:
             print(
-                "[RLJob] GRPO vLLM is enabled; mirroring the Unsloth reference "
-                "setup with fast inference on so the trainable model exposes "
-                "its attached vLLM engine.",
+                "[RLJob] Enabling Unsloth standby mode and fast inference to mirror "
+                "the reference GRPO notebook startup path.",
                 flush=True,
             )
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=seq_len,
-            load_in_4bit=load_in_4bit,
-            max_lora_rank=int(lora_runtime_kwargs["r"]),
-            **unsloth_load_kwargs,
-        )
+        try:
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_name,
+                max_seq_length=seq_len,
+                load_in_4bit=load_in_4bit,
+                max_lora_rank=int(lora_runtime_kwargs["r"]),
+                **unsloth_load_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not requested_fast_inference or not _should_retry_rl_without_vllm(exc):
+                raise
+            self._vllm_runtime_enabled = False
+            print(
+                "[RLJob] Warning: Unsloth vLLM startup failed during RL model load; "
+                "retrying without fast inference and disabling GRPO vLLM for this "
+                f"attempt. {exc}",
+                flush=True,
+            )
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_name,
+                max_seq_length=seq_len,
+                load_in_4bit=load_in_4bit,
+                max_lora_rank=int(lora_runtime_kwargs["r"]),
+                fast_inference=False,
+            )
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
@@ -628,6 +675,18 @@ class RLJob:
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
 
         model, tokenizer = self._build_model_and_tokenizer()
+        effective_vllm_cfg = _resolve_effective_rl_vllm_config(
+            vllm_cfg,
+            self._vllm_runtime_enabled,
+        )
+        if vllm_cfg.get("enabled", False) and not effective_vllm_cfg.get(
+            "enabled", False
+        ):
+            print(
+                "[RLJob] Falling back to standard GRPO generation for this attempt "
+                "because the worker vLLM runtime failed to initialize cleanly.",
+                flush=True,
+            )
         # Import helpers that pull in Transformers only after Unsloth has had a
         # chance to patch the runtime via model construction above.
         from tenyson.core.hub_push import ensure_hf_repo
@@ -701,7 +760,7 @@ class RLJob:
         )
 
         max_completion_length = _resolve_grpo_max_completion_length(
-            train_cfg, vllm_cfg
+            train_cfg, effective_vllm_cfg
         )
 
         cfg_kwargs: Dict[str, Any] = dict(
@@ -710,8 +769,8 @@ class RLJob:
             per_device_train_batch_size=train_cfg.get("per_device_batch_size", 1),
             gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
             learning_rate=float(train_cfg.get("learning_rate", 5e-6)),
-            temperature=float(vllm_cfg.get("temperature", 1.0))
-            if vllm_cfg.get("enabled", False)
+            temperature=float(effective_vllm_cfg.get("temperature", 1.0))
+            if effective_vllm_cfg.get("enabled", False)
             else 1.0,
             optim=train_cfg.get("optim", "adamw_8bit"),
             logging_steps=1,
@@ -737,7 +796,7 @@ class RLJob:
         cfg_kwargs.update(
             _build_grpo_vllm_overrides(
                 tokenizer,
-                vllm_cfg,
+                effective_vllm_cfg,
                 seed=int(train_cfg.get("seed", 3407)),
                 prefer_explicit_sampling_params=use_explicit_vllm_sampling_params,
             )
