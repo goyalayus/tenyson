@@ -237,6 +237,37 @@ The canonical run result lives in telemetry:
 
 That same telemetry layer is also how stop requests are delivered to running jobs.
 
+## Dashboard
+
+Tenyson now ships a built-in local telemetry dashboard for live and post-run inspection across SFT, eval, and RL stages.
+
+Run it from the repo root:
+
+```bash
+python3 -m tenyson.ui \
+  --db-url wandb://<entity>/<project> \
+  --experiment-id <experiment_id> \
+  --open-browser
+```
+
+You can also omit `--db-url` if `TENYSON_WANDB_ENTITY` and `TENYSON_WANDB_PROJECT`
+are already set in your environment.
+
+The dashboard is intentionally zero-build:
+
+- it serves a local web UI directly from Python
+- it auto-refreshes while an experiment is still running
+- it lists all runs in the experiment, not just eval
+- eval runs show detailed sample rows when the task logs `detailed_results`
+- every run also exposes raw canonical payloads and W&B-linked metadata for debugging
+
+Useful flags:
+
+- `--host` default `127.0.0.1`
+- `--port` default `8787`
+- `--refresh-seconds` default `10`
+- `--history-limit` default `240`
+
 ## Reporting
 
 Reporting is fixed, not template-driven.

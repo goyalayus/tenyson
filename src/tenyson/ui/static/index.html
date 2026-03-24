@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tenyson Telemetry</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Telemetry Workspace</p>
+          <h1>Tenyson Dashboard</h1>
+        </div>
+        <div class="toolbar">
+          <label class="select-wrap">
+            <span>Experiment</span>
+            <select id="experiment-select"></select>
+          </label>
+          <button id="refresh-button" class="ghost-button" type="button">
+            Refresh
+          </button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar card-panel">
+          <section class="sidebar-section">
+            <div class="section-header">
+              <h2>Project</h2>
+              <span id="live-indicator" class="status-dot"></span>
+            </div>
+            <div id="project-summary" class="meta-stack"></div>
+          </section>
+
+          <section class="sidebar-section">
+            <div class="section-header">
+              <h2>Runs</h2>
+              <span id="run-count-badge" class="count-pill">0</span>
+            </div>
+            <div id="run-list" class="run-list"></div>
+          </section>
+        </aside>
+
+        <section class="main-panel">
+          <div id="hero-cards" class="hero-grid"></div>
+
+          <div class="detail-grid">
+            <section class="card-panel detail-panel">
+              <div class="section-header">
+                <h2 id="detail-title">Select a run</h2>
+                <span id="detail-status" class="status-pill neutral">idle</span>
+              </div>
+              <div id="detail-meta" class="meta-grid"></div>
+              <div id="detail-metrics" class="metric-grid"></div>
+            </section>
+
+            <section class="card-panel detail-panel">
+              <div class="section-header">
+                <h2>Metric History</h2>
+                <span id="history-summary" class="muted-copy">No series loaded</span>
+              </div>
+              <div id="history-charts" class="chart-grid"></div>
+            </section>
+          </div>
+
+          <section class="card-panel eval-panel">
+            <div class="section-header">
+              <h2>Eval Samples</h2>
+              <div class="toolbar-inline">
+                <button id="show-all-rows" class="small-button active" type="button">
+                  All
+                </button>
+                <button id="show-failed-rows" class="small-button" type="button">
+                  Failures
+                </button>
+              </div>
+            </div>
+            <div id="eval-summary" class="metric-grid compact"></div>
+            <div id="eval-table-wrap" class="table-wrap">
+              <table class="eval-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Parsed Guess</th>
+                    <th>Completion</th>
+                    <th>Prompt</th>
+                  </tr>
+                </thead>
+                <tbody id="eval-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card-panel raw-panel">
+            <div class="section-header">
+              <h2>Canonical Payload</h2>
+              <span class="muted-copy">Raw telemetry for debugging and review</span>
+            </div>
+            <pre id="raw-payload" class="raw-code">No run selected.</pre>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
