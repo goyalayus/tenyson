@@ -6,8 +6,10 @@ from dataclasses import dataclass
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 from typing import Any, Callable, Dict, List
+import yaml
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
 from tenyson.cloud.rds_access import prepare_modal_rds_access
@@ -43,6 +45,7 @@ def _run_subprocess_with_streaming_logs(
     cmd: List[str],
     *,
     env: Dict[str, str],
+    cwd: str | None = None,
     recent_line_limit: int = 200,
 ) -> tuple[int, str]:
     """
@@ -51,6 +54,7 @@ def _run_subprocess_with_streaming_logs(
     """
     process = subprocess.Popen(
         cmd,
+        cwd=cwd,
         env=env,
         text=True,
         stdout=subprocess.PIPE,
@@ -132,6 +136,47 @@ def _modal_run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: 
 
 def _bind_modal_run_remote(app: Any, options: Dict[str, Any]) -> Any:
     return app.function(**options)(_modal_run_remote)
+
+
+def _write_temp_config_payload(job_type: str, config_payload: Dict[str, Any]) -> str:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".yaml",
+        prefix=f"tenyson-{job_type}-",
+        delete=False,
+    ) as handle:
+        yaml.safe_dump(config_payload, handle, sort_keys=False)
+        return handle.name
+
+
+def _build_modal_launcher_command(
+    *,
+    python_executable: str,
+    job_type: str,
+    config_path: str,
+    task_spec: str,
+    gpu: str,
+    timeout: int,
+    serialized: bool,
+) -> List[str]:
+    return [
+        python_executable,
+        "-m",
+        "tenyson.cloud.modal_launcher",
+        "--job-type",
+        job_type,
+        "--config",
+        config_path,
+        "--task-spec",
+        task_spec,
+        "--gpu",
+        gpu,
+        "--timeout",
+        str(timeout),
+        "--serialized",
+        "true" if serialized else "false",
+    ]
 
 
 @dataclass(frozen=True)
@@ -349,7 +394,13 @@ class ModalManager(BaseCloudManager):
         )
         return GitRepoSource(clone_url=clone_url, commit=commit)
 
-    def run(self, job: Any) -> JobResult:
+    def _run_modal_job(
+        self,
+        *,
+        job_type: str,
+        config_payload: Dict[str, Any],
+        task_spec: str,
+    ) -> None:
         try:
             import modal
         except ImportError as exc:  # noqa: BLE001
@@ -412,6 +463,52 @@ class ModalManager(BaseCloudManager):
                 secrets=secrets,
             ),
         )
+        with app.run():
+            run_remote.remote(job_type, config_payload, task_spec)
+
+    def _run_modal_job_via_launcher(
+        self,
+        *,
+        job_type: str,
+        config_payload: Dict[str, Any],
+        task_spec: str,
+        local_project_root: str,
+    ) -> None:
+        config_path = _write_temp_config_payload(job_type, config_payload)
+        returncode = -1
+        details = ""
+        try:
+            cmd = _build_modal_launcher_command(
+                python_executable=sys.executable,
+                job_type=job_type,
+                config_path=config_path,
+                task_spec=task_spec,
+                gpu=self.gpu,
+                timeout=self.timeout,
+                serialized=self.serialized,
+            )
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            returncode, details = _run_subprocess_with_streaming_logs(
+                cmd,
+                cwd=local_project_root,
+                env=env,
+            )
+        finally:
+            try:
+                os.unlink(config_path)
+            except FileNotFoundError:
+                pass
+        if returncode != 0:
+            if len(details) > 1000:
+                details = details[-1000:]
+            raise RuntimeError(
+                "Modal launcher subprocess failed with code "
+                f"{returncode}. {details}"
+            )
+
+    def run(self, job: Any) -> JobResult:
+        local_project_root = self._resolve_local_project_root()
 
         from tenyson.core.telemetry import (
             TelemetryClient,
@@ -464,8 +561,12 @@ class ModalManager(BaseCloudManager):
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
             try:
-                with app.run():
-                    run_remote.remote(job_type, job.config, task_spec)
+                self._run_modal_job_via_launcher(
+                    job_type=job_type,
+                    config_payload=job.config,
+                    task_spec=task_spec,
+                    local_project_root=local_project_root,
+                )
             except Exception as exc:  # noqa: BLE001
                 hf_repo_id, hf_revision = _resolve_failed_resume_target()
                 result = JobResult(

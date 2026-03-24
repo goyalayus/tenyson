@@ -3,6 +3,7 @@ import io
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -10,10 +11,12 @@ from tenyson.cloud.manager import CloudManager
 from tenyson.cloud.modal import (
     ModalManager,
     _bind_modal_run_remote,
+    _build_modal_launcher_command,
     _build_clone_repo_command,
     _modal_run_remote,
     _normalize_git_clone_url,
     _run_subprocess_with_streaming_logs,
+    _write_temp_config_payload,
 )
 from tenyson.cloud.runtime_deps import REMOTE_RUNTIME_PACKAGES, runtime_pip_install_command
 from tenyson.loader import load_task
@@ -121,6 +124,47 @@ class ModalFunctionOptionsTests(unittest.TestCase):
         self.assertIs(captured["function"], _modal_run_remote)
         self.assertEqual(captured["options"], {"serialized": False})
 
+    def test_build_modal_launcher_command_passes_expected_flags(self) -> None:
+        command = _build_modal_launcher_command(
+            python_executable="/usr/bin/python3",
+            job_type="rl",
+            config_path="/tmp/job.yaml",
+            task_spec="examples/wordle/wordle_task.py",
+            gpu="A100",
+            timeout=7200,
+            serialized=False,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/usr/bin/python3",
+                "-m",
+                "tenyson.cloud.modal_launcher",
+                "--job-type",
+                "rl",
+                "--config",
+                "/tmp/job.yaml",
+                "--task-spec",
+                "examples/wordle/wordle_task.py",
+                "--gpu",
+                "A100",
+                "--timeout",
+                "7200",
+                "--serialized",
+                "false",
+            ],
+        )
+
+    def test_write_temp_config_payload_round_trips_yaml(self) -> None:
+        path = _write_temp_config_payload("eval", {"training": {"steps": 4}})
+        try:
+            self.assertTrue(path.endswith(".yaml"))
+            self.assertIn(tempfile.gettempdir(), path)
+            self.assertIn("steps: 4", Path(path).read_text(encoding="utf-8"))
+        finally:
+            Path(path).unlink(missing_ok=True)
+
 
 class ModalGitSourceTests(unittest.TestCase):
     def test_clone_repo_command_is_single_line_shell_safe(self) -> None:
@@ -195,6 +239,52 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         self.assertIn("stdout-line", stdout_buffer.getvalue())
         self.assertIn("stderr-line", stderr_buffer.getvalue())
         self.assertIn("stderr-line", details)
+
+    def test_modal_launcher_runs_in_repo_subprocess(self) -> None:
+        manager = ModalManager(gpu="A100", timeout=7200, serialized=True)
+
+        with patch(
+            "tenyson.cloud.modal._write_temp_config_payload",
+            return_value="/tmp/fake-job.yaml",
+        ), patch(
+            "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
+            return_value=(0, ""),
+        ) as run_subprocess, patch("tenyson.cloud.modal.os.unlink") as unlink:
+            manager._run_modal_job_via_launcher(
+                job_type="rl",
+                config_payload={"training": {"steps": 4}},
+                task_spec="examples/wordle/wordle_task.py",
+                local_project_root="/repo",
+            )
+
+        run_subprocess.assert_called_once()
+        cmd = run_subprocess.call_args.args[0]
+        kwargs = run_subprocess.call_args.kwargs
+        self.assertIn("tenyson.cloud.modal_launcher", cmd)
+        self.assertEqual(kwargs["cwd"], "/repo")
+        self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
+        unlink.assert_called_once_with("/tmp/fake-job.yaml")
+
+    def test_modal_launcher_raises_with_subprocess_tail(self) -> None:
+        manager = ModalManager()
+
+        with patch(
+            "tenyson.cloud.modal._write_temp_config_payload",
+            return_value="/tmp/fake-job.yaml",
+        ), patch(
+            "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
+            return_value=(1, "boom"),
+        ), patch("tenyson.cloud.modal.os.unlink"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Modal launcher subprocess failed with code 1. boom",
+            ):
+                manager._run_modal_job_via_launcher(
+                    job_type="eval",
+                    config_payload={"eval": {"samples": 10}},
+                    task_spec="examples/wordle/wordle_task.py",
+                    local_project_root="/repo",
+                )
 
 
 class RuntimeDependencyTests(unittest.TestCase):
