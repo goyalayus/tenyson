@@ -7,7 +7,13 @@ from types import ModuleType
 
 import torch
 
-from tenyson.jobs.eval import EvalJob
+import tenyson.jobs.eval as eval_module
+from tenyson.jobs.eval import (
+    EvalJob,
+    _resolve_eval_fast_inference_requested,
+    _resolve_eval_model_load_kwargs,
+    _should_retry_eval_without_vllm,
+)
 from tenyson.jobs.rl import (
     _build_grpo_vllm_overrides,
     _build_vllm_sampling_params_kwargs,
@@ -510,11 +516,54 @@ class _DummyModel:
 
 
 class EvalFallbackTests(unittest.TestCase):
+    def test_resolve_eval_fast_inference_defaults_to_vllm_setting(self) -> None:
+        requested = _resolve_eval_fast_inference_requested(
+            {},
+            {"enabled": True},
+        )
+
+        self.assertTrue(requested)
+
+    def test_resolve_eval_fast_inference_respects_explicit_model_override(self) -> None:
+        requested = _resolve_eval_fast_inference_requested(
+            {"fast_inference": False},
+            {"enabled": True},
+        )
+
+        self.assertFalse(requested)
+
+    def test_resolve_eval_model_load_kwargs_omits_gpu_memory_without_fast_inference(self) -> None:
+        kwargs = _resolve_eval_model_load_kwargs(
+            {"fast_inference": False},
+            {"enabled": True, "gpu_memory_utilization": 0.8},
+        )
+
+        self.assertEqual(kwargs, {"fast_inference": False})
+
+    def test_retry_eval_without_vllm_matches_known_unsloth_startup_error(self) -> None:
+        self.assertTrue(
+            _should_retry_eval_without_vllm(
+                RuntimeError("standalone_compile does not have the attribute FakeTensorMode")
+            )
+        )
+        self.assertFalse(_should_retry_eval_without_vllm(RuntimeError("plain boom")))
+
     def test_build_sampling_params_skips_vllm_when_disabled(self) -> None:
         job = EvalJob(
             config={"evaluation": {"run_name": "eval_test"}, "vllm": {"enabled": False}},
             task=object(),
         )
+
+        sampling_params = job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
+
+        self.assertIsNone(sampling_params)
+
+    def test_build_sampling_params_skips_vllm_after_runtime_fallback(self) -> None:
+        job = EvalJob(
+            config={"evaluation": {"run_name": "eval_test"}, "vllm": {"enabled": True}},
+            task=object(),
+        )
+        job._vllm_runtime_enabled = False
 
         sampling_params = job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
 
@@ -537,6 +586,64 @@ class EvalFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(completions, ["XY", "Z"])
+
+    def test_build_model_and_tokenizer_retries_without_vllm_after_compat_failure(self) -> None:
+        module_name = "unsloth"
+        original_module = sys.modules.get(module_name)
+        calls = []
+
+        class FakeModel:
+            def train(self, mode):
+                self.mode = mode
+                return self
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                calls.append(kwargs)
+                if kwargs.get("fast_inference", False):
+                    raise RuntimeError(
+                        "<function standalone_compile> does not have the attribute 'FakeTensorMode'"
+                    )
+                return FakeModel(), SimpleNamespace()
+
+            @staticmethod
+            def for_inference(model):
+                setattr(model, "for_inference_called", True)
+                return model
+
+        sys.modules[module_name] = SimpleNamespace(FastLanguageModel=FakeFastLanguageModel)
+        try:
+            job = EvalJob(
+                config={
+                    "evaluation": {"run_name": "eval_test"},
+                    "model": {"name": "Qwen/Qwen3-4B", "load_in_4bit": True},
+                    "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch.object(
+                eval_module,
+                "normalize_tokenizer_special_tokens",
+            ) as normalize_mock:
+                model, _tokenizer = job._build_model_and_tokenizer()
+
+        finally:
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0]["fast_inference"])
+        self.assertEqual(calls[0]["gpu_memory_utilization"], 0.8)
+        self.assertFalse(calls[1]["fast_inference"])
+        self.assertNotIn("gpu_memory_utilization", calls[1])
+        self.assertFalse(job._vllm_runtime_enabled)
+        self.assertFalse(model.mode)
+        self.assertTrue(model.for_inference_called)
+        normalize_mock.assert_called_once()
 
 
 if __name__ == "__main__":

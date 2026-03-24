@@ -14,6 +14,46 @@ from tenyson.jobs.result import JobResult
 from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
 
 
+def _resolve_eval_fast_inference_requested(
+    model_cfg: Dict[str, Any],
+    vllm_cfg: Dict[str, Any],
+) -> bool:
+    if "fast_inference" in model_cfg:
+        return bool(model_cfg.get("fast_inference", False))
+    return bool(vllm_cfg.get("enabled", False))
+
+
+def _resolve_eval_model_load_kwargs(
+    model_cfg: Dict[str, Any],
+    vllm_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    fast_inference_requested = _resolve_eval_fast_inference_requested(
+        model_cfg,
+        vllm_cfg,
+    )
+    kwargs: Dict[str, Any] = {
+        "fast_inference": fast_inference_requested,
+    }
+    if fast_inference_requested:
+        kwargs["gpu_memory_utilization"] = float(
+            vllm_cfg.get("gpu_memory_utilization", 0.9)
+        )
+    return kwargs
+
+
+def _should_retry_eval_without_vllm(exc: Exception) -> bool:
+    message = str(exc)
+    return any(
+        token in message
+        for token in (
+            "FakeTensorMode",
+            "load_vllm",
+            "standalone_compile",
+            "vllm",
+        )
+    )
+
+
 class EvalJob:
     """
     Evaluation job using Unsloth + vLLM.
@@ -25,6 +65,7 @@ class EvalJob:
         self.config = config
         self.task = task
         self.run_id = resolve_required_run_name(self.config, "eval")
+        self._vllm_runtime_enabled: bool | None = None
 
     def _build_model_and_tokenizer(self):
         from unsloth import FastLanguageModel
@@ -66,16 +107,38 @@ class EvalJob:
             if lora_runtime_kwargs is not None
             else int(model_cfg.get("lora_r", 16))
         )
+        unsloth_load_kwargs = _resolve_eval_model_load_kwargs(model_cfg, vllm_cfg)
+        requested_fast_inference = bool(
+            unsloth_load_kwargs.get("fast_inference", False)
+        )
+        self._vllm_runtime_enabled = requested_fast_inference
 
         print(f"[EvalJob] Loading model {model_name}...", flush=True)
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=seq_len,
-            load_in_4bit=model_cfg.get("load_in_4bit", True),
-            fast_inference=vllm_cfg.get("enabled", True),
-            max_lora_rank=max_lora_rank,
-            gpu_memory_utilization=vllm_cfg.get("gpu_memory_utilization", 0.9),
-        )
+        try:
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_name,
+                max_seq_length=seq_len,
+                load_in_4bit=model_cfg.get("load_in_4bit", True),
+                max_lora_rank=max_lora_rank,
+                **unsloth_load_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not requested_fast_inference or not _should_retry_eval_without_vllm(exc):
+                raise
+            self._vllm_runtime_enabled = False
+            print(
+                "[EvalJob] Warning: Unsloth vLLM startup failed during eval model load; "
+                "retrying without vLLM fast inference. "
+                f"{exc}",
+                flush=True,
+            )
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_name,
+                max_seq_length=seq_len,
+                load_in_4bit=model_cfg.get("load_in_4bit", True),
+                max_lora_rank=max_lora_rank,
+                fast_inference=False,
+            )
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
@@ -104,7 +167,13 @@ class EvalJob:
 
     def _build_sampling_params(self, tokenizer: Any):
         vllm_cfg = self.config.get("vllm", {})
-        if not vllm_cfg.get("enabled", False):
+        runtime_vllm_enabled = self._vllm_runtime_enabled
+        if runtime_vllm_enabled is None:
+            runtime_vllm_enabled = _resolve_eval_fast_inference_requested(
+                self.config.get("model", {}),
+                vllm_cfg,
+            )
+        if not vllm_cfg.get("enabled", False) or not runtime_vllm_enabled:
             return None
 
         from vllm import SamplingParams

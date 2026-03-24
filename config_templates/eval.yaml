@@ -9,7 +9,9 @@ model:
   lora_target_modules: ["up_proj", "gate_proj", "down_proj"]
 
 vllm:
-  enabled: true
+  # Eval defaults to the standard transformers generation path for maximum
+  # compatibility. Enable this explicitly if you want Unsloth/vLLM fast inference.
+  enabled: false
   # Fraction of GPU memory reserved for vLLM generation.
   gpu_memory_utilization: 0.9
   temperature: 0.0  # Greedy decoding for evals
