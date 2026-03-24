@@ -11,12 +11,35 @@ class SimpleTokenizer:
             "hello": 3,
             "world": 4,
             "again": 5,
+            "<NL>": 98,
+            "<E>": 99,
         }
+        self.inverse_vocab = {token_id: token for token, token_id in self.vocab.items()}
         self.pad_token_id = 0
+        self.eos_token = "<E>"
         self.eos_token_id = 99
 
     def encode(self, text, add_special_tokens=False):
-        return [self.vocab[token] for token in text.split()]
+        normalized = text.replace("\n", " <NL> ")
+        return [self.vocab[token] for token in normalized.split()]
+
+    def decode(
+        self,
+        token_ids,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    ):
+        parts = []
+        for token_id in token_ids:
+            token = self.inverse_vocab[token_id]
+            if token == "<NL>":
+                parts.append("\n")
+                continue
+            if not parts or parts[-1].endswith("\n"):
+                parts.append(token)
+            else:
+                parts.append(f" {token}")
+        return "".join(parts)
 
     def __call__(
         self,
@@ -55,6 +78,39 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
                 {"text": "<U> hello <A> world <U> again <A> world"},
             ])
 
+    def test_excludes_trailing_eos_token_from_assistant_labels(self) -> None:
+        tokenizer = SimpleTokenizer()
+        collator = CompletionOnlyDataCollator(tokenizer, response_template="<A>")
+
+        batch = collator([{"text": "<U> hello <A> world <E>"}])
+
+        self.assertEqual(batch["input_ids"].tolist(), [[1, 3, 2, 4, 99]])
+        self.assertEqual(batch["labels"].tolist(), [[-100, -100, -100, 4, -100]])
+
+    def test_excludes_eos_followed_by_trailing_newline(self) -> None:
+        tokenizer = SimpleTokenizer()
+        collator = CompletionOnlyDataCollator(tokenizer, response_template="<A>")
+
+        batch = collator([{"text": "<U> hello <A> world <E>\n"}])
+
+        self.assertEqual(batch["input_ids"].tolist(), [[1, 3, 2, 4, 99, 98]])
+        self.assertEqual(
+            batch["labels"].tolist(),
+            [[-100, -100, -100, 4, -100, -100]],
+        )
+
+    def test_preserves_content_newline_before_response_terminator(self) -> None:
+        tokenizer = SimpleTokenizer()
+        collator = CompletionOnlyDataCollator(tokenizer, response_template="<A>")
+
+        batch = collator([{"text": "<U> hello <A> world\n<E>\n"}])
+
+        self.assertEqual(batch["input_ids"].tolist(), [[1, 3, 2, 4, 98, 99, 98]])
+        self.assertEqual(
+            batch["labels"].tolist(),
+            [[-100, -100, -100, 4, 98, -100, -100]],
+        )
+
     def test_instruction_template_limits_assistant_spans_between_user_turns(self) -> None:
         tokenizer = SimpleTokenizer()
         collator = CompletionOnlyDataCollator(
@@ -64,12 +120,12 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
         )
 
         batch = collator([
-            {"text": "<U> hello <A> world <U> again <A> world"},
+            {"text": "<U> hello <A> world <E> <U> again <A> world <E>"},
         ])
 
         self.assertEqual(
             batch["labels"].tolist(),
-            [[-100, -100, -100, 4, -100, -100, -100, 4]],
+            [[-100, -100, -100, 4, -100, -100, -100, -100, 4, -100]],
         )
 
     def test_packed_style_multi_example_sequence_has_no_boundary_attention_mask(self) -> None:
@@ -85,16 +141,16 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
         # only emits a flat token-vs-padding attention mask, not per-example
         # sequence boundaries.
         batch = collator([
-            {"text": "<U> hello <A> world <U> again <A> world"},
+            {"text": "<U> hello <A> world <E> <U> again <A> world <E>"},
         ])
 
         self.assertEqual(
             batch["labels"].tolist(),
-            [[-100, -100, -100, 4, -100, -100, -100, 4]],
+            [[-100, -100, -100, 4, -100, -100, -100, -100, 4, -100]],
         )
         self.assertEqual(
             batch["attention_mask"].tolist(),
-            [[1, 1, 1, 1, 1, 1, 1, 1]],
+            [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1]],
         )
 
 

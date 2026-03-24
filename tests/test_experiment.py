@@ -39,6 +39,17 @@ def _result(run_id: str, *, status: str = "success", **kwargs) -> JobResult:
     )
 
 
+def _telemetry_shared_overrides(experiment_id: str = "wordle_exp") -> dict:
+    return {
+        "telemetry": {
+            "backend": "wandb",
+            "entity": "demo",
+            "project": "tenyson",
+            "experiment_id": experiment_id,
+        }
+    }
+
+
 class ExperimentSessionTests(unittest.TestCase):
     def test_stage_building_clones_templates_and_injects_adapter(self) -> None:
         base_rl_template = {
@@ -345,6 +356,293 @@ class ExperimentSessionTests(unittest.TestCase):
 
         self.assertIn("status=running", content)
         self.assertIn("wandb=[run](https://wandb.example/live)", content)
+
+    def test_run_stage_reuses_recovered_success_result_and_updates_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "template.md"
+            output_path = Path(tmpdir) / "report.md"
+            template_path.write_text(
+                "status={sft_main_status}\nwandb={sft_main_wandb_link}\n",
+                encoding="utf-8",
+            )
+            report = ReportBuilder(
+                template_path=str(template_path),
+                output_path=str(output_path),
+            )
+            report.generate()
+
+            session = ExperimentSession(
+                task=object(),
+                templates=_templates(),
+                cloud_factory=lambda: object(),
+                shared_overrides=_telemetry_shared_overrides(),
+                recovery_experiment_id="wordle_exp",
+                report_builder=report,
+            )
+            stage = session.sft("sft_main", run_name="wordle_sft_main")
+            recovered = _result(
+                "wordle_sft_main",
+                status="success",
+                wandb_url="https://wandb.example/recovered",
+                hf_repo_id="repo/id",
+                hf_revision="sha123",
+            )
+
+            with patch.object(
+                experiment_module,
+                "TelemetryClient",
+                return_value=object(),
+            ), patch.object(
+                experiment_module,
+                "get_run_result",
+                return_value=({}, dict(recovered.__dict__)),
+            ), patch.object(
+                experiment_module,
+                "run_pipeline",
+            ) as run_pipeline_mock:
+                result = session.run_stage(stage, cloud=object())
+
+            session.close()
+            content = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.hf_revision, "sha123")
+        run_pipeline_mock.assert_not_called()
+        self.assertIn("status=success", content)
+        self.assertIn("wandb=[run](https://wandb.example/recovered)", content)
+
+    def test_run_stage_recovery_resume_sets_resume_checkpoint(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        stage = session.sft("sft_main", run_name="wordle_sft_main")
+        recovered = _result(
+            "wordle_sft_main",
+            status="stopped",
+            hf_repo_id="repo/id",
+            hf_revision="sha123",
+            failure_reason="Manual stop requested at step 12.",
+            stopped_early=True,
+        )
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            _label, config, _job_class, _task = steps[0]
+            self.assertEqual(
+                config["training"]["resume_from_checkpoint"],
+                "repo/id:sha123",
+            )
+            return [_result("wordle_sft_main", status="success")]
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=({}, dict(recovered.__dict__)),
+        ), patch.object(
+            experiment_module,
+            "_prompt_recovery_action",
+            return_value="resume",
+        ) as prompt_mock, patch.object(
+            experiment_module,
+            "run_pipeline",
+            side_effect=fake_run_pipeline,
+        ) as run_pipeline_mock:
+            result = session.run_stage(stage, cloud=object())
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(
+            stage.config["training"]["resume_from_checkpoint"],
+            "repo/id:sha123",
+        )
+        prompt_mock.assert_called_once()
+        run_pipeline_mock.assert_called_once()
+
+    def test_run_stage_recovery_continue_skips_rerun(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        stage = session.sft("sft_main", run_name="wordle_sft_main")
+        recovered = _result(
+            "wordle_sft_main",
+            status="stopped",
+            hf_repo_id="repo/id",
+            hf_revision="sha123",
+            failure_reason="Manual stop requested at step 12.",
+            stopped_early=True,
+        )
+
+        def promote_partial(result, *, config, job_type):
+            del config, job_type
+            result.status = "partial"
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=({}, dict(recovered.__dict__)),
+        ), patch.object(
+            experiment_module,
+            "_prompt_recovery_action",
+            return_value="continue",
+        ) as prompt_mock, patch.object(
+            experiment_module,
+            "_accept_stopped_result",
+            side_effect=promote_partial,
+        ) as accept_mock, patch.object(
+            experiment_module,
+            "run_pipeline",
+        ) as run_pipeline_mock:
+            result = session.run_stage(stage, cloud=object())
+
+        self.assertEqual(result.status, "partial")
+        self.assertTrue(result.stopped_early)
+        prompt_mock.assert_called_once()
+        accept_mock.assert_called_once()
+        run_pipeline_mock.assert_not_called()
+
+    def test_run_stage_recovery_restart_clears_resume_checkpoint(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        stage = session.sft("sft_main", run_name="wordle_sft_main")
+        stage.config.setdefault("training", {})["resume_from_checkpoint"] = "repo/old:rev"
+        recovered = _result(
+            "wordle_sft_main",
+            status="stopped",
+            hf_repo_id="repo/id",
+            hf_revision="sha123",
+            stopped_early=True,
+        )
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            _label, config, _job_class, _task = steps[0]
+            self.assertNotIn("resume_from_checkpoint", config["training"])
+            return [_result("wordle_sft_main", status="success")]
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=({}, dict(recovered.__dict__)),
+        ), patch.object(
+            experiment_module,
+            "_prompt_recovery_action",
+            return_value="restart",
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            side_effect=fake_run_pipeline,
+        ) as run_pipeline_mock:
+            result = session.run_stage(stage, cloud=object())
+
+        self.assertEqual(result.status, "success")
+        self.assertNotIn("resume_from_checkpoint", stage.config["training"])
+        run_pipeline_mock.assert_called_once()
+
+    def test_run_parallel_only_launches_unrecovered_stages(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        adapter = AdapterRef(repo_id="repo/id", revision="sha123")
+        recovered_stage = session.eval(
+            "eval_turn2",
+            adapter=adapter,
+            run_name="wordle_eval_turn2",
+        )
+        fresh_stage = session.eval(
+            "eval_turn3",
+            adapter=adapter,
+            run_name="wordle_eval_turn3",
+        )
+        recovered = _result(
+            "wordle_eval_turn2",
+            status="success",
+            processed_samples=25,
+            expected_samples=25,
+        )
+
+        def fake_get_run_result(client, experiment_id, run_id, phase):
+            del client, experiment_id, phase
+            if run_id == "wordle_eval_turn2":
+                return ({}, dict(recovered.__dict__))
+            return None
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            self.assertEqual(len(steps), 1)
+            self.assertEqual(steps[0]["label"], "eval_pair")
+            parallel_steps = steps[0]["parallel"]
+            self.assertEqual(len(parallel_steps), 1)
+            self.assertEqual(parallel_steps[0][0], "eval_turn3")
+            return [
+                _result(
+                    "wordle_eval_turn3",
+                    status="success",
+                    processed_samples=25,
+                    expected_samples=25,
+                )
+            ]
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            side_effect=fake_get_run_result,
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            side_effect=fake_run_pipeline,
+        ) as run_pipeline_mock:
+            results = session.run_parallel(
+                "eval_pair",
+                [recovered_stage, fresh_stage],
+                cloud=object(),
+            )
+
+        self.assertEqual(results["eval_turn2"].status, "success")
+        self.assertEqual(results["eval_turn2"].processed_samples, 25)
+        self.assertEqual(results["eval_turn3"].status, "success")
+        run_pipeline_mock.assert_called_once()
+
+    def test_recovery_experiment_id_must_match_stage_telemetry_experiment_id(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides("wordle_exp"),
+            recovery_experiment_id="other_exp",
+        )
+        stage = session.sft("sft_main", run_name="wordle_sft_main")
+
+        with self.assertRaisesRegex(ValueError, "recovery_experiment_id"):
+            session.run_stage(stage, cloud=object())
 
 
 if __name__ == "__main__":

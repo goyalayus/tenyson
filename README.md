@@ -57,6 +57,71 @@ It does three jobs:
 
 That file is not supposed to contain reward logic, dataset construction logic, or reporting customization. Those concerns live in the library and the environment definition.
 
+## Dataset Format Requirements
+
+This needs to be explicit because the expected shape differs by run type.
+
+### SFT
+
+For SFT, the task hook should return a conversational dataset. The built-in
+Wordle SFT path loads a Hugging Face dataset where each row looks like:
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."}
+  ]
+}
+```
+
+Important constraints:
+
+- If you bring your own SFT dataset and want to use the default path, it must
+  expose a `messages` column in this chat format. A plain `prompt` /
+  `completion` table will not work unless you also provide a custom formatting
+  hook or collator.
+- The built-in assistant-only-loss path expects the formatted sequence to
+  contain an assistant-turn marker such as
+  `training.response_template: "<|im_start|>assistant\n"`.
+- With `training.loss_on_assistant_only: true`, loss is computed only on the
+  assistant message content. The assistant turn terminator is excluded from the
+  loss mask.
+- If one formatted example contains multiple assistant turns separated by more
+  user turns, you must also set `training.instruction_template`, or provide a
+  task-specific collator. Do not assume the default assistant-only collator can
+  safely infer user/assistant boundaries in arbitrary text.
+- In the current Wordle example, every SFT row is exactly one
+  `system -> user -> assistant` conversation turn. The SFT dataset is not the
+  random synthetic Wordle-history dataset used for RL and eval.
+
+### RL And Eval
+
+RL and eval can use task-generated synthetic rows instead of conversational
+ SFT rows. The built-in Wordle synthetic rows look like:
+
+```json
+{
+  "secret": "meant",
+  "history_len": 4,
+  "history_rows": [
+    ["cogue", "X X X X Y"],
+    ["irone", "X X X G Y"],
+    ["exams", "Y X G Y X"],
+    ["macaw", "G Y X X X"]
+  ],
+  "prompt": "..."
+}
+```
+
+Important constraints:
+
+- Mixed Wordle RL/eval runs intentionally sample random prior-history lengths.
+- Curriculum Wordle runs intentionally fix the history window for each stage.
+- Do not expect the SFT dataset and the RL/eval datasets to have the same row
+  schema. They are different on purpose.
+
 ## Basic Usage
 
 Jobs run through a cloud manager. The manager launches `python -m tenyson.runner` remotely, waits for the canonical run result in telemetry, and returns a `JobResult`.
@@ -189,6 +254,19 @@ If you manually stop an SFT or RL run, the pipeline can now do four different th
 - `abort`: stop the experiment
 
 `continue` is only offered when the stopped run already has a concrete Hugging Face repo + revision, so later stages can still seed from an exact adapter lineage.
+
+You can also recover after the original local controller process has exited.
+Pass an explicit recovery experiment id to `ExperimentSession` with
+`recovery_experiment_id="..."`, then relaunch the experiment with the same stage
+run names. On startup, Tenyson will reuse prior successful/partial stage
+results, and for stopped SFT/RL stages it will prompt for:
+
+- `resume`: restart from the saved trainer checkpoint
+- `continue`: accept the stopped checkpoint and move to the next stage
+- `restart`: rerun the stage from scratch
+
+The Wordle example exposes this through
+`TENYSON_RECOVER_EXPERIMENT_ID=<experiment_id>`.
 
 For SFT early stopping specifically, Tenyson now treats it as a strict best-model flow instead of a soft hint:
 

@@ -109,6 +109,9 @@ def main() -> None:
     on_failure = os.getenv("TENYSON_ON_FAILURE", "abort").strip().lower() or "abort"
     modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
     modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
+    recovery_experiment_id = (
+        str(os.getenv("TENYSON_RECOVER_EXPERIMENT_ID", "")).strip() or None
+    )
     disable_parallel = os.getenv(
         "TENYSON_DISABLE_PARALLEL", "false"
     ).strip().lower() in {
@@ -117,6 +120,13 @@ def main() -> None:
         "yes",
         "on",
     }
+
+    if recovery_experiment_id:
+        print(
+            "[wordle experiment] Recovery enabled for "
+            f"experiment_id={recovery_experiment_id}.",
+            flush=True,
+        )
 
     session = ExperimentSession(
         task=task,
@@ -132,6 +142,7 @@ def main() -> None:
         report=report,
         report_metric_precision=4,
         report_wandb_text="run",
+        recovery_experiment_id=recovery_experiment_id,
     )
     primary_branch = session.branch(cloud=session.create_cloud())
 

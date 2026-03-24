@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
@@ -14,6 +15,7 @@ from tenyson.core.environment import bind_environment_run
 from tenyson.core.control import request_stop
 from tenyson.core.telemetry import (
     TelemetryClient,
+    get_run_result,
     get_run_metadata_wandb_url,
     resolve_telemetry_context,
     telemetry_project_url,
@@ -23,13 +25,14 @@ from tenyson.jobs.result import JobResult
 from tenyson.jobs.rl import RLJob
 from tenyson.jobs.sft import SFTJob
 from tenyson.loader import load_config
-from tenyson.pipeline import run_pipeline
+from tenyson.pipeline import _accept_stopped_result, run_pipeline
 from tenyson.reporting.builder import ReportBuilder
 
 
 _DEFAULT_ABORT_MESSAGE = (
     "[TENYSON] Experiment aborted. Skipping remaining stages and final outputs."
 )
+_RECOVERY_PROMPT_LOCK = threading.Lock()
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
@@ -81,6 +84,59 @@ def _ensure_stage_attempt_token(stage: StageSpec) -> str:
     attempt_token = uuid4().hex
     telemetry_cfg["attempt_token"] = attempt_token
     return attempt_token
+
+
+def _prompt_recovery_action(
+    *,
+    step_label: str,
+    run_id: str,
+    job_type: str,
+    last_result: JobResult,
+) -> str:
+    hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
+    hf_revision = str(getattr(last_result, "hf_revision", "") or "").strip()
+    can_resume = job_type in ("sft", "rl") and bool(hf_repo_id and hf_revision)
+    can_continue = str(getattr(last_result, "status", "") or "").strip().lower() == "stopped"
+    choices = []
+    if can_resume:
+        choices.append("resume")
+    if can_continue:
+        choices.append("continue")
+    choices.append("restart")
+
+    with _RECOVERY_PROMPT_LOCK:
+        while True:
+            sys.stderr.write(
+                "[TENYSON] Found a previous stopped stage for "
+                f'"{step_label}" (run_id={run_id}, job_type={job_type}).\n'
+            )
+            if can_resume:
+                sys.stderr.write("  [resume] Resume from the latest saved HF checkpoint\n")
+            if can_continue:
+                sys.stderr.write(
+                    "  [continue] Accept the stopped checkpoint and move to the next stage\n"
+                )
+            sys.stderr.write("  [restart] Restart this stage from scratch\n")
+            sys.stderr.write(f"Choice ({'/'.join(choices)}): ")
+            sys.stderr.flush()
+            try:
+                choice = sys.stdin.readline().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "restart"
+
+            normalized_choice = choice.replace("_", "-").strip()
+            if normalized_choice == "resume" and can_resume:
+                return "resume"
+            if normalized_choice in {
+                "continue",
+                "next",
+                "move-next",
+                "stop-and-move-next",
+            } and can_continue:
+                return "continue"
+            if normalized_choice == "restart":
+                return "restart"
+            sys.stderr.write("  Invalid choice.\n")
 
 
 class ConfigTemplates:
@@ -395,6 +451,16 @@ class _ExperimentReportController:
             missing=self.missing,
         )
 
+    def record_stage_result(self, stage: StageSpec, result: JobResult) -> None:
+        backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        self._sync_report_context(
+            stage,
+            backend_ref=backend_ref,
+            experiment_id=experiment_id,
+        )
+        self._register_stage(stage)
+        self.finish_stage(stage.id, result)
+
     def close(self) -> None:
         with self._lock:
             watches = list(self._watches.values())
@@ -485,6 +551,7 @@ class ExperimentSession:
         report_wandb_text: str = "run",
         report_missing: str = "n/a",
         report_poll_interval_seconds: float = 2.0,
+        recovery_experiment_id: Optional[str] = None,
     ) -> None:
         if report is not None and report_builder is not None:
             raise ValueError("Pass either report or report_builder, not both.")
@@ -495,6 +562,9 @@ class ExperimentSession:
         self.shared_overrides = deepcopy(shared_overrides) if shared_overrides else None
         self.abort_message = abort_message
         self.parallel = parallel
+        self.recovery_experiment_id = (
+            str(recovery_experiment_id or "").strip() or None
+        )
         self._abort_controller = _ExperimentAbortController()
         resolved_report = report if report is not None else report_builder
         self._report_controller = (
@@ -529,6 +599,107 @@ class ExperimentSession:
     def close(self) -> None:
         if self._report_controller is not None:
             self._report_controller.close()
+
+    def _resolve_recovery_context(self, stage: StageSpec) -> Optional[Tuple[str, str]]:
+        recovery_experiment_id = self.recovery_experiment_id
+        if recovery_experiment_id is None:
+            return None
+        try:
+            backend_ref, stage_experiment_id = resolve_telemetry_context(stage.config)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f'Stage "{stage.id}" cannot recover prior results because its telemetry '
+                f"context could not be resolved: {exc}"
+            ) from exc
+        if not backend_ref:
+            raise ValueError(
+                f'Stage "{stage.id}" cannot recover prior results because telemetry is not configured.'
+            )
+        if stage_experiment_id and str(stage_experiment_id) != recovery_experiment_id:
+            raise ValueError(
+                f'Stage "{stage.id}" is configured for experiment_id "{stage_experiment_id}" '
+                f'but recovery_experiment_id is "{recovery_experiment_id}".'
+            )
+        return str(backend_ref), recovery_experiment_id
+
+    def _load_recovered_result(self, stage: StageSpec) -> Optional[JobResult]:
+        recovery_context = self._resolve_recovery_context(stage)
+        if recovery_context is None:
+            return None
+        backend_ref, experiment_id = recovery_context
+        client = TelemetryClient(db_url=backend_ref)
+        run_id = _resolve_stage_run_name(stage)
+        phase = _resolve_stage_phase(stage)
+        row = get_run_result(
+            client,
+            experiment_id=experiment_id,
+            run_id=run_id,
+            phase=phase,
+        )
+        if row is None:
+            return None
+        _results_payload, job_result_payload = row
+        if not isinstance(job_result_payload, dict) or not job_result_payload:
+            return None
+        try:
+            return JobResult.from_dict(job_result_payload)
+        except TypeError as exc:
+            raise ValueError(
+                f'Stage "{stage.id}" recovered an invalid telemetry payload for '
+                f'run_id "{run_id}": {exc}'
+            ) from exc
+
+    def _resolve_recovered_stage_result(self, stage: StageSpec) -> Optional[JobResult]:
+        prior_result = self._load_recovered_result(stage)
+        if prior_result is None:
+            return None
+
+        status = str(getattr(prior_result, "status", "") or "").strip().lower()
+        if status in {"success", "partial"}:
+            _red_print(
+                f'[TENYSON] Reusing prior {status} result for stage "{stage.id}" '
+                f"(run_id={prior_result.run_id})."
+            )
+            return prior_result
+
+        if status != "stopped":
+            return None
+
+        train_cfg = stage.config.setdefault("training", {})
+        action = _prompt_recovery_action(
+            step_label=stage.id,
+            run_id=str(getattr(prior_result, "run_id", "") or _resolve_stage_run_name(stage)),
+            job_type=_resolve_stage_phase(stage),
+            last_result=prior_result,
+        )
+        if action == "resume":
+            train_cfg["resume_from_checkpoint"] = (
+                f"{prior_result.hf_repo_id}:{prior_result.hf_revision}"
+            )
+            _red_print(
+                f'[TENYSON] Resuming stage "{stage.id}" from '
+                f'{train_cfg["resume_from_checkpoint"]}.'
+            )
+            return None
+
+        train_cfg.pop("resume_from_checkpoint", None)
+        if action == "continue":
+            _accept_stopped_result(
+                prior_result,
+                config=stage.config,
+                job_type=_resolve_stage_phase(stage),
+            )
+            _red_print(
+                f'[TENYSON] Accepted prior stopped result for stage "{stage.id}" '
+                "and will move to the next stage."
+            )
+            return prior_result
+
+        _red_print(
+            f'[TENYSON] Restarting stage "{stage.id}" from scratch instead of '
+            "reusing the prior stopped result."
+        )
+        return None
 
     def run_branches(
         self,
@@ -655,6 +826,11 @@ class ExperimentSession:
 
     def run_stage(self, stage: StageSpec, *, cloud: Optional[Any] = None) -> JobResult:
         self.raise_if_aborted()
+        recovered_result = self._resolve_recovered_stage_result(stage)
+        if recovered_result is not None:
+            if self._report_controller is not None:
+                self._report_controller.record_stage_result(stage, recovered_result)
+            return recovered_result
         run_id = _resolve_stage_run_name(stage)
         _ensure_stage_attempt_token(stage)
         active_run_id = self._abort_controller.register_stage(stage)
@@ -705,17 +881,31 @@ class ExperimentSession:
         if not stages:
             return {}
 
+        output: Dict[str, JobResult] = {}
+        stages_to_run: list[StageSpec] = []
         for stage in stages:
+            recovered_result = self._resolve_recovered_stage_result(stage)
+            if recovered_result is not None:
+                output[stage.id] = recovered_result
+                if self._report_controller is not None:
+                    self._report_controller.record_stage_result(stage, recovered_result)
+                continue
+            stages_to_run.append(stage)
+
+        if not stages_to_run:
+            return {stage.id: output[stage.id] for stage in stages}
+
+        for stage in stages_to_run:
             _ensure_stage_attempt_token(stage)
         active_run_ids = [
             active_run_id
             for active_run_id in (
-                self._abort_controller.register_stage(stage) for stage in stages
+                self._abort_controller.register_stage(stage) for stage in stages_to_run
             )
             if active_run_id
         ]
         if self._report_controller is not None:
-            for stage in stages:
+            for stage in stages_to_run:
                 self._report_controller.start_stage(stage)
         results = None
         try:
@@ -724,7 +914,7 @@ class ExperimentSession:
                 [
                     {
                         "label": label,
-                        "parallel": [stage.as_pipeline_step() for stage in stages],
+                        "parallel": [stage.as_pipeline_step() for stage in stages_to_run],
                     }
                 ],
                 cloud_instance,
@@ -734,12 +924,11 @@ class ExperimentSession:
             for active_run_id in active_run_ids:
                 self._abort_controller.unregister_run(active_run_id)
             if results is None and self._report_controller is not None:
-                for stage in stages:
+                for stage in stages_to_run:
                     self._report_controller.stop_stage(stage.id)
 
-        output: Dict[str, JobResult] = {}
         try:
-            for stage in stages:
+            for stage in stages_to_run:
                 run_id = _resolve_stage_run_name(stage)
                 matched_result = None
                 for result in reversed(results):
@@ -757,11 +946,11 @@ class ExperimentSession:
                     self._report_controller.finish_stage(stage.id, matched_result)
         except Exception:
             if self._report_controller is not None:
-                for stage in stages:
+                for stage in stages_to_run:
                     self._report_controller.stop_stage(stage.id)
             raise
 
-        for stage in stages:
+        for stage in stages_to_run:
             result = output[stage.id]
             if _is_retryable_failure(result):
                 self._abort_controller.request_abort(
@@ -769,7 +958,7 @@ class ExperimentSession:
                     source_label=stage.id,
                 )
                 break
-        return output
+        return {stage.id: output[stage.id] for stage in stages}
 
     def require_adapter(self, result: JobResult, stage_id: str) -> AdapterRef:
         repo = getattr(result, "hf_repo_id", None)
