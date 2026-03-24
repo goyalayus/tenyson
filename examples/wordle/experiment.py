@@ -112,25 +112,10 @@ def main() -> None:
     recovery_experiment_id = (
         str(os.getenv("TENYSON_RECOVER_EXPERIMENT_ID", "")).strip() or None
     )
-    disable_parallel = os.getenv(
-        "TENYSON_DISABLE_PARALLEL", "false"
-    ).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
     if recovery_experiment_id:
         print(
             "[wordle experiment] Recovery enabled for "
             f"experiment_id={recovery_experiment_id}.",
-            flush=True,
-        )
-    if disable_parallel:
-        print(
-            "[wordle experiment] Parallel branches are disabled via "
-            "TENYSON_DISABLE_PARALLEL.",
             flush=True,
         )
 
@@ -144,7 +129,7 @@ def main() -> None:
         ),
         on_failure=on_failure,
         shared_overrides=shared_overrides_from_env(),
-        parallel=not disable_parallel,
+        parallel=True,
         report=report,
         report_metric_precision=4,
         report_wandb_text="run",
