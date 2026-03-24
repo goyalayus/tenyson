@@ -9,7 +9,9 @@ from unittest.mock import patch
 from tenyson.cloud.manager import CloudManager
 from tenyson.cloud.modal import (
     ModalManager,
+    _bind_modal_run_remote,
     _build_clone_repo_command,
+    _modal_run_remote,
     _normalize_git_clone_url,
     _run_subprocess_with_streaming_logs,
 )
@@ -99,6 +101,25 @@ class ModalFunctionOptionsTests(unittest.TestCase):
         )
 
         self.assertTrue(options["serialized"])
+
+    def test_bind_modal_run_remote_uses_module_scope_function(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeApp:
+            def function(self, **options: object):
+                captured["options"] = options
+
+                def decorator(fn: object) -> object:
+                    captured["function"] = fn
+                    return fn
+
+                return decorator
+
+        bound = _bind_modal_run_remote(FakeApp(), {"serialized": False})
+
+        self.assertIs(bound, _modal_run_remote)
+        self.assertIs(captured["function"], _modal_run_remote)
+        self.assertEqual(captured["options"], {"serialized": False})
 
 
 class ModalGitSourceTests(unittest.TestCase):

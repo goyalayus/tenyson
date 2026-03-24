@@ -92,6 +92,48 @@ def _run_subprocess_with_streaming_logs(
     return returncode, details
 
 
+def _modal_run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: str) -> None:
+    import tempfile
+    import yaml
+
+    os.chdir("/workspace")
+    os.environ["TENYSON_EXECUTION_MODE"] = "cloud"
+    os.environ["TENYSON_GPU_PROVIDER"] = "modal"
+    config_path = os.path.join(
+        tempfile.gettempdir(),
+        f"tenyson-{job_type}-config.yaml",
+    )
+    with open(config_path, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(config_payload, handle, sort_keys=False)
+    cmd = [
+        sys.executable,
+        "-m",
+        "tenyson.runner",
+        "--job-type",
+        job_type,
+        "--config",
+        config_path,
+        "--task-module",
+        task_spec,
+    ]
+    print(f"[ModalManager] Running on Modal: {' '.join(cmd)}", flush=True)
+    result_code, details = _run_subprocess_with_streaming_logs(
+        cmd,
+        env=os.environ.copy(),
+    )
+    if result_code != 0:
+        if len(details) > 1000:
+            details = details[-1000:]
+        raise RuntimeError(
+            "Tenyson job failed inside Modal with code "
+            f"{result_code}. {details}"
+        )
+
+
+def _bind_modal_run_remote(app: Any, options: Dict[str, Any]) -> Any:
+    return app.function(**options)(_modal_run_remote)
+
+
 @dataclass(frozen=True)
 class GitRepoSource:
     clone_url: str
@@ -362,52 +404,14 @@ class ModalManager(BaseCloudManager):
             secrets.append(modal.Secret.from_dict(runtime_secret_env))
 
         gpu_request = self._resolve_modal_gpu_request()
-
-        @app.function(
-            **self._build_run_remote_function_options(
+        run_remote = _bind_modal_run_remote(
+            app,
+            self._build_run_remote_function_options(
                 image=image,
                 gpu_request=gpu_request,
                 secrets=secrets,
-            )
+            ),
         )
-        def run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: str) -> None:
-            import tempfile
-            import os
-            import sys
-            import yaml
-
-            os.chdir("/workspace")
-            os.environ["TENYSON_EXECUTION_MODE"] = "cloud"
-            os.environ["TENYSON_GPU_PROVIDER"] = "modal"
-            config_path = os.path.join(
-                tempfile.gettempdir(),
-                f"tenyson-{job_type}-config.yaml",
-            )
-            with open(config_path, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(config_payload, handle, sort_keys=False)
-            cmd = [
-                sys.executable,
-                "-m",
-                "tenyson.runner",
-                "--job-type",
-                job_type,
-                "--config",
-                config_path,
-                "--task-module",
-                task_spec,
-            ]
-            print(f"[ModalManager] Running on Modal: {' '.join(cmd)}", flush=True)
-            result_code, details = _run_subprocess_with_streaming_logs(
-                cmd,
-                env=os.environ.copy(),
-            )
-            if result_code != 0:
-                if len(details) > 1000:
-                    details = details[-1000:]
-                raise RuntimeError(
-                    "Tenyson job failed inside Modal with code "
-                    f"{result_code}. {details}"
-                )
 
         from tenyson.core.telemetry import (
             TelemetryClient,
