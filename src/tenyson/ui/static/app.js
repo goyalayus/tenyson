@@ -117,6 +117,7 @@
         defaultExperimentId:
           experimentsPayload.default_experiment_id || config.default_experiment_id,
       });
+      const previousExperimentId = state.selectedExperimentId;
 
       state.selectedExperimentId = nextExperimentId;
       renderExperimentSelect();
@@ -136,6 +137,10 @@
         preferredRunKey:
           settings.preferredRunKey || routeRunKeyForExperiment(nextExperimentId),
         preserveCurrentRun: !settings.resetSelection,
+        showLoadingState:
+          firstLoad ||
+          Boolean(settings.resetSelection) ||
+          previousExperimentId !== nextExperimentId,
       });
     } catch (error) {
       renderGlobalError(error);
@@ -197,9 +202,13 @@
       return;
     }
 
+    const previousExperimentId = state.selectedExperimentId;
+    const previousRunKey = state.selectedRunKey;
     state.selectedExperimentId = targetExperimentId;
     renderExperimentSelect();
-    renderExperimentLoadingState();
+    if (settings.showLoadingState !== false) {
+      renderExperimentLoadingState();
+    }
 
     try {
       const snapshot = await fetchJson(
@@ -214,7 +223,7 @@
       renderHeroCards();
 
       const currentRunKey =
-        settings.preserveCurrentRun && state.selectedExperimentId === targetExperimentId
+        settings.preserveCurrentRun && previousExperimentId === targetExperimentId
           ? state.selectedRunKey
           : null;
       const nextRun = pickRunSummary(snapshot.runs, [
@@ -229,7 +238,11 @@
       writeRoute();
 
       if (nextRun) {
-        await loadRunDetail(nextRun);
+        await loadRunDetail(nextRun, {
+          showLoadingState:
+            settings.showLoadingState !== false ||
+            previousRunKey !== state.selectedRunKey,
+        });
         return;
       }
 
@@ -239,12 +252,15 @@
     }
   }
 
-  async function loadRunDetail(runSummary) {
+  async function loadRunDetail(runSummary, options) {
+    const settings = options || {};
     const selectedKey = buildRunKey(runSummary);
     state.selectedRunSummary = runSummary;
     state.selectedRunKey = selectedKey;
     renderRunList();
-    renderRunLoadingState(runSummary);
+    if (settings.showLoadingState !== false) {
+      renderRunLoadingState(runSummary);
+    }
     writeRoute();
 
     const requestToken = ++state.runRequestToken;
@@ -389,14 +405,7 @@
       : [];
     const phaseSummary = summarizeCounts(countBy(runs, "phase"));
     const statusSummary = summarizeCounts(experiment.status_counts || {});
-    const indicatorState =
-      Number(experiment.active_run_count || 0) > 0
-        ? "running"
-        : Number((experiment.status_counts || {}).failed || 0) > 0
-        ? "failed"
-        : Number(experiment.run_count || 0) > 0
-        ? "success"
-        : "neutral";
+    const indicatorState = experimentTone(experiment);
 
     renderProjectSummaryBase([
       metaItem("Experiment", experiment.experiment_id),
@@ -421,7 +430,10 @@
       metaItem("Refreshed", formatTimestamp(experiment.refreshed_at)),
     ]);
 
-    updateIndicator(indicatorState, `${experiment.active_run_count} active runs`);
+    updateIndicator(
+      indicatorState,
+      statusSummary || `${experiment.active_run_count} active runs`
+    );
   }
 
   function renderProjectSummaryBase(items) {
@@ -679,7 +691,7 @@
       );
     });
 
-    elements.historySummary.textContent = `Showing ${selectedKeys.length} of ${allKeys.length} numeric series across ${rows.length} points`;
+    elements.historySummary.textContent = `Showing ${selectedKeys.length} of ${allKeys.length} numeric series across ${pluralize(rows.length, "point")}`;
   }
 
   function renderEvalSamples() {
@@ -733,6 +745,7 @@
       const tr = document.createElement("tr");
 
       const statusCell = document.createElement("td");
+      statusCell.className = "status-cell";
       const badge = createText(
         "span",
         `eval-status ${outcome.passed ? "pass" : "fail"}`,
@@ -747,22 +760,28 @@
 
       const guessCell = createText(
         "td",
-        "",
+        "guess-cell",
         row && row.parsed_guess ? String(row.parsed_guess) : "-"
       );
 
       const completionCell = document.createElement("td");
+      completionCell.className = "completion-cell";
       completionCell.appendChild(
-        createText(
-          "div",
+        buildExpandableCopy(
           "completion-copy",
-          row && row.completion ? String(row.completion) : ""
+          row && row.completion ? String(row.completion) : "",
+          520
         )
       );
 
       const promptCell = document.createElement("td");
+      promptCell.className = "prompt-cell";
       promptCell.appendChild(
-        createText("div", "prompt-copy", row && row.prompt ? String(row.prompt) : "")
+        buildExpandableCopy(
+          "prompt-copy",
+          row && row.prompt ? String(row.prompt) : "",
+          420
+        )
       );
 
       tr.appendChild(statusCell);
@@ -815,6 +834,31 @@
 
     if (!values.length) {
       card.appendChild(createText("div", "history-empty", "No values logged."));
+      return card;
+    }
+
+    if (values.length === 1) {
+      card.classList.add("single-point");
+      card.appendChild(
+        createText(
+          "div",
+          "chart-single-value",
+          formatMetricValue(values[0].y, key)
+        )
+      );
+      card.appendChild(
+        createText(
+          "div",
+          "chart-note muted-copy",
+          "Only one telemetry point is available so there is no trend line yet."
+        )
+      );
+      const footer = document.createElement("div");
+      footer.className = "chart-footer";
+      footer.appendChild(createText("span", "", `min ${formatMetricValue(values[0].y, key)}`));
+      footer.appendChild(createText("span", "", `max ${formatMetricValue(values[0].y, key)}`));
+      footer.appendChild(createText("span", "", "1 point"));
+      card.appendChild(footer);
       return card;
     }
 
@@ -1027,6 +1071,30 @@
     elements.showFailedRows.disabled = !enabled;
     elements.showAllRows.classList.toggle("active", !state.showFailuresOnly);
     elements.showFailedRows.classList.toggle("active", state.showFailuresOnly);
+    elements.showAllRows.setAttribute("aria-pressed", String(!state.showFailuresOnly));
+    elements.showFailedRows.setAttribute("aria-pressed", String(state.showFailuresOnly));
+  }
+
+  function buildExpandableCopy(className, text, previewLength) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "expand-shell";
+    const fullText = String(text || "");
+    const previewText = summarizeText(fullText, previewLength);
+    wrapper.appendChild(createText("div", `${className} copy-preview`, previewText || " "));
+
+    if (previewText !== fullText) {
+      const details = document.createElement("details");
+      details.className = "expand-panel";
+      const summary = createText("summary", "expand-toggle", "Show full");
+      details.addEventListener("toggle", () => {
+        summary.textContent = details.open ? "Show less" : "Show full";
+      });
+      details.appendChild(summary);
+      details.appendChild(createText("div", className, fullText));
+      wrapper.appendChild(details);
+    }
+
+    return wrapper;
   }
 
   function sampleOutcome(row) {
@@ -1116,10 +1184,44 @@
 
   function countBy(items, key) {
     return (Array.isArray(items) ? items : []).reduce((counts, item) => {
-      const value = String(item && item[key] ? item[key] : "unknown").trim() || "unknown";
+      const rawValue =
+        item && Object.prototype.hasOwnProperty.call(item, key) ? item[key] : "unknown";
+      const value = String(rawValue == null ? "unknown" : rawValue).trim() || "unknown";
       counts[value] = (counts[value] || 0) + 1;
       return counts;
     }, {});
+  }
+
+  function experimentTone(experiment) {
+    const runCount = Number(experiment && experiment.run_count ? experiment.run_count : 0);
+    const activeCount = Number(
+      experiment && experiment.active_run_count ? experiment.active_run_count : 0
+    );
+    const statuses = asObject(experiment && experiment.status_counts);
+    const failed = Number(statuses.failed || 0);
+    const partial = Number(statuses.partial || 0);
+    const stopped = Number(statuses.stopped || 0);
+    const success = Number(statuses.success || 0);
+
+    if (activeCount > 0) {
+      return "running";
+    }
+    if (failed > 0) {
+      return "failed";
+    }
+    if (partial > 0) {
+      return "partial";
+    }
+    if (stopped > 0 && runCount > 0 && stopped === runCount) {
+      return "stopped";
+    }
+    if (stopped > 0) {
+      return "partial";
+    }
+    if (success > 0) {
+      return "success";
+    }
+    return "neutral";
   }
 
   function summarizeCounts(counts) {
@@ -1141,6 +1243,11 @@
 
   function buildRunKey(run) {
     return `${String(run.phase || "")}::${String(run.run_name || "")}`;
+  }
+
+  function pluralize(count, noun) {
+    const numericCount = Number(count || 0);
+    return `${numericCount} ${noun}${numericCount === 1 ? "" : "s"}`;
   }
 
   function routeRunKeyForExperiment(experimentId) {
@@ -1414,5 +1521,13 @@
   function trimOrNull(value) {
     const text = String(value || "").trim();
     return text || null;
+  }
+
+  function summarizeText(text, maxChars) {
+    const source = String(text || "");
+    if (!source || source.length <= maxChars) {
+      return source;
+    }
+    return `${source.slice(0, maxChars).trimEnd()}…`;
   }
 })();
