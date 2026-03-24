@@ -181,6 +181,22 @@ python3 examples/wordle/experiment.py
 
 The experiment entrypoint auto-loads `examples/wordle/.env` when present, auto-adds `src/` to `PYTHONPATH`, and can install missing controller-side dependencies on a fresh local checkout. Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable dependency bootstrap behavior.
 
+For long-running experiments, prefer launching the local controller in detached
+mode so it does not die with your interactive terminal session:
+
+```bash
+python3 -m tenyson.ctl launch \
+  --name wordle \
+  --cwd . \
+  -- python3 examples/wordle/experiment.py
+
+python3 -m tenyson.ctl status --name wordle
+```
+
+This writes controller pid/log metadata under `.tenyson_runs/controllers/`.
+Use `python3 -m tenyson.ctl stop-controller --name wordle` if you need to
+terminate the detached local controller process itself.
+
 For a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in `examples/wordle/.env`.
 If your GitHub remote is private, also provide `TENYSON_GIT_AUTH_TOKEN` or `GITHUB_TOKEN` so Modal can clone the repo during image build.
 

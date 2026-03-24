@@ -1,5 +1,10 @@
 import argparse
+import contextlib
+import io
+import json
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -107,6 +112,114 @@ class CtlStopTests(unittest.TestCase):
             experiment_id="wordle_exp",
             create_if_missing=False,
         )
+
+
+class CtlControllerLifecycleTests(unittest.TestCase):
+    def test_launch_starts_detached_controller_and_writes_state_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                name="Wordle Controller",
+                controller_dir=tmpdir,
+                cwd="/repo",
+                env=["FOO=bar"],
+                command=["--", "python3", "examples/wordle/experiment.py"],
+            )
+
+            with patch.object(
+                ctl_module.subprocess,
+                "Popen",
+                return_value=SimpleNamespace(pid=43210),
+            ) as popen_mock:
+                ctl_module._cmd_launch(args)
+
+            pid_path = Path(tmpdir) / "wordle-controller.pid"
+            log_path = Path(tmpdir) / "wordle-controller.log"
+            metadata_path = Path(tmpdir) / "wordle-controller.json"
+
+            self.assertEqual(pid_path.read_text(encoding="utf-8").strip(), "43210")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["pid"], 43210)
+            self.assertEqual(
+                metadata["command"],
+                ["python3", "examples/wordle/experiment.py"],
+            )
+            self.assertEqual(metadata["cwd"], "/repo")
+            self.assertEqual(metadata["log_path"], str(log_path))
+            self.assertTrue(log_path.exists())
+
+            popen_mock.assert_called_once()
+            self.assertEqual(
+                popen_mock.call_args.args[0],
+                ["python3", "examples/wordle/experiment.py"],
+            )
+            self.assertEqual(popen_mock.call_args.kwargs["cwd"], "/repo")
+            self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
+            self.assertEqual(
+                popen_mock.call_args.kwargs["stdin"],
+                ctl_module.subprocess.DEVNULL,
+            )
+            self.assertEqual(popen_mock.call_args.kwargs["stderr"], ctl_module.subprocess.STDOUT)
+            self.assertEqual(popen_mock.call_args.kwargs["env"]["FOO"], "bar")
+
+    def test_launch_rejects_existing_live_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "wordle.pid"
+            pid_path.write_text("123\n", encoding="utf-8")
+            args = argparse.Namespace(
+                name="wordle",
+                controller_dir=tmpdir,
+                cwd=".",
+                env=[],
+                command=["python3", "examples/wordle/experiment.py"],
+            )
+
+            with patch.object(ctl_module, "_is_process_alive", return_value=True):
+                with self.assertRaises(SystemExit):
+                    ctl_module._cmd_launch(args)
+
+    def test_status_reports_running_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir) / "wordle"
+            (Path(tmpdir) / "wordle.pid").write_text("456\n", encoding="utf-8")
+            (Path(tmpdir) / "wordle.log").write_text("", encoding="utf-8")
+            (Path(tmpdir) / "wordle.json").write_text(
+                json.dumps(
+                    {
+                        "name": "wordle",
+                        "pid": 456,
+                        "command": ["python3", "examples/wordle/experiment.py"],
+                        "cwd": "/repo",
+                        "log_path": str(base.with_suffix(".log")),
+                        "launched_at": "2026-03-24T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(name="wordle", controller_dir=tmpdir)
+            stdout_buffer = io.StringIO()
+
+            with patch.object(ctl_module, "_is_process_alive", return_value=True), contextlib.redirect_stdout(
+                stdout_buffer
+            ):
+                ctl_module._cmd_status(args)
+
+            output = stdout_buffer.getvalue()
+            self.assertIn("status: running", output)
+            self.assertIn("pid: 456", output)
+            self.assertIn("python3 examples/wordle/experiment.py", output)
+
+    def test_stop_controller_sends_sigterm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "wordle.pid").write_text("789\n", encoding="utf-8")
+            args = argparse.Namespace(name="wordle", controller_dir=tmpdir)
+
+            with patch.object(ctl_module, "_is_process_alive", return_value=True), patch.object(
+                ctl_module.os,
+                "kill",
+            ) as kill_mock:
+                ctl_module._cmd_stop_controller(args)
+
+            kill_mock.assert_called_once_with(789, ctl_module.signal.SIGTERM)
 
 
 class WandBStopTests(unittest.TestCase):
