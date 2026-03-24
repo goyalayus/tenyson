@@ -25,6 +25,7 @@ class ModalManagerEnvTests(unittest.TestCase):
         self.assertEqual(manager.gpu, "A100")
         self.assertEqual(manager.timeout, 86400)
         self.assertTrue(manager.auto_terminate)
+        self.assertFalse(manager.serialized)
 
     def test_from_env_reads_modal_specific_settings(self) -> None:
         env = {
@@ -36,6 +37,16 @@ class ModalManagerEnvTests(unittest.TestCase):
 
         self.assertEqual(manager.gpu, "A100-80GB")
         self.assertEqual(manager.timeout, 7200)
+
+    def test_from_env_reads_serialized_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TENYSON_MODAL_SERIALIZED": "true"},
+            clear=True,
+        ):
+            manager = ModalManager.from_env()
+
+        self.assertTrue(manager.serialized)
 
     def test_from_env_rejects_invalid_timeout(self) -> None:
         with patch.dict(
@@ -62,6 +73,32 @@ class ModalTaskSpecTests(unittest.TestCase):
         task_spec = manager._resolve_task_spec(task, str(repo_root))
 
         self.assertEqual(task_spec, "examples/wordle/wordle_task.py")
+
+
+class ModalFunctionOptionsTests(unittest.TestCase):
+    def test_run_remote_options_do_not_serialize_by_default(self) -> None:
+        manager = ModalManager()
+
+        options = manager._build_run_remote_function_options(
+            image="fake-image",
+            gpu_request="A100-40GB",
+            secrets=[],
+        )
+
+        self.assertFalse(options["serialized"])
+        self.assertEqual(options["gpu"], "A100-40GB")
+        self.assertEqual(options["timeout"], 86400)
+
+    def test_run_remote_options_preserve_serialized_override(self) -> None:
+        manager = ModalManager(serialized=True)
+
+        options = manager._build_run_remote_function_options(
+            image="fake-image",
+            gpu_request="A100-40GB",
+            secrets=[],
+        )
+
+        self.assertTrue(options["serialized"])
 
 
 class ModalGitSourceTests(unittest.TestCase):

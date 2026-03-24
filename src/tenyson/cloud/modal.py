@@ -18,6 +18,10 @@ from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
+def _is_truthy_env(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _drain_subprocess_stream(
     stream: Any,
     *,
@@ -165,10 +169,12 @@ class ModalManager(BaseCloudManager):
         gpu: str = "A100",
         timeout: int = 86400,
         auto_terminate: bool = True,
+        serialized: bool = False,
     ):
         super().__init__(auto_terminate=auto_terminate)
         self.gpu = gpu
         self.timeout = timeout
+        self.serialized = serialized
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "ModalManager":
@@ -184,11 +190,31 @@ class ModalManager(BaseCloudManager):
             "gpu": os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100",
             "timeout": timeout,
             "auto_terminate": True,
+            "serialized": _is_truthy_env(
+                os.getenv("TENYSON_MODAL_SERIALIZED", "false")
+            ),
         }
         config.update(
             {key: value for key, value in overrides.items() if value is not None}
         )
         return cls(**config)
+
+    def _build_run_remote_function_options(
+        self,
+        *,
+        image: Any,
+        gpu_request: str,
+        secrets: List[Any],
+    ) -> Dict[str, Any]:
+        return {
+            "image": image,
+            "gpu": gpu_request,
+            "timeout": self.timeout,
+            "secrets": secrets,
+            # Allow true branch-level concurrency by default. This can still be
+            # re-enabled explicitly for debugging with TENYSON_MODAL_SERIALIZED=1.
+            "serialized": self.serialized,
+        }
 
     @classmethod
     def factory_from_env(cls, **overrides: Any) -> Callable[[], "ModalManager"]:
@@ -338,11 +364,11 @@ class ModalManager(BaseCloudManager):
         gpu_request = self._resolve_modal_gpu_request()
 
         @app.function(
-            image=image,
-            gpu=gpu_request,
-            timeout=self.timeout,
-            secrets=secrets,
-            serialized=True,
+            **self._build_run_remote_function_options(
+                image=image,
+                gpu_request=gpu_request,
+                secrets=secrets,
+            )
         )
         def run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: str) -> None:
             import tempfile
