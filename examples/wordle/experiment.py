@@ -127,6 +127,12 @@ def main() -> None:
             f"experiment_id={recovery_experiment_id}.",
             flush=True,
         )
+    if disable_parallel:
+        print(
+            "[wordle experiment] Parallel branches are disabled via "
+            "TENYSON_DISABLE_PARALLEL.",
+            flush=True,
+        )
 
     session = ExperimentSession(
         task=task,
