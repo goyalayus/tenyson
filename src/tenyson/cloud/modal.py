@@ -46,6 +46,7 @@ def _run_subprocess_with_streaming_logs(
     *,
     env: Dict[str, str],
     cwd: str | None = None,
+    close_fds: bool = True,
     recent_line_limit: int = 200,
 ) -> tuple[int, str]:
     """
@@ -56,6 +57,7 @@ def _run_subprocess_with_streaming_logs(
         cmd,
         cwd=cwd,
         env=env,
+        close_fds=close_fds,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -322,6 +324,9 @@ class ModalManager(BaseCloudManager):
         Resolve the local project root that contains src-layout package files.
         Supports invoking from either project root or one directory above.
         """
+        override = str(os.getenv("TENYSON_LOCAL_PROJECT_ROOT") or "").strip()
+        if override:
+            return os.path.abspath(override)
         root = os.path.abspath(".")
         candidates = [root, os.path.join(root, "tenyson")]
         for candidate in candidates:
@@ -489,6 +494,7 @@ class ModalManager(BaseCloudManager):
             )
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            env["TENYSON_LOCAL_PROJECT_ROOT"] = local_project_root
             existing_pythonpath = str(env.get("PYTHONPATH") or "").strip()
             src_path = os.path.join(local_project_root, "src")
             env["PYTHONPATH"] = (
@@ -498,7 +504,8 @@ class ModalManager(BaseCloudManager):
             )
             returncode, details = _run_subprocess_with_streaming_logs(
                 cmd,
-                cwd=local_project_root,
+                cwd=None,
+                close_fds=False,
                 env=env,
             )
         finally:

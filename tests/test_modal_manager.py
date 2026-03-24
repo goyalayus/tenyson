@@ -53,6 +53,15 @@ class ModalManagerEnvTests(unittest.TestCase):
 
         self.assertTrue(manager.serialized)
 
+    def test_resolve_local_project_root_prefers_explicit_override(self) -> None:
+        manager = ModalManager()
+        with patch.dict(
+            os.environ,
+            {"TENYSON_LOCAL_PROJECT_ROOT": "/tmp/tenyson-root"},
+            clear=True,
+        ):
+            self.assertEqual(manager._resolve_local_project_root(), "/tmp/tenyson-root")
+
     def test_from_env_rejects_invalid_timeout(self) -> None:
         with patch.dict(
             os.environ, {"TENYSON_MODAL_TIMEOUT": "not-an-int"}, clear=True
@@ -261,8 +270,10 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         cmd = run_subprocess.call_args.args[0]
         kwargs = run_subprocess.call_args.kwargs
         self.assertIn("tenyson.cloud.modal_launcher", cmd)
-        self.assertEqual(kwargs["cwd"], "/repo")
+        self.assertIsNone(kwargs["cwd"])
+        self.assertFalse(kwargs["close_fds"])
         self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
+        self.assertEqual(kwargs["env"]["TENYSON_LOCAL_PROJECT_ROOT"], "/repo")
         self.assertTrue(kwargs["env"]["PYTHONPATH"].startswith("/repo/src"))
         unlink.assert_called_once_with("/tmp/fake-job.yaml")
 
