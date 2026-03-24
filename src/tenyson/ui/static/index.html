@@ -75,6 +75,46 @@
                 <button id="show-failed-rows" class="small-button" type="button">
                   Failures
                 </button>
+                <div class="filter-pill-group" aria-label="Reward filter">
+                  <span>Reward</span>
+                  <div class="filter-pill-row">
+                    <button
+                      class="small-button reward-filter-button active"
+                      type="button"
+                      data-reward-filter="any"
+                    >
+                      Any reward
+                    </button>
+                    <button
+                      class="small-button reward-filter-button"
+                      type="button"
+                      data-reward-filter="positive"
+                    >
+                      Positive only
+                    </button>
+                    <button
+                      class="small-button reward-filter-button"
+                      type="button"
+                      data-reward-filter="zero"
+                    >
+                      Zero only
+                    </button>
+                    <button
+                      class="small-button reward-filter-button"
+                      type="button"
+                      data-reward-filter="negative"
+                    >
+                      Negative only
+                    </button>
+                    <button
+                      class="small-button reward-filter-button"
+                      type="button"
+                      data-reward-filter="nonpositive"
+                    >
+                      Zero or below
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
             <div id="eval-summary" class="metric-grid compact"></div>
@@ -83,6 +123,7 @@
                 <thead>
                   <tr>
                     <th>Status</th>
+                    <th>Reward</th>
                     <th>Parsed Guess</th>
                     <th>Completion</th>
                     <th>Prompt</th>

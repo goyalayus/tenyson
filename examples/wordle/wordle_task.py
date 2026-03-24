@@ -661,6 +661,7 @@ def compute_metrics(
     """Scores completions and returns an aggregated metric dictionary."""
     solutions, allowed = get_wordlists(config)
     valid_set = set(solutions) | set(allowed)
+    task_cfg = config.get("task", {})
 
     total = len(completions)
     format_ok = 0
@@ -670,40 +671,50 @@ def compute_metrics(
     detailed_results = []
 
     for prompt, comp in zip(prompts, completions):
-        guess = parse_strict_guess(comp)
+        scored = score_completion(
+            prompt_text=prompt,
+            completion_text=comp,
+            valid_set=valid_set,
+            task_cfg=task_cfg,
+            tokenizer=tokenizer,
+        )
+        guess = scored.get("parsed_guess")
+        totals = scored.get("totals") if isinstance(scored.get("totals"), dict) else {}
+        format_passed = bool(scored.get("strict_ok"))
+        dict_passed = bool(scored.get("is_wordle_valid"))
+        is_consistent = (
+            format_passed
+            and dict_passed
+            and int(scored.get("sat_count") or 0)
+            == sum(int(value or 0) for value in totals.values())
+        )
+        failure_reasons: List[str] = []
+        if not format_passed:
+            failure_reasons.append("format")
+        else:
+            if not dict_passed:
+                failure_reasons.append("dictionary")
+            if not is_consistent:
+                failure_reasons.append("constraints")
 
         row_res = {
             "prompt": prompt,
             "completion": comp,
             "parsed_guess": guess,
-            "format_ok": False,
-            "dict_ok": False,
-            "consistent": False,
+            "format_ok": format_passed,
+            "dict_ok": dict_passed,
+            "consistent": is_consistent,
+            "passed": len(failure_reasons) == 0,
+            "failure_reasons": failure_reasons,
         }
+        row_res.update(scored)
 
-        if guess:
+        if format_passed:
             format_ok += 1
-            row_res["format_ok"] = True
-
-            if guess in valid_set:
-                dict_ok += 1
-                row_res["dict_ok"] = True
-
-            # Check constraint consistency
-            history_rows = _parse_history_from_prompt(prompt)
-            if history_rows:
-                ac = aggregate_constraints(history_rows)
-                sat_count, totals, _ = compute_sat_count(guess, ac)
-
-                # Is consistent if all constraints are fully satisfied
-                is_consistent = sat_count == sum(totals.values())
-                if is_consistent:
-                    consistent += 1
-                    row_res["consistent"] = True
-            else:
-                # If no history, it's consistent by definition
-                consistent += 1
-                row_res["consistent"] = True
+        if dict_passed:
+            dict_ok += 1
+        if is_consistent:
+            consistent += 1
 
         detailed_results.append(row_res)
 

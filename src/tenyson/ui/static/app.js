@@ -18,6 +18,9 @@
       "dict_accuracy",
       "format_accuracy",
       "total_samples",
+      "avg_reward",
+      "min_reward",
+      "max_reward",
     ],
   };
 
@@ -30,6 +33,7 @@
     selectedRunSummary: null,
     runDetail: null,
     showFailuresOnly: false,
+    rewardFilterMode: "any",
     refreshTimer: null,
     refreshInFlight: false,
     experimentRequestToken: 0,
@@ -55,6 +59,9 @@
     rawPayload: document.getElementById("raw-payload"),
     showAllRows: document.getElementById("show-all-rows"),
     showFailedRows: document.getElementById("show-failed-rows"),
+    rewardFilterButtons: Array.from(
+      document.querySelectorAll("[data-reward-filter]")
+    ),
     liveIndicator: document.getElementById("live-indicator"),
   };
 
@@ -85,6 +92,16 @@
     elements.showFailedRows.addEventListener("click", () => {
       state.showFailuresOnly = true;
       renderEvalSamples();
+    });
+
+    elements.rewardFilterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.disabled) {
+          return;
+        }
+        state.rewardFilterMode = String(button.dataset.rewardFilter || "any");
+        renderEvalSamples();
+      });
     });
   }
 
@@ -702,10 +719,20 @@
     const detailedRows = Array.isArray(resultPayload.detailed_results)
       ? resultPayload.detailed_results
       : [];
-    const metrics = asObject(resultPayload.metrics);
+    const normalizedRows = detailedRows.map(normalizeEvalRow);
+    const metrics = Object.assign(
+      {},
+      asObject(resultPayload.metrics),
+      deriveRewardMetrics(normalizedRows)
+    );
     const fallbackMetrics = state.runDetail ? collectMetrics(state.runDetail) : {};
+    const failureCount = normalizedRows.filter((row) => !row.outcome.passed).length;
+    const rewardCounts = countRewardBuckets(normalizedRows);
 
-    toggleSampleFilters(detailedRows.length > 0);
+    toggleSampleFilters(detailedRows.length > 0, rewardCounts, {
+      totalCount: normalizedRows.length,
+      failureCount: failureCount,
+    });
 
     if (Object.keys(metrics).length) {
       renderMetricCards(elements.evalSummary, metrics);
@@ -724,24 +751,29 @@
 
     clearNode(elements.evalTableBody);
 
-    if (!detailedRows.length) {
+    if (!normalizedRows.length) {
+      appendTableMessage("No detailed sample rows were logged for this run.");
+      return;
+    }
+
+    const filteredRows = normalizedRows.filter((row) => {
+      if (state.showFailuresOnly && row.outcome.passed) {
+        return false;
+      }
+      return matchesRewardFilter(row.reward, state.rewardFilterMode);
+    });
+
+    if (!filteredRows.length) {
       appendTableMessage(
-        "No detailed sample rows were logged for this run."
+        state.showFailuresOnly || state.rewardFilterMode !== "any"
+          ? "No samples match the current filters."
+          : "All logged samples passed the current checks."
       );
       return;
     }
 
-    const filteredRows = state.showFailuresOnly
-      ? detailedRows.filter((row) => !sampleOutcome(row).passed)
-      : detailedRows;
-
-    if (!filteredRows.length) {
-      appendTableMessage("All logged samples passed the current checks.");
-      return;
-    }
-
     filteredRows.forEach((row) => {
-      const outcome = sampleOutcome(row);
+      const outcome = row.outcome;
       const tr = document.createElement("tr");
 
       const statusCell = document.createElement("td");
@@ -758,10 +790,14 @@
         );
       }
 
+      const rewardCell = document.createElement("td");
+      rewardCell.className = "reward-cell";
+      rewardCell.appendChild(buildRewardCell(row.raw, row.reward));
+
       const guessCell = createText(
         "td",
         "guess-cell",
-        row && row.parsed_guess ? String(row.parsed_guess) : "-"
+        row.raw && row.raw.parsed_guess ? String(row.raw.parsed_guess) : "-"
       );
 
       const completionCell = document.createElement("td");
@@ -769,7 +805,7 @@
       completionCell.appendChild(
         buildExpandableCopy(
           "completion-copy",
-          row && row.completion ? String(row.completion) : "",
+          row.raw && row.raw.completion ? String(row.raw.completion) : "",
           520
         )
       );
@@ -779,12 +815,13 @@
       promptCell.appendChild(
         buildExpandableCopy(
           "prompt-copy",
-          row && row.prompt ? String(row.prompt) : "",
+          row.raw && row.raw.prompt ? String(row.raw.prompt) : "",
           420
         )
       );
 
       tr.appendChild(statusCell);
+      tr.appendChild(rewardCell);
       tr.appendChild(guessCell);
       tr.appendChild(completionCell);
       tr.appendChild(promptCell);
@@ -1060,19 +1097,52 @@
   function appendTableMessage(message) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 4;
+    cell.colSpan = 5;
     cell.appendChild(createText("div", "empty-state", message));
     row.appendChild(cell);
     elements.evalTableBody.appendChild(row);
   }
 
-  function toggleSampleFilters(enabled) {
+  function toggleSampleFilters(enabled, rewardCounts, summary) {
+    const details = summary || {};
+    const totalCount = Number(details.totalCount || 0);
+    const failureCount = Number(details.failureCount || 0);
+    const rewards = rewardCounts || {
+      available: 0,
+      positive: 0,
+      zero: 0,
+      negative: 0,
+      nonpositive: 0,
+    };
     elements.showAllRows.disabled = !enabled;
     elements.showFailedRows.disabled = !enabled;
+    elements.showAllRows.textContent = enabled ? `All (${totalCount})` : "All";
+    elements.showFailedRows.textContent = enabled
+      ? `Failures (${failureCount})`
+      : "Failures";
     elements.showAllRows.classList.toggle("active", !state.showFailuresOnly);
     elements.showFailedRows.classList.toggle("active", state.showFailuresOnly);
     elements.showAllRows.setAttribute("aria-pressed", String(!state.showFailuresOnly));
     elements.showFailedRows.setAttribute("aria-pressed", String(state.showFailuresOnly));
+
+    if (!enabled || !rewards.available) {
+      state.rewardFilterMode = "any";
+    }
+    updateRewardFilterButton("any", "Any reward", rewards.available || totalCount, {
+      disabled: !enabled,
+    });
+    updateRewardFilterButton("positive", "Positive only", rewards.positive, {
+      disabled: !enabled || !rewards.available,
+    });
+    updateRewardFilterButton("zero", "Zero only", rewards.zero, {
+      disabled: !enabled || !rewards.available,
+    });
+    updateRewardFilterButton("negative", "Negative only", rewards.negative, {
+      disabled: !enabled || !rewards.available,
+    });
+    updateRewardFilterButton("nonpositive", "Zero or below", rewards.nonpositive, {
+      disabled: !enabled || !rewards.available,
+    });
   }
 
   function buildExpandableCopy(className, text, previewLength) {
@@ -1097,8 +1167,159 @@
     return wrapper;
   }
 
+  function normalizeEvalRow(row) {
+    const record = asObject(row);
+    return {
+      raw: record,
+      reward: extractRowReward(record),
+      outcome: sampleOutcome(record),
+    };
+  }
+
+  function buildRewardCell(row, rewardValue) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "reward-shell";
+    if (!Number.isFinite(Number(rewardValue))) {
+      wrapper.appendChild(createText("div", "muted-copy", "n/a"));
+      return wrapper;
+    }
+
+    const chip = createText(
+      "span",
+      `reward-chip ${rewardTone(rewardValue)}`,
+      formatSignedValue(rewardValue)
+    );
+    wrapper.appendChild(chip);
+
+    const breakdown = summarizeRewardBreakdown(row);
+    if (breakdown) {
+      wrapper.appendChild(createText("div", "muted-copy reward-breakdown", breakdown));
+    }
+    return wrapper;
+  }
+
+  function deriveRewardMetrics(rows) {
+    const values = rows
+      .map((row) => row.reward)
+      .filter((value) => Number.isFinite(Number(value)))
+      .map((value) => Number(value));
+    if (!values.length) {
+      return {};
+    }
+    const sum = values.reduce((total, value) => total + value, 0);
+    return {
+      avg_reward: sum / values.length,
+      min_reward: Math.min.apply(null, values),
+      max_reward: Math.max.apply(null, values),
+    };
+  }
+
+  function countRewardBuckets(rows) {
+    return rows.reduce(
+      (counts, row) => {
+        if (!Number.isFinite(Number(row.reward))) {
+          return counts;
+        }
+        const reward = Number(row.reward);
+        counts.available += 1;
+        if (Math.abs(reward) < 1e-9) {
+          counts.zero += 1;
+          counts.nonpositive += 1;
+          return counts;
+        }
+        if (reward > 0) {
+          counts.positive += 1;
+          return counts;
+        }
+        counts.negative += 1;
+        counts.nonpositive += 1;
+        return counts;
+      },
+      { available: 0, positive: 0, zero: 0, negative: 0, nonpositive: 0 }
+    );
+  }
+
+  function updateRewardFilterButton(value, label, count, options) {
+    const settings = options || {};
+    const button = elements.rewardFilterButtons.find(
+      (candidate) => candidate.dataset.rewardFilter === value
+    );
+    if (!button) {
+      return;
+    }
+    button.textContent = `${label} (${Number(count || 0)})`;
+    button.disabled = Boolean(settings.disabled);
+    const isActive = state.rewardFilterMode === value;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  }
+
+  function matchesRewardFilter(rewardValue, mode) {
+    const filterMode = String(mode || "any");
+    if (filterMode === "any") {
+      return true;
+    }
+    if (!Number.isFinite(Number(rewardValue))) {
+      return false;
+    }
+    const reward = Number(rewardValue);
+    if (filterMode === "positive") {
+      return reward > 0;
+    }
+    if (filterMode === "zero") {
+      return Math.abs(reward) < 1e-9;
+    }
+    if (filterMode === "negative") {
+      return reward < 0;
+    }
+    if (filterMode === "nonpositive") {
+      return reward <= 0;
+    }
+    return true;
+  }
+
+  function extractRowReward(row) {
+    const record = asObject(row);
+    const rewardKeys = ["reward_total", "reward", "total_reward"];
+    for (const key of rewardKeys) {
+      if (Number.isFinite(Number(record[key]))) {
+        return Number(record[key]);
+      }
+    }
+    return null;
+  }
+
+  function summarizeRewardBreakdown(row) {
+    const record = asObject(row);
+    const rewardParts = [
+      ["fmt", "reward_format"],
+      ["dict", "reward_dict"],
+      ["constraints", "reward_constraints"],
+      ["repeat", "reward_repeat"],
+      ["length", "reward_overlength"],
+    ]
+      .filter((entry) => Number.isFinite(Number(record[entry[1]])))
+      .map((entry) => `${entry[0]} ${formatSignedValue(record[entry[1]])}`);
+    return rewardParts.join(" · ");
+  }
+
   function sampleOutcome(row) {
     const record = row && typeof row === "object" ? row : {};
+    const explicitReasons = Array.isArray(record.failure_reasons)
+      ? record.failure_reasons
+          .map((reason) => prettifyKey(reason))
+          .filter((reason) => reason && reason !== "n/a")
+      : [];
+    if (Object.prototype.hasOwnProperty.call(record, "passed")) {
+      const passed = Boolean(record.passed);
+      if (passed) {
+        return { passed: true, reasons: [] };
+      }
+      if (explicitReasons.length) {
+        return { passed: false, reasons: explicitReasons };
+      }
+    }
+
     const statusText = String(record.status || "").trim().toLowerCase();
     if (statusText) {
       if (["pass", "passed", "success", "ok"].includes(statusText)) {
@@ -1403,6 +1624,29 @@
       return numeric.toFixed(3).replace(/\.?0+$/, "");
     }
     return numeric.toFixed(4).replace(/\.?0+$/, "");
+  }
+
+  function formatSignedValue(value) {
+    if (!Number.isFinite(Number(value))) {
+      return "n/a";
+    }
+    const numeric = Number(value);
+    const formatted = formatMetricValue(numeric, "reward");
+    return numeric > 0 ? `+${formatted}` : formatted;
+  }
+
+  function rewardTone(value) {
+    if (!Number.isFinite(Number(value))) {
+      return "neutral";
+    }
+    const numeric = Number(value);
+    if (numeric > 0) {
+      return "positive";
+    }
+    if (numeric < 0) {
+      return "negative";
+    }
+    return "neutral";
   }
 
   function prettifyKey(key) {

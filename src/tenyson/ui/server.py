@@ -136,6 +136,110 @@ def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
+class _DashboardTokenizerFallback:
+    def encode(self, text: Any, add_special_tokens: bool = False) -> List[int]:
+        _unused = add_special_tokens
+        return list(range(len(str(text or ""))))
+
+
+def _is_wordle_like_eval(
+    config_preview: Mapping[str, Any], results_payload: Mapping[str, Any]
+) -> bool:
+    task_cfg = _coerce_mapping(config_preview.get("task"))
+    detailed_results = results_payload.get("detailed_results")
+    if not isinstance(detailed_results, list) or not detailed_results:
+        return False
+    first_row = _coerce_mapping(detailed_results[0])
+    if not first_row:
+        return False
+    return bool(task_cfg.get("wordlists")) and {
+        "prompt",
+        "completion",
+    }.issubset(first_row.keys())
+
+
+def _wordle_failure_reasons(scored: Mapping[str, Any]) -> List[str]:
+    strict_ok = bool(scored.get("strict_ok"))
+    dict_ok = bool(scored.get("is_wordle_valid"))
+    totals = _coerce_mapping(scored.get("totals"))
+    is_consistent = (
+        strict_ok
+        and dict_ok
+        and int(scored.get("sat_count") or 0)
+        == sum(int(value or 0) for value in totals.values())
+    )
+    reasons: List[str] = []
+    if not strict_ok:
+        reasons.append("format")
+        return reasons
+    if not dict_ok:
+        reasons.append("dictionary")
+    if not is_consistent:
+        reasons.append("constraints")
+    return reasons
+
+
+def _maybe_enrich_wordle_eval_results(
+    results_payload: Mapping[str, Any], config_preview: Mapping[str, Any]
+) -> Dict[str, Any]:
+    payload = _coerce_mapping(results_payload)
+    if not _is_wordle_like_eval(config_preview, payload):
+        return payload
+
+    try:
+        from examples.wordle.wordle_task import get_wordlists, score_completion
+    except Exception:
+        return payload
+
+    task_cfg = _coerce_mapping(config_preview.get("task"))
+    try:
+        solutions, allowed = get_wordlists({"task": task_cfg})
+    except Exception:
+        return payload
+    valid_set = set(solutions) | set(allowed)
+    tokenizer = _DashboardTokenizerFallback()
+
+    enriched_rows: List[Dict[str, Any]] = []
+    for raw_row in payload.get("detailed_results", []):
+        row = _coerce_mapping(raw_row)
+        prompt = str(row.get("prompt") or "")
+        completion = str(row.get("completion") or "")
+        if not prompt and not completion:
+            enriched_rows.append(row)
+            continue
+        try:
+            scored = score_completion(
+                prompt_text=prompt,
+                completion_text=completion,
+                valid_set=valid_set,
+                task_cfg=task_cfg,
+                tokenizer=tokenizer,
+            )
+        except Exception:
+            enriched_rows.append(row)
+            continue
+
+        failure_reasons = _wordle_failure_reasons(scored)
+        totals = _coerce_mapping(scored.get("totals"))
+        merged = dict(row)
+        merged.update(scored)
+        merged["parsed_guess"] = row.get("parsed_guess", scored.get("parsed_guess"))
+        merged["format_ok"] = bool(row.get("format_ok", scored.get("strict_ok")))
+        merged["dict_ok"] = bool(row.get("dict_ok", scored.get("is_wordle_valid")))
+        merged["consistent"] = (
+            merged["format_ok"]
+            and merged["dict_ok"]
+            and int(scored.get("sat_count") or 0)
+            == sum(int(value or 0) for value in totals.values())
+        )
+        merged["passed"] = len(failure_reasons) == 0
+        merged["failure_reasons"] = failure_reasons
+        enriched_rows.append(merged)
+
+    payload["detailed_results"] = enriched_rows
+    return payload
+
+
 def _downsample_rows(rows: List[Dict[str, Any]], max_points: int) -> List[Dict[str, Any]]:
     if max_points <= 0 or len(rows) <= max_points:
         return rows
@@ -476,6 +580,9 @@ class DashboardDataService:
             results_payload, job_result_payload = result_pair
 
         config_preview = _coerce_mapping(getattr(run, "config", {}))
+        results_payload = _maybe_enrich_wordle_eval_results(
+            results_payload, config_preview
+        )
         detail = {
             "summary": summary,
             "result_payload": _json_ready(results_payload),

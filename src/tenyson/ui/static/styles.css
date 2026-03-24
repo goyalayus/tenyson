@@ -62,7 +62,8 @@ h4 {
 }
 
 button,
-select {
+select,
+input {
   font: inherit;
 }
 
@@ -116,6 +117,24 @@ select {
   padding: 12px 16px;
   color: var(--ink);
   box-shadow: 0 8px 22px rgba(28, 45, 40, 0.08);
+}
+
+.filter-pill-group {
+  display: grid;
+  gap: 4px;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.filter-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.reward-filter-button {
+  white-space: nowrap;
 }
 
 .ghost-button,
@@ -494,7 +513,7 @@ select {
 .eval-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 1140px;
   table-layout: fixed;
   background: rgba(255, 255, 255, 0.82);
 }
@@ -524,17 +543,22 @@ select {
 
 .eval-table th:nth-child(2),
 .eval-table td:nth-child(2) {
-  width: 7rem;
+  width: 10rem;
 }
 
 .eval-table th:nth-child(3),
 .eval-table td:nth-child(3) {
-  width: 23rem;
+  width: 7rem;
 }
 
 .eval-table th:nth-child(4),
 .eval-table td:nth-child(4) {
-  width: 24rem;
+  width: 22rem;
+}
+
+.eval-table th:nth-child(5),
+.eval-table td:nth-child(5) {
+  width: 23rem;
 }
 
 .eval-table tbody tr:hover {
@@ -617,8 +641,45 @@ select {
 }
 
 .status-cell,
-.guess-cell {
+.guess-cell,
+.reward-cell {
   vertical-align: top;
+}
+
+.reward-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.reward-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.reward-chip.positive {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.reward-chip.negative {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.reward-chip.neutral {
+  background: rgba(28, 45, 40, 0.08);
+  color: var(--ink-soft);
+}
+
+.reward-breakdown {
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .raw-code {
@@ -675,5 +736,13 @@ a {
   .select-wrap,
   .select-wrap select {
     width: 100%;
+  }
+
+  .filter-pill-group {
+    width: 100%;
+  }
+
+  .filter-pill-row {
+    justify-content: flex-start;
   }
 }
