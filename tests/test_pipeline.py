@@ -110,6 +110,32 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("resume_from_checkpoint", config["training"])
         self.assertIn("[continue]", stderr.getvalue())
 
+    def test_prompt_failure_action_normalizes_abort_policy_to_wait(self) -> None:
+        config = {"training": {"resume_from_checkpoint": "repo:old"}}
+        last_result = JobResult(
+            run_id="wordle_sft_main",
+            status="failed",
+            total_time_seconds=0.0,
+            hf_repo_id="repo",
+            hf_revision="rev",
+        )
+
+        with patch.object(sys, "stdin", io.StringIO("restart\n")), patch.object(
+            sys,
+            "stderr",
+            io.StringIO(),
+        ):
+            action = pipeline_module._prompt_failure_action(
+                step_label="sft_main",
+                config=config,
+                job_type="sft",
+                on_failure="abort",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "restart")
+        self.assertNotIn("resume_from_checkpoint", config["training"])
+
     def test_prompt_failure_action_rejects_continue_for_failed_run(self) -> None:
         config = {"training": {}}
         last_result = JobResult(

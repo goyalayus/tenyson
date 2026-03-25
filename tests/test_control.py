@@ -331,7 +331,7 @@ class WandBAttemptTests(unittest.TestCase):
             telemetry_module.wandb_store,
             "ensure_run",
             return_value=SimpleNamespace(url="https://wandb.example/run"),
-        ), patch.object(
+        ) as ensure_run_mock, patch.object(
             telemetry_module.wandb_store,
             "update_run_summary",
         ) as update_summary_mock:
@@ -355,6 +355,10 @@ class WandBAttemptTests(unittest.TestCase):
         self.assertIsInstance(
             summary_values[telemetry_module.wandb_store.SUMMARY_HEARTBEAT_AT],
             str,
+        )
+        self.assertEqual(
+            ensure_run_mock.call_args.kwargs["attempt_token"],
+            "abc123",
         )
 
 

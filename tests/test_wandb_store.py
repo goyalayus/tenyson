@@ -14,11 +14,26 @@ class FakeSummary(dict):
 
 
 class FakeRun:
-    def __init__(self, run_id: str, url: str | None = None):
+    def __init__(
+        self,
+        run_id: str,
+        url: str | None = None,
+        *,
+        name: str | None = None,
+        group: str | None = None,
+        job_type: str | None = None,
+        created_at=None,
+        updated_at=None,
+    ):
         self.id = run_id
         self.url = url or f"https://wandb.example/runs/{run_id}"
         self.summary = FakeSummary()
         self.logged_artifacts = []
+        self.name = name or run_id
+        self.group = group or ""
+        self.job_type = job_type or ""
+        self.created_at = created_at
+        self.updated_at = updated_at
 
     def log_artifact(self, artifact):
         self.logged_artifacts.append(artifact)
@@ -118,6 +133,33 @@ class WandBStoreTests(unittest.TestCase):
         self.assertEqual(fake_wandb.finish_calls, 1)
         self.assertEqual(len(fake_wandb.init_calls), 1)
 
+    def test_ensure_run_uses_attempt_specific_run_id_when_present(self) -> None:
+        fake_wandb = build_fake_wandb_module()
+        with patch.dict(sys.modules, {"wandb": fake_wandb}), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            run = wandb_store.ensure_run(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="wordle_rl_main",
+                attempt_token="abc123",
+            )
+
+        self.assertEqual(len(fake_wandb.init_calls), 1)
+        self.assertEqual(
+            fake_wandb.init_calls[0]["id"],
+            wandb_store.build_run_id(
+                "wordle_exp",
+                "rl",
+                "wordle_rl_main",
+                attempt_token="abc123",
+            ),
+        )
+        self.assertEqual(run.summary[wandb_store.SUMMARY_ATTEMPT_TOKEN], "abc123")
+
     def test_resolve_run_prefers_matching_active_run(self) -> None:
         expected_id = wandb_store.build_run_id("wordle_exp", "eval", "wordle_eval")
         matching_run = FakeRun(expected_id)
@@ -160,6 +202,52 @@ class WandBStoreTests(unittest.TestCase):
                     attempt_token="wrong-token",
                 )
             )
+
+    def test_fetch_run_without_attempt_token_returns_latest_matching_attempt(self) -> None:
+        older = FakeRun(
+            "older-run",
+            name="wordle_rl_main",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-25T10:00:00+00:00",
+        )
+        older.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "wordle_rl_main",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "older",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-25T10:00:00+00:00",
+            }
+        )
+        newer = FakeRun(
+            "newer-run",
+            name="wordle_rl_main",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-25T11:00:00+00:00",
+        )
+        newer.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "wordle_rl_main",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "newer",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-25T11:00:00+00:00",
+            }
+        )
+        fake_wandb = build_fake_wandb_module(api_run=older)
+        fake_wandb.api_runs = [older, newer]
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            resolved = wandb_store.fetch_run(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="wordle_rl_main",
+            )
+
+        self.assertIs(resolved, newer)
 
     def test_set_stop_requested_passes_create_if_missing_to_resolve_run(self) -> None:
         run = FakeRun("run123")

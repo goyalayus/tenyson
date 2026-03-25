@@ -106,7 +106,7 @@ def main() -> None:
     rl_overrides = smoke_overrides.get("rl")
     eval_overrides = smoke_overrides.get("eval")
 
-    on_failure = os.getenv("TENYSON_ON_FAILURE", "abort").strip().lower() or "abort"
+    on_failure = "wait"
     modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
     modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
     recovery_experiment_id = (

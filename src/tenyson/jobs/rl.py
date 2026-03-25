@@ -675,6 +675,7 @@ class RLJob:
             phase="rl",
             run_name=run_name,
             config=self.config,
+            attempt_token=attempt_token,
         )
         if begin_run_attempt(
             telemetry_client,

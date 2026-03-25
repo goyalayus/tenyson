@@ -31,6 +31,16 @@ PipelineStep = Union[StepTuple, ParallelStage]
 _FAILURE_PROMPT_LOCK = threading.Lock()
 
 
+def _normalize_on_failure_policy(on_failure: Optional[str]) -> str:
+    """
+    Tenyson now always waits for an operator decision after a failure or
+    manual stop. Keep accepting legacy inputs such as "abort", but normalize
+    them to the only supported policy.
+    """
+    del on_failure
+    return "wait"
+
+
 def _is_terminal_nonfailure(result: JobResult) -> bool:
     return str(getattr(result, "status", "") or "").lower() in {
         "success",
@@ -133,8 +143,7 @@ def _prompt_failure_action(
     on_failure: str,
     last_result: JobResult,
 ) -> str:
-    if on_failure != "wait":
-        return "abort"
+    on_failure = _normalize_on_failure_policy(on_failure)
 
     train_cfg = config.get("training", {})
     hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
@@ -311,6 +320,7 @@ def run_pipeline(
         raise ValueError(
             "report_template_path and report_output_path must both be set or both unset"
         )
+    on_failure = _normalize_on_failure_policy(on_failure)
     report_enabled = report_template_path is not None and report_output_path is not None
     if report_enabled and report_initial_data is None:
         raise ValueError(

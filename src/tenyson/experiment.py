@@ -25,7 +25,11 @@ from tenyson.jobs.result import JobResult
 from tenyson.jobs.rl import RLJob
 from tenyson.jobs.sft import SFTJob
 from tenyson.loader import load_config
-from tenyson.pipeline import _accept_stopped_result, run_pipeline
+from tenyson.pipeline import (
+    _accept_stopped_result,
+    _normalize_on_failure_policy,
+    run_pipeline,
+)
 from tenyson.reporting.builder import ReportBuilder
 
 
@@ -558,7 +562,7 @@ class ExperimentSession:
         self.task = task
         self.templates = templates
         self.cloud_factory = cloud_factory
-        self.on_failure = on_failure
+        self.on_failure = _normalize_on_failure_policy(on_failure)
         self.shared_overrides = deepcopy(shared_overrides) if shared_overrides else None
         self.abort_message = abort_message
         self.parallel = parallel

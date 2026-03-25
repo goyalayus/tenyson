@@ -302,6 +302,7 @@ def ensure_wandb_telemetry_run(
     phase: str,
     run_name: str,
     config: Optional[Dict[str, Any]] = None,
+    attempt_token: Optional[str] = None,
 ) -> Any:
     if client.backend != "wandb":
         return None
@@ -311,6 +312,7 @@ def ensure_wandb_telemetry_run(
         phase=phase,
         run_name=run_name,
         config=config,
+        attempt_token=attempt_token,
     )
 
 
@@ -572,6 +574,7 @@ def begin_run_attempt(
             experiment_id=experiment_id,
             phase=phase_name or "run",
             run_name=run_id,
+            attempt_token=attempt_token,
         )
         wandb_store.update_run_summary(
             run,
@@ -769,14 +772,15 @@ def record_run_summary(
     run_id = str(getattr(result, "run_id", "unknown"))
     metrics = getattr(result, "metrics", {}) or {}
     if client.backend == "wandb":
+        attempt_token = getattr(result, "attempt_token", None)
         run = wandb_store.resolve_run(
             client.db_url,
             experiment_id=experiment_id,
             phase=phase,
             run_name=run_id,
             create_if_missing=True,
+            attempt_token=attempt_token,
         )
-        attempt_token = getattr(result, "attempt_token", None)
         wandb_store.update_run_summary(
             run,
             {
@@ -891,14 +895,16 @@ def record_run_result(
     Upsert canonical per-run payloads in run_results.
     """
     if client.backend == "wandb":
+        results_payload_dict = _as_payload_dict(results_payload)
+        job_result_payload_dict = _as_payload_dict(job_result_payload)
+        attempt_token = job_result_payload_dict.get("attempt_token")
         run = wandb_store.ensure_run(
             client.db_url,
             experiment_id=experiment_id,
             phase=phase,
             run_name=str(run_id),
+            attempt_token=attempt_token,
         )
-        results_payload_dict = _as_payload_dict(results_payload)
-        job_result_payload_dict = _as_payload_dict(job_result_payload)
         serialized_results = json.dumps(
             results_payload_dict,
             ensure_ascii=False,
@@ -913,6 +919,7 @@ def record_run_result(
                 run_name=str(run_id),
                 results_payload=results_payload_dict,
                 job_result_payload=job_result_payload_dict,
+                attempt_token=attempt_token,
             )
             serialized_results = ""
         wandb_store.update_run_summary(

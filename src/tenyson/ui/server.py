@@ -542,14 +542,29 @@ class DashboardDataService:
         return selected
 
     def _find_run(self, *, experiment_id: str, phase: str, run_name: str) -> Any:
-        for run in self._project_runs():
+        matches = [
+            run
+            for run in self._project_runs()
             if self._match_run(
                 run,
                 experiment_id=experiment_id,
                 phase=phase,
                 run_name=run_name,
-            ):
-                return run
+            )
+        ]
+        if matches:
+            matches.sort(
+                key=lambda run: (
+                    _parse_iso_timestamp(
+                        _safe_summary_get(run, wandb_store.SUMMARY_HEARTBEAT_AT)
+                    )
+                    or _parse_iso_timestamp(getattr(run, "updated_at", None))
+                    or _parse_iso_timestamp(getattr(run, "created_at", None))
+                    or datetime.fromtimestamp(0, tz=timezone.utc)
+                ),
+                reverse=True,
+            )
+            return matches[0]
         return wandb_store.fetch_run(
             self.backend_ref,
             experiment_id=experiment_id,
