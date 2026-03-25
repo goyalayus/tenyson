@@ -720,16 +720,17 @@ class RLFallbackTests(unittest.TestCase):
         self.assertTrue(job._vllm_runtime_enabled)
         normalize_mock.assert_not_called()
 
-    def test_build_model_and_tokenizer_loads_init_adapter_via_peft(self) -> None:
+    def test_build_model_and_tokenizer_keeps_unsloth_lora_when_loading_init_adapter(
+        self,
+    ) -> None:
         unsloth_module_name = "unsloth"
-        peft_module_name = "peft"
         original_unsloth_module = sys.modules.get(unsloth_module_name)
-        original_peft_module = sys.modules.get(peft_module_name)
         unsloth_calls = []
-        peft_calls = []
+        strict_load_calls = []
 
         class FakeModel:
-            pass
+            def load_lora(self, *args, **kwargs):
+                return {"args": args, "kwargs": kwargs}
 
         class FakeFastLanguageModel:
             @staticmethod
@@ -738,39 +739,16 @@ class RLFallbackTests(unittest.TestCase):
                 return FakeModel(), SimpleNamespace()
 
             @staticmethod
-            def get_peft_model(*args, **kwargs):
-                raise AssertionError(
-                    "Fresh LoRA creation should be skipped when init_adapter_repo is set."
-                )
-
-        class FakePeftModel:
-            @staticmethod
-            def from_pretrained(
-                model,
-                model_id,
-                adapter_name="default",
-                is_trainable=False,
-                revision=None,
-                **kwargs,
-            ):
-                peft_calls.append(
-                    {
-                        "model_id": model_id,
-                        "adapter_name": adapter_name,
-                        "is_trainable": is_trainable,
-                        "revision": revision,
-                        "extra_kwargs": kwargs,
-                    }
-                )
-                model.loaded_adapter = model_id
+            def get_peft_model(model, **kwargs):
+                model.peft_kwargs = kwargs
                 return model
 
         sys.modules[unsloth_module_name] = SimpleNamespace(
             FastLanguageModel=FakeFastLanguageModel
         )
-        sys.modules[peft_module_name] = SimpleNamespace(PeftModel=FakePeftModel)
 
         adapter = SimpleNamespace(
+            repo_id="org/adapter",
             resolved_revision="rev-123",
             weights_in_repo="adapter_model.safetensors",
             config={
@@ -821,6 +799,13 @@ class RLFallbackTests(unittest.TestCase):
                 },
             ), unittest.mock.patch.object(
                 rl_module,
+                "strict_load_hf_lora_adapter_weights",
+                side_effect=lambda model, adapter_arg: strict_load_calls.append(
+                    adapter_arg
+                )
+                or 7,
+            ), unittest.mock.patch.object(
+                rl_module,
                 "normalize_tokenizer_special_tokens",
             ) as normalize_mock:
                 model, _tokenizer = job._build_model_and_tokenizer()
@@ -829,10 +814,6 @@ class RLFallbackTests(unittest.TestCase):
                 sys.modules.pop(unsloth_module_name, None)
             else:
                 sys.modules[unsloth_module_name] = original_unsloth_module
-            if original_peft_module is None:
-                sys.modules.pop(peft_module_name, None)
-            else:
-                sys.modules[peft_module_name] = original_peft_module
 
         self.assertEqual(len(unsloth_calls), 1)
         self.assertEqual(unsloth_calls[0]["model_name"], "Qwen/Qwen3-4B")
@@ -841,18 +822,19 @@ class RLFallbackTests(unittest.TestCase):
         self.assertTrue(unsloth_calls[0]["fast_inference"])
         self.assertEqual(unsloth_calls[0]["gpu_memory_utilization"], 0.8)
         self.assertEqual(
-            peft_calls,
-            [
-                {
-                    "model_id": "org/adapter",
-                    "adapter_name": "default",
-                    "is_trainable": True,
-                    "revision": "rev-123",
-                    "extra_kwargs": {},
-                }
-            ],
+            getattr(model, "peft_kwargs", None),
+            {
+                "r": 16,
+                "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                "lora_alpha": 32,
+                "lora_dropout": 0.0,
+                "bias": "none",
+                "use_gradient_checkpointing": "unsloth",
+                "random_state": 3407,
+            },
         )
-        self.assertEqual(getattr(model, "loaded_adapter", None), "org/adapter")
+        self.assertTrue(callable(getattr(model, "load_lora", None)))
+        self.assertEqual(strict_load_calls, [adapter])
         normalize_mock.assert_called_once()
 
 

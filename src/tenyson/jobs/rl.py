@@ -13,6 +13,7 @@ from uuid import uuid4
 from tenyson.core.hf_adapter import (
     download_hf_lora_adapter,
     resolve_hf_lora_runtime_kwargs,
+    strict_load_hf_lora_adapter_weights,
 )
 from tenyson.core.hf_checkpoint import (
     download_hf_resume_checkpoint,
@@ -586,38 +587,31 @@ class RLJob:
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
-        if init_adapter is None:
-            print("[RLJob] Applying fresh LoRA...", flush=True)
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=int(lora_runtime_kwargs["r"]),
-                target_modules=lora_runtime_kwargs["target_modules"],
-                lora_alpha=lora_runtime_kwargs["lora_alpha"],
-                lora_dropout=lora_runtime_kwargs["lora_dropout"],
-                bias=lora_runtime_kwargs["bias"],
-                use_gradient_checkpointing=lora_cfg.get(
-                    "gradient_checkpointing", "unsloth"
-                ),
-                random_state=train_cfg.get("seed", 3407),
-            )
-        else:
-            from peft import PeftModel
+        print("[RLJob] Applying Unsloth LoRA scaffolding...", flush=True)
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=int(lora_runtime_kwargs["r"]),
+            target_modules=lora_runtime_kwargs["target_modules"],
+            lora_alpha=lora_runtime_kwargs["lora_alpha"],
+            lora_dropout=lora_runtime_kwargs["lora_dropout"],
+            bias=lora_runtime_kwargs["bias"],
+            use_gradient_checkpointing=lora_cfg.get(
+                "gradient_checkpointing", "unsloth"
+            ),
+            random_state=train_cfg.get("seed", 3407),
+        )
 
+        if init_adapter is not None:
             print(
-                "[RLJob] Loading init adapter through PEFT instead of manually "
-                "injecting LoRA tensors after Unsloth startup.",
+                "[RLJob] Seeding the Unsloth LoRA model with init adapter weights "
+                "so GRPO keeps its native load_lora path.",
                 flush=True,
             )
-            model = PeftModel.from_pretrained(
-                model,
-                init_repo,
-                adapter_name="default",
-                is_trainable=True,
-                revision=init_adapter.resolved_revision,
-            )
+            loaded_tensors = strict_load_hf_lora_adapter_weights(model, init_adapter)
             print(
                 "[RLJob] Successfully loaded init adapter "
-                f"from {init_repo}@{init_adapter.resolved_revision}.",
+                f"from {init_repo}@{init_adapter.resolved_revision} "
+                f"({loaded_tensors} tensors).",
                 flush=True,
             )
 
