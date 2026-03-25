@@ -92,13 +92,13 @@ class ModalManagerEnvTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "TENYSON_MODAL_TIMEOUT"):
                 ModalManager.from_env()
 
-    def test_resolve_modal_python_version_defaults_to_3_11_on_python_3_10(self) -> None:
+    def test_resolve_modal_python_version_defaults_to_3_12_on_python_3_10(self) -> None:
         fake_version = SimpleNamespace(major=3, minor=10)
         with patch.dict(os.environ, {}, clear=True), patch(
             "tenyson.cloud.modal.sys.version_info",
             fake_version,
         ):
-            self.assertEqual(_resolve_modal_python_version(), "3.11")
+            self.assertEqual(_resolve_modal_python_version(), "3.12")
 
     def test_resolve_modal_python_version_uses_current_minor_when_supported(self) -> None:
         fake_version = SimpleNamespace(major=3, minor=12)

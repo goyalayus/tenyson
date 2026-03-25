@@ -30,7 +30,7 @@ def _normalize_modal_python_version(value: Any) -> str:
     parts = raw.split(".")
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
         raise ValueError(
-            "Modal Python version must look like '3.11' or '3.12'. "
+            "Modal Python version must look like '3.11' or '3.12' or '3.13'. "
             f"Got {raw!r}."
         )
     major, minor = (int(part) for part in parts)
@@ -51,7 +51,7 @@ def _resolve_modal_python_version(explicit: Any | None = None) -> str:
         # vLLM 0.18.0 currently trips over Python <= 3.10 during Unsloth's
         # fast-inference startup path, so prefer a newer worker runtime by
         # default while still allowing an explicit override.
-        return "3.11"
+        return "3.12"
     return f"{major}.{minor}"
 
 
