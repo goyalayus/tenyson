@@ -26,12 +26,11 @@ DEFAULT_ADAPTER = AdapterRef(
 
 def main() -> None:
     ensure_local_controller_environment(anchor_file=__file__)
+    explicit_experiment_id = os.getenv("TENYSON_EXPERIMENT_ID", "").strip()
     load_env_file(WORDLE_DIR / ".env", override=True)
 
-    experiment_id = os.getenv("TENYSON_EXPERIMENT_ID", "").strip()
-    if not experiment_id:
-        experiment_id = f"wordle_rl_smoke_{uuid4().hex[:10]}"
-        os.environ["TENYSON_EXPERIMENT_ID"] = experiment_id
+    experiment_id = explicit_experiment_id or f"wordle_rl_smoke_{uuid4().hex[:10]}"
+    os.environ["TENYSON_EXPERIMENT_ID"] = experiment_id
 
     modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
     modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
