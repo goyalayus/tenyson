@@ -15,7 +15,9 @@ from tenyson.cloud.modal import (
     _build_modal_launcher_command,
     _build_clone_repo_command,
     _modal_run_remote,
+    _normalize_modal_python_version,
     _normalize_git_clone_url,
+    _resolve_modal_python_version,
     _run_subprocess_with_streaming_logs,
     _wait_for_modal_function_call,
     _write_temp_config_payload,
@@ -55,6 +57,25 @@ class ModalManagerEnvTests(unittest.TestCase):
 
         self.assertTrue(manager.serialized)
 
+    def test_from_env_reads_python_version_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TENYSON_MODAL_PYTHON_VERSION": "3.12"},
+            clear=True,
+        ):
+            manager = ModalManager.from_env()
+
+        self.assertEqual(manager.python_version, "3.12")
+
+    def test_from_env_rejects_invalid_python_version(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TENYSON_MODAL_PYTHON_VERSION": "three.twelve"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "Modal Python version"):
+                ModalManager.from_env()
+
     def test_resolve_local_project_root_prefers_explicit_override(self) -> None:
         manager = ModalManager()
         with patch.dict(
@@ -70,6 +91,26 @@ class ModalManagerEnvTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "TENYSON_MODAL_TIMEOUT"):
                 ModalManager.from_env()
+
+    def test_resolve_modal_python_version_defaults_to_3_11_on_python_3_10(self) -> None:
+        fake_version = SimpleNamespace(major=3, minor=10)
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "tenyson.cloud.modal.sys.version_info",
+            fake_version,
+        ):
+            self.assertEqual(_resolve_modal_python_version(), "3.11")
+
+    def test_resolve_modal_python_version_uses_current_minor_when_supported(self) -> None:
+        fake_version = SimpleNamespace(major=3, minor=12)
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "tenyson.cloud.modal.sys.version_info",
+            fake_version,
+        ):
+            self.assertEqual(_resolve_modal_python_version(), "3.12")
+
+    def test_normalize_modal_python_version_rejects_invalid_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Modal Python version"):
+            _normalize_modal_python_version("3")
 
 
 class CloudManagerDefaultTests(unittest.TestCase):
@@ -390,11 +431,13 @@ class ModalDetachedLaunchTests(unittest.TestCase):
                 captured["run_kwargs"] = kwargs
                 return FakeRunContext(self)
 
+        def fake_debian_slim(*, python_version):
+            captured["python_version"] = python_version
+            return FakeImageBuilder()
+
         fake_modal = SimpleNamespace(
             App=FakeApp,
-            Image=SimpleNamespace(
-                debian_slim=lambda python_version: FakeImageBuilder()
-            ),
+            Image=SimpleNamespace(debian_slim=fake_debian_slim),
             Secret=FakeSecret,
             enable_output=lambda: FakeEnableOutput(),
         )
@@ -429,6 +472,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
             captured["spawn_args"],
             ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),
         )
+        self.assertEqual(captured["python_version"], manager.python_version)
         wait_mock.assert_called_once_with(
             "fc-123",
             poll_timeout_seconds=30.0,

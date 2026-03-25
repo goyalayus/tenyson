@@ -25,6 +25,36 @@ def _is_truthy_env(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _normalize_modal_python_version(value: Any) -> str:
+    raw = str(value or "").strip()
+    parts = raw.split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise ValueError(
+            "Modal Python version must look like '3.11' or '3.12'. "
+            f"Got {raw!r}."
+        )
+    major, minor = (int(part) for part in parts)
+    return f"{major}.{minor}"
+
+
+def _resolve_modal_python_version(explicit: Any | None = None) -> str:
+    if explicit is not None and str(explicit).strip():
+        return _normalize_modal_python_version(explicit)
+
+    env_value = str(os.getenv("TENYSON_MODAL_PYTHON_VERSION") or "").strip()
+    if env_value:
+        return _normalize_modal_python_version(env_value)
+
+    major = int(sys.version_info.major)
+    minor = int(sys.version_info.minor)
+    if major == 3 and minor <= 10:
+        # vLLM 0.18.0 currently trips over Python <= 3.10 during Unsloth's
+        # fast-inference startup path, so prefer a newer worker runtime by
+        # default while still allowing an explicit override.
+        return "3.11"
+    return f"{major}.{minor}"
+
+
 def _drain_subprocess_stream(
     stream: Any,
     *,
@@ -293,11 +323,13 @@ class ModalManager(BaseCloudManager):
         timeout: int = 86400,
         auto_terminate: bool = True,
         serialized: bool = False,
+        python_version: str | None = None,
     ):
         super().__init__(auto_terminate=auto_terminate)
         self.gpu = gpu
         self.timeout = timeout
         self.serialized = serialized
+        self.python_version = _resolve_modal_python_version(python_version)
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "ModalManager":
@@ -448,7 +480,6 @@ class ModalManager(BaseCloudManager):
             ) from exc
 
         app = modal.App("tenyson-job-runner")
-        local_python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
         local_project_root = self._resolve_local_project_root()
         git_source = self._resolve_git_source(local_project_root)
 
@@ -463,7 +494,7 @@ class ModalManager(BaseCloudManager):
         )
 
         image = (
-            modal.Image.debian_slim(python_version=local_python_version)
+            modal.Image.debian_slim(python_version=self.python_version)
             .run_commands("apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*")
             .run_commands(runtime_pip_install_command())
             .run_commands(
