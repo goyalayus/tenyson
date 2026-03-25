@@ -13,7 +13,6 @@ from uuid import uuid4
 from tenyson.core.hf_adapter import (
     download_hf_lora_adapter,
     resolve_hf_lora_runtime_kwargs,
-    strict_load_hf_lora_adapter_weights,
 )
 from tenyson.core.hf_checkpoint import (
     download_hf_resume_checkpoint,
@@ -102,44 +101,9 @@ def _build_grpo_vllm_overrides(
     prefer_explicit_sampling_params: bool = False,
 ) -> Dict[str, Any]:
     if not vllm_cfg.get("enabled", False):
-        return {"use_vllm": False}
+        return {}
 
-    mode = str(vllm_cfg.get("mode", "colocate") or "colocate").strip().lower()
-    if mode not in {"colocate", "server"}:
-        raise ValueError(
-            "vllm.mode must be either 'colocate' or 'server' when RL vLLM is enabled."
-        )
-
-    overrides: Dict[str, Any] = {
-        "use_vllm": True,
-        "vllm_mode": mode,
-        "vllm_gpu_memory_utilization": float(
-            vllm_cfg.get("gpu_memory_utilization", 0.9)
-        ),
-    }
-
-    if mode == "server":
-        base_url = str(vllm_cfg.get("server_base_url") or "").strip()
-        if base_url:
-            overrides["vllm_server_base_url"] = base_url
-        else:
-            overrides["vllm_server_host"] = str(
-                vllm_cfg.get("server_host", "127.0.0.1")
-            ).strip() or "127.0.0.1"
-            overrides["vllm_server_port"] = int(vllm_cfg.get("server_port", 8000))
-        if vllm_cfg.get("server_timeout") is not None:
-            overrides["vllm_server_timeout"] = float(vllm_cfg["server_timeout"])
-    else:
-        if vllm_cfg.get("tensor_parallel_size") is not None:
-            overrides["vllm_tensor_parallel_size"] = int(
-                vllm_cfg["tensor_parallel_size"]
-            )
-        if vllm_cfg.get("max_model_length") is not None:
-            overrides["vllm_max_model_length"] = int(vllm_cfg["max_model_length"])
-        if vllm_cfg.get("enable_sleep_mode") is not None:
-            overrides["vllm_enable_sleep_mode"] = bool(
-                vllm_cfg["enable_sleep_mode"]
-            )
+    overrides: Dict[str, Any] = {}
 
     if prefer_explicit_sampling_params:
         try:
@@ -172,10 +136,6 @@ def _resolve_unsloth_model_load_kwargs(
     vllm_cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
     fast_inference_requested = bool(model_cfg.get("fast_inference", False))
-    mode = str(vllm_cfg.get("mode", "colocate") or "colocate").strip().lower()
-    if vllm_cfg.get("enabled", False) and mode == "server":
-        return {"fast_inference": False}
-
     kwargs: Dict[str, Any] = {
         "fast_inference": fast_inference_requested,
     }
@@ -196,10 +156,19 @@ def _require_rl_vllm_config(
         )
 
     mode = str(vllm_cfg.get("mode", "colocate") or "colocate").strip().lower()
-    if mode == "colocate" and not bool(model_cfg.get("fast_inference", False)):
+    if mode not in {"colocate", "server"}:
         raise ValueError(
-            "RL vLLM colocate mode requires model.fast_inference=true. "
-            "Tenyson now fails instead of silently falling back to non-vLLM generation."
+            "vllm.mode must be either 'colocate' or 'server' when RL vLLM is enabled."
+        )
+    if mode != "colocate":
+        raise ValueError(
+            "RL currently requires vllm.mode=colocate to match the Unsloth GRPO "
+            "notebook path."
+        )
+    if not bool(model_cfg.get("fast_inference", False)):
+        raise ValueError(
+            "RL requires model.fast_inference=true so Unsloth owns the vLLM "
+            "generation path end-to-end."
         )
 
 
@@ -567,11 +536,24 @@ class RLJob:
                 flush=True,
             )
 
-        model_name = require_qwen3_model_name(
-            model_cfg.get("name", "Qwen/Qwen3-4B")
-        )
-        seq_len = model_cfg.get("max_seq_length", 4096)
-        load_in_4bit = model_cfg.get("load_in_4bit", True)
+        resolved_model_name = str(
+            model_cfg.get("name", "unsloth/Qwen3-4B-Base") or ""
+        ).strip()
+        if init_adapter is not None:
+            adapter_base_model_name = str(
+                init_adapter.config.get("base_model_name_or_path") or ""
+            ).strip()
+            if adapter_base_model_name:
+                resolved_model_name = adapter_base_model_name
+                print(
+                    "[RLJob] Loading the init adapter on top of its recorded base "
+                    f"model {resolved_model_name}.",
+                    flush=True,
+                )
+
+        model_name = require_qwen3_model_name(resolved_model_name)
+        seq_len = model_cfg.get("max_seq_length", 2048)
+        load_in_4bit = model_cfg.get("load_in_4bit", False)
         unsloth_load_kwargs = _resolve_unsloth_model_load_kwargs(model_cfg, vllm_cfg)
         requested_fast_inference = bool(
             unsloth_load_kwargs.get("fast_inference", False)
@@ -604,30 +586,41 @@ class RLJob:
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
 
-        print("[RLJob] Applying LoRA...", flush=True)
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r=int(lora_runtime_kwargs["r"]),
-            target_modules=lora_runtime_kwargs["target_modules"],
-            lora_alpha=lora_runtime_kwargs["lora_alpha"],
-            lora_dropout=lora_runtime_kwargs["lora_dropout"],
-            bias=lora_runtime_kwargs["bias"],
-            use_gradient_checkpointing=lora_cfg.get(
-                "gradient_checkpointing", "unsloth"
-            ),
-            random_state=train_cfg.get("seed", 3407),
-        )
+        if init_adapter is None:
+            print("[RLJob] Applying fresh LoRA...", flush=True)
+            model = FastLanguageModel.get_peft_model(
+                model,
+                r=int(lora_runtime_kwargs["r"]),
+                target_modules=lora_runtime_kwargs["target_modules"],
+                lora_alpha=lora_runtime_kwargs["lora_alpha"],
+                lora_dropout=lora_runtime_kwargs["lora_dropout"],
+                bias=lora_runtime_kwargs["bias"],
+                use_gradient_checkpointing=lora_cfg.get(
+                    "gradient_checkpointing", "unsloth"
+                ),
+                random_state=train_cfg.get("seed", 3407),
+            )
+        else:
+            from peft import PeftModel
 
-        if init_adapter is not None:
-            loaded_tensors = strict_load_hf_lora_adapter_weights(model, init_adapter)
+            print(
+                "[RLJob] Loading init adapter through PEFT instead of manually "
+                "injecting LoRA tensors after Unsloth startup.",
+                flush=True,
+            )
+            model = PeftModel.from_pretrained(
+                model,
+                init_repo,
+                adapter_name="default",
+                is_trainable=True,
+                revision=init_adapter.resolved_revision,
+            )
             print(
                 "[RLJob] Successfully loaded init adapter "
-                f"from {init_repo}@{init_adapter.resolved_revision} "
-                f"({loaded_tensors} tensors).",
+                f"from {init_repo}@{init_adapter.resolved_revision}.",
                 flush=True,
             )
 
-        model.train()
         return model, tokenizer
 
     def run(self) -> JobResult:
@@ -776,23 +769,18 @@ class RLJob:
                 prefer_explicit_sampling_params=use_explicit_vllm_sampling_params,
             )
         )
-        if cfg_kwargs.get("use_vllm", False):
-            if "vllm_sampling_params" in cfg_kwargs:
-                print(
-                    "[RLJob] Using explicit vLLM SamplingParams in GRPOConfig "
-                    "to match the Unsloth GRPO reference setup.",
-                    flush=True,
-                )
-            else:
-                print(
-                    "[RLJob] Installed GRPOConfig does not expose "
-                    "`vllm_sampling_params`; using the legacy TRL vLLM "
-                    "generation-kwargs path.",
-                    flush=True,
-                )
+        if "vllm_sampling_params" in cfg_kwargs:
+            print(
+                "[RLJob] Passing notebook-style vLLM SamplingParams into "
+                "GRPOConfig.",
+                flush=True,
+            )
         else:
-            raise RuntimeError(
-                "RL requires vLLM, but GRPOConfig resolved use_vllm=False."
+            print(
+                "[RLJob] Installed GRPOConfig does not expose "
+                "`vllm_sampling_params`; relying on the Unsloth fast-inference "
+                "model path without forcing a second TRL-managed vLLM engine.",
+                flush=True,
             )
         required_hub_fields = {
             "save_strategy",

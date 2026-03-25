@@ -9,6 +9,7 @@ from types import ModuleType
 import torch
 
 import tenyson.jobs.eval as eval_module
+import tenyson.jobs.rl as rl_module
 from tenyson.jobs.eval import (
     EvalJob,
     _require_eval_vllm_config,
@@ -236,12 +237,9 @@ class RLConfigHelpersTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(overrides["use_vllm"])
-        self.assertEqual(overrides["vllm_mode"], "colocate")
         self.assertEqual(overrides["top_p"], 0.95)
         self.assertEqual(overrides["top_k"], -1)
         self.assertEqual(overrides["min_p"], 0.1)
-        self.assertEqual(overrides["vllm_gpu_memory_utilization"], 0.8)
         self.assertEqual(
             overrides["generation_kwargs"],
             {"include_stop_str_in_output": True, "stop": ["<eos>"]},
@@ -272,9 +270,6 @@ class RLConfigHelpersTests(unittest.TestCase):
                 prefer_explicit_sampling_params=True,
             )
 
-            self.assertTrue(overrides["use_vllm"])
-            self.assertEqual(overrides["vllm_mode"], "colocate")
-            self.assertEqual(overrides["vllm_gpu_memory_utilization"], 0.8)
             self.assertIn("vllm_sampling_params", overrides)
             self.assertNotIn("generation_kwargs", overrides)
             self.assertNotIn("top_p", overrides)
@@ -295,31 +290,24 @@ class RLConfigHelpersTests(unittest.TestCase):
             else:
                 sys.modules[module_name] = original_module
 
-    def test_build_grpo_vllm_overrides_supports_server_mode(self) -> None:
+    def test_build_grpo_vllm_overrides_ignores_trl_engine_fields(self) -> None:
         overrides = _build_grpo_vllm_overrides(
             SimpleNamespace(eos_token="<eos>"),
             {
                 "enabled": True,
                 "mode": "server",
                 "server_timeout": 12.5,
+                "gpu_memory_utilization": 0.8,
             },
         )
 
-        self.assertTrue(overrides["use_vllm"])
-        self.assertEqual(overrides["vllm_mode"], "server")
-        self.assertEqual(overrides["vllm_server_host"], "127.0.0.1")
-        self.assertEqual(overrides["vllm_server_port"], 8000)
-        self.assertEqual(overrides["vllm_server_timeout"], 12.5)
-
-    def test_build_grpo_vllm_overrides_rejects_unknown_mode(self) -> None:
-        with self.assertRaisesRegex(ValueError, "vllm.mode must be either"):
-            _build_grpo_vllm_overrides(
-                SimpleNamespace(eos_token="<eos>"),
-                {
-                    "enabled": True,
-                    "mode": "mystery",
-                },
-            )
+        self.assertNotIn("use_vllm", overrides)
+        self.assertNotIn("vllm_mode", overrides)
+        self.assertNotIn("vllm_gpu_memory_utilization", overrides)
+        self.assertEqual(
+            overrides["generation_kwargs"],
+            {"include_stop_str_in_output": True, "stop": ["<eos>"]},
+        )
 
     def test_resolve_unsloth_model_load_kwargs_preserves_fast_inference_for_grpo_vllm(self) -> None:
         kwargs = _resolve_unsloth_model_load_kwargs(
@@ -337,18 +325,6 @@ class RLConfigHelpersTests(unittest.TestCase):
                 "gpu_memory_utilization": 0.8,
             },
         )
-
-    def test_resolve_unsloth_model_load_kwargs_disables_fast_inference_for_vllm_server_mode(self) -> None:
-        kwargs = _resolve_unsloth_model_load_kwargs(
-            {"fast_inference": True},
-            {
-                "enabled": True,
-                "mode": "server",
-                "gpu_memory_utilization": 0.8,
-            },
-        )
-
-        self.assertEqual(kwargs, {"fast_inference": False})
 
     def test_resolve_unsloth_model_load_kwargs_preserves_fast_inference_without_grpo_vllm(self) -> None:
         kwargs = _resolve_unsloth_model_load_kwargs(
@@ -374,8 +350,15 @@ class RLConfigHelpersTests(unittest.TestCase):
                 {"enabled": False},
             )
 
+    def test_require_rl_vllm_config_rejects_server_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires vllm.mode=colocate"):
+            _require_rl_vllm_config(
+                {"fast_inference": True},
+                {"enabled": True, "mode": "server"},
+            )
+
     def test_require_rl_vllm_config_rejects_colocate_without_fast_inference(self) -> None:
-        with self.assertRaisesRegex(ValueError, "model.fast_inference=true"):
+        with self.assertRaisesRegex(ValueError, "requires model.fast_inference=true"):
             _require_rl_vllm_config(
                 {"fast_inference": False},
                 {"enabled": True, "mode": "colocate"},
@@ -736,6 +719,141 @@ class RLFallbackTests(unittest.TestCase):
         self.assertEqual(calls[0]["gpu_memory_utilization"], 0.8)
         self.assertTrue(job._vllm_runtime_enabled)
         normalize_mock.assert_not_called()
+
+    def test_build_model_and_tokenizer_loads_init_adapter_via_peft(self) -> None:
+        unsloth_module_name = "unsloth"
+        peft_module_name = "peft"
+        original_unsloth_module = sys.modules.get(unsloth_module_name)
+        original_peft_module = sys.modules.get(peft_module_name)
+        unsloth_calls = []
+        peft_calls = []
+
+        class FakeModel:
+            pass
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                unsloth_calls.append(kwargs)
+                return FakeModel(), SimpleNamespace()
+
+            @staticmethod
+            def get_peft_model(*args, **kwargs):
+                raise AssertionError(
+                    "Fresh LoRA creation should be skipped when init_adapter_repo is set."
+                )
+
+        class FakePeftModel:
+            @staticmethod
+            def from_pretrained(
+                model,
+                model_id,
+                adapter_name="default",
+                is_trainable=False,
+                revision=None,
+                **kwargs,
+            ):
+                peft_calls.append(
+                    {
+                        "model_id": model_id,
+                        "adapter_name": adapter_name,
+                        "is_trainable": is_trainable,
+                        "revision": revision,
+                        "extra_kwargs": kwargs,
+                    }
+                )
+                model.loaded_adapter = model_id
+                return model
+
+        sys.modules[unsloth_module_name] = SimpleNamespace(
+            FastLanguageModel=FakeFastLanguageModel
+        )
+        sys.modules[peft_module_name] = SimpleNamespace(PeftModel=FakePeftModel)
+
+        adapter = SimpleNamespace(
+            resolved_revision="rev-123",
+            weights_in_repo="adapter_model.safetensors",
+            config={
+                "base_model_name_or_path": "Qwen/Qwen3-4B",
+                "r": 16,
+                "lora_alpha": 32,
+                "lora_dropout": 0.0,
+                "bias": "none",
+                "target_modules": ["up_proj", "gate_proj", "down_proj"],
+            },
+        )
+
+        try:
+            job = RLJob(
+                config={
+                    "training": {"run_name": "rl_test", "seed": 3407},
+                    "model": {
+                        "name": "unsloth/Qwen3-4B-Base",
+                        "fast_inference": True,
+                        "init_adapter_repo": "org/adapter",
+                        "init_adapter_revision": "main",
+                    },
+                    "lora": {
+                        "r": 16,
+                        "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                        "alpha": 32,
+                        "dropout": 0.0,
+                        "bias": "none",
+                    },
+                    "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch.object(
+                rl_module,
+                "download_hf_lora_adapter",
+                return_value=adapter,
+            ), unittest.mock.patch.object(
+                rl_module,
+                "resolve_hf_lora_runtime_kwargs",
+                return_value={
+                    "r": 16,
+                    "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                    "lora_alpha": 32,
+                    "lora_dropout": 0.0,
+                    "bias": "none",
+                },
+            ), unittest.mock.patch.object(
+                rl_module,
+                "normalize_tokenizer_special_tokens",
+            ) as normalize_mock:
+                model, _tokenizer = job._build_model_and_tokenizer()
+        finally:
+            if original_unsloth_module is None:
+                sys.modules.pop(unsloth_module_name, None)
+            else:
+                sys.modules[unsloth_module_name] = original_unsloth_module
+            if original_peft_module is None:
+                sys.modules.pop(peft_module_name, None)
+            else:
+                sys.modules[peft_module_name] = original_peft_module
+
+        self.assertEqual(len(unsloth_calls), 1)
+        self.assertEqual(unsloth_calls[0]["model_name"], "Qwen/Qwen3-4B")
+        self.assertEqual(unsloth_calls[0]["max_seq_length"], 2048)
+        self.assertFalse(unsloth_calls[0]["load_in_4bit"])
+        self.assertTrue(unsloth_calls[0]["fast_inference"])
+        self.assertEqual(unsloth_calls[0]["gpu_memory_utilization"], 0.8)
+        self.assertEqual(
+            peft_calls,
+            [
+                {
+                    "model_id": "org/adapter",
+                    "adapter_name": "default",
+                    "is_trainable": True,
+                    "revision": "rev-123",
+                    "extra_kwargs": {},
+                }
+            ],
+        )
+        self.assertEqual(getattr(model, "loaded_adapter", None), "org/adapter")
+        normalize_mock.assert_called_once()
 
 
 if __name__ == "__main__":
