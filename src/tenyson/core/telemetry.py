@@ -603,6 +603,7 @@ def wait_for_run_result(
     timeout_seconds: int = 120,
     poll_interval_seconds: float = 2.0,
     attempt_token: Optional[str] = None,
+    include_results_payload: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Poll run_results until the canonical payload is available or timeout.
@@ -615,6 +616,7 @@ def wait_for_run_result(
             run_id=run_id,
             phase=phase,
             attempt_token=attempt_token,
+            include_results_payload=include_results_payload,
         )
         if row is not None:
             return row

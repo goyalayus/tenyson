@@ -23,6 +23,7 @@ from tenyson.cloud.modal import (
     _write_temp_config_payload,
 )
 from tenyson.cloud.runtime_deps import REMOTE_RUNTIME_PACKAGES, runtime_pip_install_command
+from tenyson.jobs.eval import EvalJob
 from tenyson.loader import load_task
 
 
@@ -489,6 +490,60 @@ class RuntimeDependencyTests(unittest.TestCase):
         command = runtime_pip_install_command()
         self.assertIn("unsloth", command)
         self.assertIn("vllm", command)
+
+
+class ModalManagerRunTests(unittest.TestCase):
+    def test_run_waits_for_job_result_without_fetching_results_payload(self) -> None:
+        manager = ModalManager()
+        job = EvalJob(
+            {
+                "telemetry": {
+                    "entity": "ayush",
+                    "project": "wordle",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-123",
+                },
+                "evaluation": {
+                    "run_name": "eval_baseline_mixed",
+                },
+            },
+            task=SimpleNamespace(),
+        )
+
+        with patch.object(
+            manager,
+            "_resolve_local_project_root",
+            return_value="/repo",
+        ), patch.object(
+            manager,
+            "_resolve_task_spec",
+            return_value="examples/wordle/wordle_task.py",
+        ), patch.object(
+            manager,
+            "_run_modal_job_via_launcher",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ), patch(
+            "tenyson.core.telemetry.wait_for_run_result",
+            return_value=(
+                {},
+                {
+                    "run_id": "eval_baseline_mixed",
+                    "status": "success",
+                    "total_time_seconds": 1.0,
+                },
+            ),
+        ) as wait_mock:
+            result = manager.run(job)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.run_id, "eval_baseline_mixed")
+        self.assertEqual(
+            wait_mock.call_args.kwargs["include_results_payload"],
+            False,
+        )
 
 
 if __name__ == "__main__":

@@ -705,6 +705,7 @@ class ModalManager(BaseCloudManager):
                     run_id=run_name,
                     phase=job_type,
                     attempt_token=attempt_token,
+                    include_results_payload=False,
                 )
                 return JobResult.from_dict(job_result_payload)
             except Exception as exc:  # noqa: BLE001
