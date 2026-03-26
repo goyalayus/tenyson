@@ -54,7 +54,14 @@ class FakeApi:
     def __init__(self, module):
         self._module = module
 
-    def runs(self, path):  # noqa: ARG002
+    def runs(self, path, filters=None, order=None, per_page=None, lazy=None):  # noqa: ARG002
+        self._module.last_runs_call = {
+            "path": path,
+            "filters": filters,
+            "order": order,
+            "per_page": per_page,
+            "lazy": lazy,
+        }
         return list(self._module.api_runs)
 
     def run(self, path):
@@ -66,6 +73,7 @@ def build_fake_wandb_module(runs: list[FakeRun]) -> ModuleType:
     module = ModuleType("wandb")
     module.api_runs = list(runs)
     module.api_runs_by_id = {run.id: run for run in runs}
+    module.last_runs_call = None
     module.Api = lambda: FakeApi(module)
     return module
 

@@ -59,7 +59,14 @@ class FakeApi:
             raise self._module.api_run_error
         return self._module.api_run
 
-    def runs(self, path):
+    def runs(self, path, filters=None, order=None, per_page=None, lazy=None):
+        self._module.last_runs_call = {
+            "path": path,
+            "filters": filters,
+            "order": order,
+            "per_page": per_page,
+            "lazy": lazy,
+        }
         return self._module.api_runs
 
 
@@ -71,6 +78,7 @@ def build_fake_wandb_module(current_run=None, api_run=None):
     module.api_run = api_run
     module.api_runs = []
     module.api_run_error = None
+    module.last_runs_call = None
 
     def init(**kwargs):
         run = FakeRun(kwargs["id"])
@@ -346,6 +354,100 @@ class WandBStoreTests(unittest.TestCase):
         self.assertEqual(
             result,
             ({"metrics": {"global_step": 256}}, {"status": "partial", "run_id": "sft_main"}),
+        )
+
+    def test_fetch_run_result_prefers_newer_completed_attempt_over_older_canonical_result(self) -> None:
+        canonical = FakeRun(
+            "canonical-run",
+            name="mixed_rl",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-25T12:00:00+00:00",
+        )
+        canonical.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "mixed_rl",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-25T12:00:00+00:00",
+                wandb_store.SUMMARY_JOB_RESULT_JSON: '{"status":"failed","run_id":"mixed_rl"}',
+                wandb_store.SUMMARY_RESULTS_JSON: '{"metrics":{"reward":0.1}}',
+            }
+        )
+        retried = FakeRun(
+            "retried-run",
+            name="mixed_rl",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-26T12:00:00+00:00",
+        )
+        retried.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "mixed_rl",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "retry",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-26T12:00:00+00:00",
+                wandb_store.SUMMARY_JOB_RESULT_JSON: '{"status":"stopped","run_id":"mixed_rl"}',
+                wandb_store.SUMMARY_RESULTS_JSON: '{"metrics":{"reward":0.4}}',
+            }
+        )
+        fake_wandb = build_fake_wandb_module(api_run=canonical)
+        fake_wandb.api_runs = [canonical, retried]
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            result = wandb_store.fetch_run_result(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="mixed_rl",
+            )
+
+        self.assertEqual(
+            result,
+            ({"metrics": {"reward": 0.4}}, {"status": "stopped", "run_id": "mixed_rl"}),
+        )
+
+    def test_fetch_run_result_can_skip_artifact_download(self) -> None:
+        completed = FakeRun(
+            "completed-run",
+            name="eval_baseline_mixed",
+            group="wordle_exp",
+            job_type="eval",
+            updated_at="2026-03-25T12:30:10+00:00",
+        )
+        completed.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "eval",
+                wandb_store.SUMMARY_RUN_NAME: "eval_baseline_mixed",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-25T12:30:10+00:00",
+                wandb_store.SUMMARY_JOB_RESULT_JSON: (
+                    '{"status":"success","run_id":"eval_baseline_mixed",'
+                    '"metrics":{"format_accuracy":0.62}}'
+                ),
+                wandb_store.SUMMARY_RESULT_ARTIFACT: "artifact-name",
+            }
+        )
+        fake_wandb = build_fake_wandb_module(api_run=completed)
+        fake_wandb.api_runs = [completed]
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}), patch.object(
+            wandb_store,
+            "fetch_artifact_results",
+            side_effect=AssertionError("artifact download should be skipped"),
+        ):
+            result = wandb_store.fetch_run_result(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="eval",
+                run_name="eval_baseline_mixed",
+                include_results_payload=False,
+            )
+
+        self.assertEqual(
+            result,
+            ({}, {"status": "success", "run_id": "eval_baseline_mixed", "metrics": {"format_accuracy": 0.62}}),
         )
 
     def test_set_stop_requested_passes_create_if_missing_to_resolve_run(self) -> None:

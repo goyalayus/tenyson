@@ -638,8 +638,15 @@ class ExperimentSessionTests(unittest.TestCase):
             expected_samples=25,
         )
 
-        def fake_get_run_result(client, experiment_id, run_id, phase):
-            del client, experiment_id, phase
+        def fake_get_run_result(
+            client,
+            experiment_id,
+            run_id,
+            phase,
+            *,
+            include_results_payload=True,
+        ):
+            del client, experiment_id, phase, include_results_payload
             if run_id == "wordle_eval_turn2":
                 return ({}, dict(recovered.__dict__))
             return None

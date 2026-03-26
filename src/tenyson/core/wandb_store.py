@@ -303,7 +303,13 @@ def fetch_run(
             pass
 
     matched = _find_latest_matching_run(
-        api.runs(path=f"{target.entity}/{target.project}"),
+        _query_matching_runs(
+            api,
+            target,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_name,
+        ),
         experiment_id=experiment_id,
         phase=phase,
         run_name=run_name,
@@ -355,6 +361,7 @@ def fetch_run_result(
     phase: str,
     run_name: str,
     attempt_token: Optional[str] = None,
+    include_results_payload: bool = True,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     run = None
     normalized_attempt = _normalize_attempt_token(attempt_token)
@@ -364,7 +371,13 @@ def fetch_run_result(
 
         api = wandb.Api()
         run = _find_latest_matching_result_run(
-            api.runs(path=f"{target.entity}/{target.project}"),
+            _query_matching_runs(
+                api,
+                target,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=run_name,
+            ),
             experiment_id=experiment_id,
             phase=phase,
             run_name=run_name,
@@ -391,6 +404,9 @@ def fetch_run_result(
         return None
 
     job_result_payload = json.loads(job_result_json)
+    if not include_results_payload:
+        return {}, _as_mapping(job_result_payload)
+
     results_json = _summary_get(run, SUMMARY_RESULTS_JSON)
     if results_json:
         results_payload = json.loads(results_json)
@@ -630,6 +646,30 @@ def _find_latest_matching_run(
     if not candidates:
         return None
     return max(candidates, key=_run_sort_key)
+
+
+def _query_matching_runs(
+    api: Any,
+    target: WandBTarget,
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+) -> Any:
+    filters = {
+        "$and": [
+            {"group": str(experiment_id)},
+            {"jobType": str(phase)},
+            {"displayName": str(run_name)},
+        ]
+    }
+    return api.runs(
+        path=f"{target.entity}/{target.project}",
+        filters=filters,
+        order="-created_at",
+        per_page=100,
+        lazy=True,
+    )
 
 
 def _run_has_result_payload(run: Any) -> bool:

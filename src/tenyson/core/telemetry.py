@@ -541,6 +541,7 @@ def get_run_result(
     phase: str,
     *,
     attempt_token: Optional[str] = None,
+    include_results_payload: bool = True,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """
     Read canonical per-run payloads from run_results.
@@ -551,6 +552,7 @@ def get_run_result(
         phase=phase,
         run_name=run_id,
         attempt_token=attempt_token,
+        include_results_payload=include_results_payload,
     )
 
 

@@ -651,6 +651,7 @@ class ExperimentSession:
             experiment_id=experiment_id,
             run_id=run_id,
             phase=phase,
+            include_results_payload=False,
         )
         if row is None:
             return None
