@@ -1300,7 +1300,14 @@
     ]
       .filter((entry) => Number.isFinite(Number(record[entry[1]])))
       .map((entry) => `${entry[0]} ${formatSignedValue(record[entry[1]])}`);
-    return rewardParts.join(" · ");
+    if (rewardParts.length) {
+      return rewardParts.join(" · ");
+    }
+
+    return Object.entries(asObject(record.reward_components))
+      .filter((entry) => Number.isFinite(Number(entry[1])))
+      .map((entry) => `${prettifyKey(entry[0])} ${formatSignedValue(entry[1])}`)
+      .join(" · ");
   }
 
   function sampleOutcome(row) {

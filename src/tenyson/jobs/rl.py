@@ -37,21 +37,11 @@ def _resolve_grpo_max_completion_length(
     train_length = train_cfg.get("max_completion_length")
     vllm_length = vllm_cfg.get("max_tokens") if vllm_cfg.get("enabled", False) else None
 
-    if train_length is None and vllm_length is None:
-        return 2048
-    if train_length is None:
-        return int(vllm_length)
-    if vllm_length is None:
+    if train_length is not None:
         return int(train_length)
-
-    resolved_train_length = int(train_length)
-    resolved_vllm_length = int(vllm_length)
-    if resolved_train_length != resolved_vllm_length:
-        raise ValueError(
-            "training.max_completion_length and vllm.max_tokens must match when "
-            "vLLM is enabled because TRL GRPO uses a single completion-length setting."
-        )
-    return resolved_train_length
+    if vllm_length is not None:
+        return int(vllm_length)
+    return 2048
 
 
 def _build_vllm_generation_kwargs(
@@ -294,23 +284,36 @@ def _resolve_reward_logging_step(kwargs: Dict[str, Any]) -> int:
     return 0
 
 
+def _coerce_logged_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        content = value.get("content")
+        if isinstance(content, str):
+            return content
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, (list, tuple)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
+
 class _RewardTelemetryCollector:
     def __init__(
         self,
         *,
-        client: Any,
         experiment_id: str,
         run_id: str,
         reward_component_names: Sequence[str],
         rollout_tracker: Any,
     ) -> None:
-        self.client = client
         self.experiment_id = experiment_id
         self.run_id = run_id
         self.reward_component_names = list(reward_component_names)
         self.reward_weights = [1.0 for _ in self.reward_component_names]
         self.rollout_tracker = rollout_tracker
         self._pending_batches: Dict[tuple[int, int, int], Dict[str, Any]] = {}
+        self._detailed_results: List[Dict[str, Any]] = []
+        self._rollout_batches = 0
         self._lock = threading.Lock()
 
     def set_reward_weights(self, reward_weights: Any) -> None:
@@ -370,8 +373,6 @@ class _RewardTelemetryCollector:
             self._flush_completed_batch(completed_batch)
 
     def _flush_completed_batch(self, batch: Dict[str, Any]) -> None:
-        from tenyson.core.telemetry import Generation, Rollout
-
         step = int(batch["step"])
         prompts = batch["prompts"]
         completions = batch["completions"]
@@ -379,62 +380,59 @@ class _RewardTelemetryCollector:
         weights = list(self.reward_weights)
         rollout_window = self.rollout_tracker.start_rollout(step)
 
-        session = self.client.Session()
-        try:
-            for index, (prompt, completion) in enumerate(zip(prompts, completions)):
-                weighted_components: Dict[str, Optional[float]] = {}
-                total_reward = 0.0
-                has_reward = False
-                for component_name, weight in zip(
-                    self.reward_component_names,
-                    weights,
-                    strict=True,
-                ):
-                    component_values = component_rewards[component_name]
-                    component_value = component_values[index]
-                    weighted_value = (
-                        None
-                        if component_value is None
-                        else float(component_value) * float(weight)
-                    )
-                    weighted_components[component_name] = weighted_value
-                    if weighted_value is not None:
-                        total_reward += weighted_value
-                        has_reward = True
+        rows_to_store: List[Dict[str, Any]] = []
+        for index, (prompt, completion) in enumerate(zip(prompts, completions)):
+            weighted_components: Dict[str, Optional[float]] = {}
+            total_reward = 0.0
+            has_reward = False
+            for component_name, weight in zip(
+                self.reward_component_names,
+                weights,
+                strict=True,
+            ):
+                component_values = component_rewards[component_name]
+                component_value = component_values[index]
+                weighted_value = (
+                    None
+                    if component_value is None
+                    else float(component_value) * float(weight)
+                )
+                weighted_components[component_name] = weighted_value
+                if weighted_value is not None:
+                    total_reward += weighted_value
+                    has_reward = True
 
-                session.add(
-                    Rollout(
-                        id=str(uuid4()),
-                        experiment_id=self.experiment_id,
-                        run_id=self.run_id,
-                        global_step=step,
-                        rollout_step=rollout_window.rollout_step,
-                        rollout_batch_id=rollout_window.rollout_batch_id,
-                        prompt_text=str(prompt),
-                    )
-                )
-                session.add(
-                    Generation(
-                        id=str(uuid4()),
-                        experiment_id=self.experiment_id,
-                        run_id=self.run_id,
-                        global_step=step,
-                        rollout_step=rollout_window.rollout_step,
-                        rollout_batch_id=rollout_window.rollout_batch_id,
-                        phase="rl",
-                        prompt_text=str(prompt),
-                        completion_text=str(completion),
-                        reward=(total_reward if has_reward else None),
-                        reward_components_json=json.dumps(
-                            weighted_components,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                    )
-                )
-            session.commit()
-        finally:
-            session.close()
+            prompt_text = _coerce_logged_text(prompt)
+            completion_text = _coerce_logged_text(completion)
+            reward_total = total_reward if has_reward else None
+            rows_to_store.append(
+                {
+                    "global_step": step,
+                    "rollout_step": rollout_window.rollout_step,
+                    "rollout_batch_id": rollout_window.rollout_batch_id,
+                    "prompt": prompt_text,
+                    "completion": completion_text,
+                    "reward": reward_total,
+                    "reward_total": reward_total,
+                    "reward_components": dict(weighted_components),
+                }
+            )
+
+        with self._lock:
+            self._rollout_batches += 1
+            self._detailed_results.extend(rows_to_store)
+
+    def build_results_payload(self) -> Dict[str, Any]:
+        with self._lock:
+            detailed_results = list(self._detailed_results)
+            rollout_batches = int(self._rollout_batches)
+        return {
+            "metrics": {
+                "total_samples": len(detailed_results),
+                "rollout_batches": rollout_batches,
+            },
+            "detailed_results": detailed_results,
+        }
 
 
 def _wrap_reward_func_for_telemetry(
@@ -829,10 +827,9 @@ class RLJob:
             ]
 
         reward_telemetry_collector = None
-        if reward_funcs and telemetry_client.backend == "sql":
+        if reward_funcs:
             reward_component_names = _resolve_reward_component_names(reward_funcs)
             reward_telemetry_collector = _RewardTelemetryCollector(
-                client=telemetry_client,
                 experiment_id=experiment_id,
                 run_id=run_name,
                 reward_component_names=reward_component_names,
@@ -952,12 +949,15 @@ class RLJob:
             phase="rl",
             result=result,
         )
+        results_payload: Any = result
+        if reward_telemetry_collector is not None:
+            results_payload = reward_telemetry_collector.build_results_payload()
         record_run_result(
             client=telemetry_client,
             experiment_id=experiment_id,
             run_id=run_name,
             phase="rl",
-            results_payload=result,
+            results_payload=results_payload,
             job_result_payload=result,
         )
         try:

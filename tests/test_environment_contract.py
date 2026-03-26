@@ -56,7 +56,7 @@ class EnvironmentContractTests(unittest.TestCase):
             rl_stage.config["training"]["output_dir"],
             "./outputs/wordle_curriculum_rl_t4",
         )
-        self.assertIn("wordle_solutions.txt", rl_stage.config["task"]["wordlists"]["solutions"])
+        self.assertIn("words_alpha.txt", rl_stage.config["task"]["wordlists"]["url"])
 
         self.assertEqual(eval_stage.run_type, "eval")
         self.assertEqual(eval_stage.environment_run, "wordle_eval_turn5")

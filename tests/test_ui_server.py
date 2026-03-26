@@ -258,6 +258,65 @@ class DashboardDataServiceTests(unittest.TestCase):
         self.assertEqual(detail["history"]["rows"][-1]["total_samples"], 40.0)
         self.assertEqual(detail["config"]["eval"]["max_new_tokens"], 96)
 
+    def test_get_run_detail_preserves_rl_rollout_reward_components(self) -> None:
+        now = datetime.now(timezone.utc)
+        rl_run = make_run(
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            created_at=now - timedelta(minutes=30),
+            heartbeat_at=now - timedelta(minutes=2),
+            status="success",
+            metrics={"train/reward": 0.18, "train/global_step": 24},
+            results_payload={
+                "metrics": {"total_samples": 2, "rollout_batches": 1},
+                "detailed_results": [
+                    {
+                        "global_step": 24,
+                        "rollout_step": 1,
+                        "prompt": "Prompt one",
+                        "completion": "<guess>crate</guess>",
+                        "reward": 0.6,
+                        "reward_total": 0.6,
+                        "reward_components": {
+                            "format_exact": 0.2,
+                            "wordle_strict": 0.4,
+                        },
+                    }
+                ],
+            },
+            history_rows=[
+                {"_step": 1, "train/reward": 0.12, "train/global_step": 8},
+                {"_step": 2, "train/reward": 0.18, "train/global_step": 24},
+            ],
+            config={"task": {"wordlists": {"solutions": "a.txt", "allowed": "b.txt"}}},
+        )
+
+        fake_wandb = build_fake_wandb_module([rl_run])
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            service = ui_server.DashboardDataService(
+                backend_ref="wandb://ayush/wordle",
+                default_experiment_id="wordle_exp",
+                cache_ttl_seconds=0.0,
+            )
+            detail = service.get_run_detail(
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="wordle_rl_mixed",
+            )
+
+        row = detail["result_payload"]["detailed_results"][0]
+        self.assertEqual(row["rollout_step"], 1)
+        self.assertEqual(row["reward_total"], 0.6)
+        self.assertEqual(
+            row["reward_components"],
+            {
+                "format_exact": 0.2,
+                "wordle_strict": 0.4,
+            },
+        )
+
 
 class DashboardRequestHandlerTests(unittest.TestCase):
     def test_http_endpoints_serve_json_and_static_assets(self) -> None:

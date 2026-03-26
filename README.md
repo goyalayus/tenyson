@@ -14,6 +14,10 @@ Right now the Wordle example is the best reference for how the system is suppose
 
 The visible starter templates live in [`config_templates/`](./config_templates), not inside the example folder. That way a new user can see the default SFT, RL, and eval knobs without digging through task-specific code first.
 
+For RL, `training.max_completion_length` is the single completion-length limit.
+The Wordle reward-side overlength check uses that same resolved value, so you do
+not need a separate `vllm.max_tokens` knob in the RL template.
+
 ## What Tenyson Gives You
 
 - Job abstractions: `SFTJob`, `RLJob`, `EvalJob`
@@ -119,6 +123,10 @@ Important constraints:
 
 - Mixed Wordle RL/eval runs intentionally sample random prior-history lengths.
 - Curriculum Wordle runs intentionally fix the history window for each stage.
+- The default Wordle environment now pulls a single remote word source from
+  `dwyl/english-words` and keeps only 5-letter alphabetic words. That same
+  filtered list is used for both candidate secrets and accepted guesses unless
+  you override `task.wordlists`.
 - Do not expect the SFT dataset and the RL/eval datasets to have the same row
   schema. They are different on purpose.
 

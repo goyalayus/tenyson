@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from types import ModuleType
 
 import torch
 
+from tenyson.core.telemetry import RLRolloutTracker
 import tenyson.jobs.eval as eval_module
 import tenyson.jobs.rl as rl_module
 from tenyson.jobs.eval import (
@@ -22,6 +24,7 @@ from tenyson.jobs.rl import (
     _build_vllm_generation_kwargs,
     _ensure_trl_vllm_guided_decoding_compat,
     _ensure_trl_vllm_sampling_params_compat,
+    _RewardTelemetryCollector,
     _require_rl_vllm_config,
     _resolve_unsloth_model_load_kwargs,
     _resolve_grpo_max_completion_length,
@@ -78,6 +81,34 @@ class WordleParserTests(unittest.TestCase):
 
         self.assertGreater(len(solutions), 0)
         self.assertGreater(len(allowed), 0)
+
+    def test_single_word_source_url_filters_and_reuses_five_letter_words(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = Path(tmpdir) / "words.txt"
+            source_path.write_text(
+                "a\n"
+                "apple\n"
+                "zebra\n"
+                "co-op\n"
+                "planet\n"
+                "APPLE\n",
+                encoding="utf-8",
+            )
+
+            solutions, allowed = wordle_task.get_wordlists(
+                {
+                    "task": {
+                        "wordlists": {
+                            "url": source_path.as_uri(),
+                        }
+                    }
+                }
+            )
+
+        self.assertEqual(solutions, ["apple", "zebra"])
+        self.assertEqual(allowed, ["apple", "zebra"])
+
 
     def test_fixed_turn_eval_named_run_matches_prompt_turn_number(self) -> None:
         wordle_task = _load_wordle_task_module()
@@ -173,6 +204,117 @@ class WordleParserTests(unittest.TestCase):
             scored["reward_format"] + scored["reward_overlength"],
         )
 
+    def test_constraint_reward_normalizes_by_total_constraints(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        prompt = wordle_task.build_prompt_text([("abcde", "X X X X X")])
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return list(text)
+
+        scored = wordle_task.score_completion(
+            prompt_text=prompt,
+            completion_text="<think>test</think><guess>[fghij]</guess>",
+            valid_set={"fghij"},
+            task_cfg={"rewards": {"constraint": 0.1}},
+            tokenizer=FakeTokenizer(),
+        )
+
+        self.assertEqual(scored["sat_count"], 5)
+        self.assertEqual(sum(scored["totals"].values()), 5)
+        self.assertAlmostEqual(scored["reward_constraints"], 0.1)
+
+    def test_resolve_reward_max_output_tokens_prefers_training_limit(self) -> None:
+        wordle_task = _load_wordle_task_module()
+
+        resolved = wordle_task.resolve_reward_max_output_tokens(
+            {
+                "training": {"max_completion_length": 512},
+                "vllm": {"max_tokens": 1024},
+                "task": {"rewards": {}},
+            },
+            task_cfg={"rewards": {}},
+        )
+
+        self.assertEqual(resolved, 512)
+
+
+class RewardTelemetryCollectorTests(unittest.TestCase):
+    def test_build_results_payload_records_weighted_rollouts_for_wandb(self) -> None:
+        collector = _RewardTelemetryCollector(
+            experiment_id="wordle_exp",
+            run_id="mixed_rl",
+            reward_component_names=["format_exact", "wordle_strict"],
+            rollout_tracker=RLRolloutTracker(),
+        )
+        collector.set_reward_weights([1.0, 0.5])
+
+        prompts = [
+            {"content": "Prompt one"},
+            {"content": "Prompt two"},
+        ]
+        completions = [
+            {"content": "<guess>crate</guess>"},
+            {"content": "<guess>zzzzz</guess>"},
+        ]
+        trainer_state = SimpleNamespace(global_step=12)
+
+        collector.record_component(
+            component_name="format_exact",
+            prompts=prompts,
+            completions=completions,
+            rewards=[0.2, 0.0],
+            kwargs={"trainer_state": trainer_state},
+        )
+
+        pending_payload = collector.build_results_payload()
+        self.assertEqual(pending_payload["metrics"]["total_samples"], 0)
+        self.assertEqual(pending_payload["metrics"]["rollout_batches"], 0)
+        self.assertEqual(pending_payload["detailed_results"], [])
+
+        collector.record_component(
+            component_name="wordle_strict",
+            prompts=prompts,
+            completions=completions,
+            rewards=[0.8, -1.0],
+            kwargs={"trainer_state": trainer_state},
+        )
+
+        payload = collector.build_results_payload()
+        self.assertEqual(payload["metrics"]["total_samples"], 2)
+        self.assertEqual(payload["metrics"]["rollout_batches"], 1)
+
+        first_row = payload["detailed_results"][0]
+        second_row = payload["detailed_results"][1]
+
+        self.assertEqual(first_row["global_step"], 12)
+        self.assertEqual(first_row["rollout_step"], 1)
+        self.assertEqual(first_row["prompt"], "Prompt one")
+        self.assertEqual(first_row["completion"], "<guess>crate</guess>")
+        self.assertEqual(
+            first_row["reward_components"],
+            {
+                "format_exact": 0.2,
+                "wordle_strict": 0.4,
+            },
+        )
+        self.assertAlmostEqual(first_row["reward_total"], 0.6)
+        self.assertAlmostEqual(first_row["reward"], 0.6)
+
+        self.assertEqual(second_row["global_step"], 12)
+        self.assertEqual(second_row["rollout_step"], 1)
+        self.assertEqual(second_row["prompt"], "Prompt two")
+        self.assertEqual(second_row["completion"], "<guess>zzzzz</guess>")
+        self.assertEqual(
+            second_row["reward_components"],
+            {
+                "format_exact": 0.0,
+                "wordle_strict": -0.5,
+            },
+        )
+        self.assertAlmostEqual(second_row["reward_total"], -0.5)
+        self.assertAlmostEqual(second_row["reward"], -0.5)
+
 
 class RLConfigHelpersTests(unittest.TestCase):
     def test_resolve_grpo_max_completion_length_uses_vllm_fallback(self) -> None:
@@ -183,12 +325,13 @@ class RLConfigHelpersTests(unittest.TestCase):
 
         self.assertEqual(length, 1536)
 
-    def test_resolve_grpo_max_completion_length_rejects_mismatch(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must match"):
-            _resolve_grpo_max_completion_length(
-                {"max_completion_length": 1024},
-                {"enabled": True, "max_tokens": 2048},
-            )
+    def test_resolve_grpo_max_completion_length_prefers_training_limit(self) -> None:
+        length = _resolve_grpo_max_completion_length(
+            {"max_completion_length": 1024},
+            {"enabled": True, "max_tokens": 2048},
+        )
+
+        self.assertEqual(length, 1024)
 
     def test_build_vllm_generation_kwargs_sets_stop_behavior(self) -> None:
         kwargs = _build_vllm_generation_kwargs(

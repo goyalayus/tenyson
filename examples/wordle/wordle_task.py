@@ -3,8 +3,10 @@ import random
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.request import urlopen
 
 from datasets import Dataset
 from tenyson.core.environment import (
@@ -50,6 +52,10 @@ STRICT_FORMAT_RE = re.compile(
 
 TURN_LINE_RE = re.compile(
     r"Turn\s*([0-9]+):\s*\[([a-zA-Z]{5})\]\s*(?:->|→)\s*([GYX\s]+)"
+)
+
+_DEFAULT_WORD_SOURCE_URL = (
+    "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
 )
 
 
@@ -271,16 +277,40 @@ def _count_completion_tokens(completion_text: str, tokenizer: Any) -> int:
     return int(len(tokenizer.encode(completion_text, add_special_tokens=False)))
 
 
+def resolve_reward_max_output_tokens(
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    task_cfg: Optional[Dict[str, Any]] = None,
+) -> int:
+    local_task_cfg = task_cfg or {}
+    rewards_cfg = local_task_cfg.get("rewards", {})
+    explicit_limit = rewards_cfg.get("max_output_tokens")
+    if explicit_limit is not None:
+        return int(explicit_limit)
+
+    local_config = config or {}
+    training_limit = local_config.get("training", {}).get("max_completion_length")
+    if training_limit is not None:
+        return int(training_limit)
+
+    vllm_limit = local_config.get("vllm", {}).get("max_tokens")
+    if vllm_limit is not None:
+        return int(vllm_limit)
+
+    return 2048
+
+
 def score_completion(
     prompt_text: str,
     completion_text: str,
     valid_set: set,
     task_cfg: Dict[str, Any],
     tokenizer: Any,
+    *,
+    reward_max_output_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     history_rows = _parse_history_from_prompt(prompt_text)
     history_guesses = {g for g, _ in history_rows}
-    history_len = max(1, len(history_rows))
 
     rewards_cfg = task_cfg.get("rewards", {})
     format_reward = float(rewards_cfg.get("format", 0.2))
@@ -288,7 +318,11 @@ def score_completion(
     repeat_penalty = float(rewards_cfg.get("repeat_penalty", -0.5))
     constraint_reward = float(rewards_cfg.get("constraint", 0.1))
 
-    max_output_tokens = int(rewards_cfg.get("max_output_tokens", 2048))
+    max_output_tokens = int(
+        reward_max_output_tokens
+        if reward_max_output_tokens is not None
+        else rewards_cfg.get("max_output_tokens", 2048)
+    )
     overlength_penalty = float(rewards_cfg.get("overlength_penalty", -0.5))
 
     completion_tokens = _count_completion_tokens(completion_text, tokenizer=tokenizer)
@@ -319,11 +353,11 @@ def score_completion(
     ac = aggregate_constraints(history_rows)
     sat_count, totals, sats = compute_sat_count(guess, ac)
     is_wordle_valid = int(guess in valid_set)
+    total_constraints = sum(int(value or 0) for value in totals.values())
 
-    # Normalize by number of prior turns to reduce reward variance across prompts.
     reward_constraints = (
-        constraint_reward * float(sat_count) / float(history_len)
-        if is_wordle_valid
+        constraint_reward * float(sat_count) / float(total_constraints)
+        if is_wordle_valid and total_constraints > 0
         else 0.0
     )
     reward_dict = dict_reward if is_wordle_valid else 0.0
@@ -362,28 +396,50 @@ def score_completion(
 # ==============================================================================
 
 
+def _resolve_wordlist_path(path_like: Any) -> Path:
+    candidate = Path(str(path_like))
+    if candidate.is_absolute():
+        return candidate
+    return Path(__file__).parent / candidate
+
+
+def _filter_five_letter_words(lines: Sequence[str]) -> List[str]:
+    seen: set[str] = set()
+    filtered: List[str] = []
+    for raw_word in lines:
+        word = str(raw_word).strip().lower()
+        if len(word) != 5 or not word.isalpha() or word in seen:
+            continue
+        seen.add(word)
+        filtered.append(word)
+    return filtered
+
+
+@lru_cache(maxsize=8)
+def _load_word_source(source: str) -> List[str]:
+    source_text = str(source).strip()
+    if not source_text:
+        raise ValueError("Word source cannot be empty.")
+
+    if source_text.startswith(("http://", "https://", "file://")):
+        with urlopen(source_text, timeout=30) as response:
+            raw_lines = response.read().decode("utf-8").splitlines()
+        return _filter_five_letter_words(raw_lines)
+
+    with open(_resolve_wordlist_path(source_text), encoding="utf-8") as handle:
+        return _filter_five_letter_words(handle.readlines())
+
+
 def get_wordlists(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     paths = config.get("task", {}).get("wordlists", {})
-    base_dir = Path(__file__).parent / "wordlists"
+    remote_source = str(paths.get("url") or paths.get("source") or "").strip()
+    if remote_source:
+        words = _load_word_source(remote_source)
+        return words, words
 
     sol_path = paths.get("solutions", "wordlists/wordle_solutions.txt")
     allow_path = paths.get("allowed", "wordlists/wordle_allowed_guesses.txt")
-
-    def resolve_path(p: Any) -> Path:
-        candidate = Path(str(p))
-        if candidate.is_absolute():
-            return candidate
-        return Path(__file__).parent / candidate
-
-    def load(p):
-        with open(resolve_path(p)) as f:
-            return [
-                w.strip().lower()
-                for w in f
-                if len(w.strip()) == 5 and w.strip().isalpha()
-            ]
-
-    return load(sol_path), load(allow_path)
+    return _load_word_source(str(sol_path)), _load_word_source(str(allow_path))
 
 
 def sample_history_rows(
@@ -563,6 +619,10 @@ def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
     task_cfg = config.get("task", {})
     rewards_cfg = task_cfg.get("rewards", {})
     format_reward = float(rewards_cfg.get("format", 0.2))
+    reward_max_output_tokens = resolve_reward_max_output_tokens(
+        config,
+        task_cfg=task_cfg,
+    )
 
     solutions, allowed = get_wordlists(config)
     valid_set = set(solutions) | set(allowed)
@@ -587,7 +647,12 @@ def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
             completion_text = _extract_completion_text(comp_obj)
 
             scored = score_completion(
-                prompt_text, completion_text, valid_set, task_cfg, tokenizer
+                prompt_text,
+                completion_text,
+                valid_set,
+                task_cfg,
+                tokenizer,
+                reward_max_output_tokens=reward_max_output_tokens,
             )
 
             # The format reward is paid out in reward_format_exact, so we subtract it here to avoid double-counting
@@ -662,6 +727,10 @@ def compute_metrics(
     solutions, allowed = get_wordlists(config)
     valid_set = set(solutions) | set(allowed)
     task_cfg = config.get("task", {})
+    reward_max_output_tokens = resolve_reward_max_output_tokens(
+        config,
+        task_cfg=task_cfg,
+    )
 
     total = len(completions)
     format_ok = 0
@@ -677,6 +746,7 @@ def compute_metrics(
             valid_set=valid_set,
             task_cfg=task_cfg,
             tokenizer=tokenizer,
+            reward_max_output_tokens=reward_max_output_tokens,
         )
         guess = scored.get("parsed_guess")
         totals = scored.get("totals") if isinstance(scored.get("totals"), dict) else {}
@@ -732,8 +802,7 @@ def _wordlists_override() -> Dict[str, Any]:
     return {
         "task": {
             "wordlists": {
-                "solutions": "wordlists/wordle_solutions.txt",
-                "allowed": "wordlists/wordle_allowed_guesses.txt",
+                "url": _DEFAULT_WORD_SOURCE_URL,
             }
         }
     }

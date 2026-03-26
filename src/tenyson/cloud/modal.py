@@ -13,7 +13,6 @@ from typing import Any, Callable, Dict, List
 import yaml
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
-from tenyson.cloud.rds_access import prepare_modal_rds_access
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core.run_name import resolve_required_run_name
@@ -643,11 +642,6 @@ class ModalManager(BaseCloudManager):
         attempt_token = str(
             job.config.get("telemetry", {}).get("attempt_token") or ""
         ).strip() or None
-        cleanup_modal_rds_ingress = (
-            prepare_modal_rds_access()
-            if not str(backend_ref).startswith("wandb://")
-            else (lambda: None)
-        )
         telemetry_client = TelemetryClient(db_url=backend_ref)
 
         def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
@@ -747,4 +741,4 @@ class ModalManager(BaseCloudManager):
                 _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
                 return result
         finally:
-            cleanup_modal_rds_ingress()
+            pass

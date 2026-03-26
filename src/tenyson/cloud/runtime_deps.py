@@ -9,8 +9,6 @@ REMOTE_RUNTIME_PACKAGES: tuple[str, ...] = (
     "vllm",
     "huggingface_hub",
     "pyyaml",
-    "sqlalchemy",
-    "psycopg[binary]",
     "wandb",
 )
 

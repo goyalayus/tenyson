@@ -187,7 +187,11 @@ def _maybe_enrich_wordle_eval_results(
         return payload
 
     try:
-        from examples.wordle.wordle_task import get_wordlists, score_completion
+        from examples.wordle.wordle_task import (
+            get_wordlists,
+            resolve_reward_max_output_tokens,
+            score_completion,
+        )
     except Exception:
         return payload
 
@@ -198,6 +202,10 @@ def _maybe_enrich_wordle_eval_results(
         return payload
     valid_set = set(solutions) | set(allowed)
     tokenizer = _DashboardTokenizerFallback()
+    reward_max_output_tokens = resolve_reward_max_output_tokens(
+        config_preview,
+        task_cfg=task_cfg,
+    )
 
     enriched_rows: List[Dict[str, Any]] = []
     for raw_row in payload.get("detailed_results", []):
@@ -214,6 +222,7 @@ def _maybe_enrich_wordle_eval_results(
                 valid_set=valid_set,
                 task_cfg=task_cfg,
                 tokenizer=tokenizer,
+                reward_max_output_tokens=reward_max_output_tokens,
             )
         except Exception:
             enriched_rows.append(row)

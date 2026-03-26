@@ -4,10 +4,9 @@ import argparse
 import os
 from datetime import datetime, timezone
 from typing import List, Optional
-from uuid import uuid4
 
 from . import wandb_store
-from .telemetry import LiveRunInfo, RunControl, TelemetryClient, list_live_run_heartbeats
+from .telemetry import LiveRunInfo, TelemetryClient, list_live_run_heartbeats
 
 
 def request_stop(
@@ -28,79 +27,51 @@ def request_stop(
         )
 
     client = TelemetryClient(db_url=db_url)
-    if client.backend == "wandb":
-        explicit_phase = str(phase or "").strip().lower() or None
-        now_iso = datetime.now(timezone.utc).isoformat()
-        if explicit_phase is not None:
-            return wandb_store.set_stop_requested(
-                client.db_url,
-                experiment_id=experiment_id,
-                phase=explicit_phase,
-                run_name=str(run_id),
-                requested=True,
-                when_iso=now_iso,
-                create_if_missing=bool(create_if_missing),
-            )
-
-        matched = list_live_run_heartbeats(
-            client=client,
+    explicit_phase = str(phase or "").strip().lower() or None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if explicit_phase is not None:
+        return wandb_store.set_stop_requested(
+            client.db_url,
             experiment_id=experiment_id,
-            max_age_seconds=365 * 24 * 60 * 60,
+            phase=explicit_phase,
+            run_name=str(run_id),
+            requested=True,
+            when_iso=now_iso,
+            create_if_missing=bool(create_if_missing),
         )
-        detected_phase = None
-        for row in matched:
-            if row.run_id == str(run_id):
-                detected_phase = str(row.phase or "").strip().lower() or None
-                break
-        candidate_phases: List[str] = []
-        if explicit_phase is not None:
-            candidate_phases.append(explicit_phase)
-        if detected_phase is not None and detected_phase not in candidate_phases:
-            candidate_phases.append(detected_phase)
-        candidate_phases.extend(
-            phase_name
-            for phase_name in ["sft", "rl", "eval"]
-            if phase_name not in candidate_phases
-        )
-        for phase_name in candidate_phases:
-            if wandb_store.set_stop_requested(
-                client.db_url,
-                experiment_id=experiment_id,
-                phase=phase_name,
-                run_name=str(run_id),
-                requested=True,
-                when_iso=now_iso,
-                create_if_missing=False,
-            ):
-                return True
-        return False
-    session = client.Session()
-    try:
-        control: Optional[RunControl] = (
-            session.query(RunControl)
-            .filter(RunControl.run_id == run_id)
-            .filter(RunControl.experiment_id == experiment_id)
-            .order_by(RunControl.updated_at.desc())
-            .first()
-        )
-        if control is None and create_if_missing:
-            control = RunControl(
-                id=str(uuid4()),
-                experiment_id=experiment_id,
-                run_id=run_id,
-                stop_requested=True,
-                updated_at=datetime.now(timezone.utc),
-            )
-            session.add(control)
-        elif control is not None:
-            control.stop_requested = True
-            control.updated_at = datetime.now(timezone.utc)
-        else:
-            return False
-        session.commit()
-        return True
-    finally:
-        session.close()
+
+    matched = list_live_run_heartbeats(
+        client=client,
+        experiment_id=experiment_id,
+        max_age_seconds=365 * 24 * 60 * 60,
+    )
+    detected_phase = None
+    for row in matched:
+        if row.run_id == str(run_id):
+            detected_phase = str(row.phase or "").strip().lower() or None
+            break
+    candidate_phases: List[str] = []
+    if explicit_phase is not None:
+        candidate_phases.append(explicit_phase)
+    if detected_phase is not None and detected_phase not in candidate_phases:
+        candidate_phases.append(detected_phase)
+    candidate_phases.extend(
+        phase_name
+        for phase_name in ["sft", "rl", "eval"]
+        if phase_name not in candidate_phases
+    )
+    for phase_name in candidate_phases:
+        if wandb_store.set_stop_requested(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase_name,
+            run_name=str(run_id),
+            requested=True,
+            when_iso=now_iso,
+            create_if_missing=False,
+        ):
+            return True
+    return False
 
 
 def list_live_runs(

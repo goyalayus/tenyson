@@ -14,8 +14,6 @@ DEFAULT_LOCAL_BOOTSTRAP_PACKAGES: dict[str, str] = {
     "datasets": "datasets",
     "huggingface_hub": "huggingface_hub",
     "modal": "modal",
-    "psycopg": "psycopg[binary]",
-    "sqlalchemy": "sqlalchemy",
     "wandb": "wandb",
     "yaml": "pyyaml",
 }

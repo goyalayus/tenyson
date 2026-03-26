@@ -1,7 +1,8 @@
 model:
   # Tenyson currently supports Qwen 3 family base models only.
   name: "unsloth/Qwen3-4B-Base"
-  max_seq_length: 2048
+  # Leave room for the prompt plus a full 2048-token RL completion.
+  max_seq_length: 4096
   load_in_4bit: false
   # Lets Unsloth use its fast generation path for GRPO rollouts.
   fast_inference: true
@@ -25,7 +26,6 @@ vllm:
   top_p: 1.0
   # -1 disables top-k truncation.
   top_k: -1
-  max_tokens: 512
 
 training:
   seed: 3407
@@ -36,9 +36,9 @@ training:
   optim: "adamw_8bit"
   # Number of sampled completions per prompt in each GRPO rollout batch.
   num_generations: 4
-  # Wordle prompts are short; keep this modest so the notebook-style 2048 context fits comfortably.
+  # Wordle prompts are short; keep this modest so long RL completions still fit comfortably.
   max_prompt_length: 512
-  # Must match vllm.max_tokens when vLLM is enabled.
-  max_completion_length: 512
+  # Single RL completion-length limit. Reward overlength checks use this same value.
+  max_completion_length: 2048
   # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 50
