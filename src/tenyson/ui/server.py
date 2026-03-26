@@ -344,6 +344,8 @@ class DashboardDataService:
             or getattr(run, "group", "")
             or ""
         ).strip()
+        if wandb_store.is_internal_control_experiment_id(summary_experiment_id):
+            return None
         return summary_experiment_id or None
 
     def _match_run(self, run: Any, *, experiment_id: str, phase: str, run_name: str) -> bool:
@@ -592,6 +594,15 @@ class DashboardDataService:
 
         run = self._find_run(experiment_id=experiment_id, phase=phase, run_name=run_name)
         summary = self._normalize_run_summary(run)
+        stop_requested, stop_requested_at = wandb_store.fetch_stop_request_state(
+            self.backend_ref,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_name,
+            attempt_token=summary.get("attempt_token"),
+        )
+        summary["stop_requested"] = bool(stop_requested)
+        summary["stop_requested_at"] = _normalize_timestamp(stop_requested_at)
         result_pair = wandb_store.fetch_run_result(
             self.backend_ref,
             experiment_id=experiment_id,

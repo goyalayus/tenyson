@@ -473,7 +473,31 @@ class WandBStoreTests(unittest.TestCase):
             run.summary[wandb_store.SUMMARY_STOP_REQUESTED_AT],
             "2026-03-22T10:00:00+00:00",
         )
+        self.assertEqual(
+            run.summary[wandb_store.SUMMARY_CONTROL_TARGET_EXPERIMENT_ID],
+            "wordle_exp",
+        )
+        self.assertEqual(
+            run.summary[wandb_store.SUMMARY_CONTROL_TARGET_PHASE],
+            "sft",
+        )
+        self.assertEqual(
+            run.summary[wandb_store.SUMMARY_CONTROL_TARGET_RUN_NAME],
+            "wordle_sft_main",
+        )
         self.assertEqual(resolve_run_mock.call_args.kwargs["create_if_missing"], True)
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["experiment_id"],
+            wandb_store._stop_control_experiment_id("wordle_exp"),
+        )
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["phase"],
+            wandb_store.CONTROL_PHASE,
+        )
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["run_name"],
+            wandb_store._stop_control_run_name("sft", "wordle_sft_main"),
+        )
 
     def test_set_stop_requested_passes_attempt_token_to_resolve_run(self) -> None:
         run = FakeRun("run123")
@@ -498,6 +522,92 @@ class WandBStoreTests(unittest.TestCase):
             resolve_run_mock.call_args.kwargs["attempt_token"],
             "attempt-live",
         )
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["experiment_id"],
+            wandb_store._stop_control_experiment_id("wordle_exp"),
+        )
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["phase"],
+            wandb_store.CONTROL_PHASE,
+        )
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["run_name"],
+            wandb_store._stop_control_run_name("rl", "wordle_rl_main"),
+        )
+
+    def test_fetch_stop_request_state_prefers_control_run(self) -> None:
+        control = FakeRun("control-run")
+        control.summary.update(
+            {
+                wandb_store.SUMMARY_STOP_REQUESTED: True,
+                wandb_store.SUMMARY_STOP_REQUESTED_AT: "2026-03-27T00:00:00+00:00",
+            }
+        )
+        main = FakeRun("main-run")
+        main.summary.update(
+            {
+                wandb_store.SUMMARY_STOP_REQUESTED: False,
+                wandb_store.SUMMARY_STOP_REQUESTED_AT: None,
+            }
+        )
+
+        def fake_fetch_run(
+            backend_ref,
+            *,
+            experiment_id,
+            phase,
+            run_name,
+            attempt_token=None,
+        ):
+            _unused = (backend_ref, phase, run_name, attempt_token)
+            if experiment_id == wandb_store._stop_control_experiment_id("wordle_exp"):
+                return control
+            return main
+
+        with patch.object(wandb_store, "fetch_run", side_effect=fake_fetch_run):
+            requested, requested_at = wandb_store.fetch_stop_request_state(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="mixed_rl",
+                attempt_token="attempt-live",
+            )
+
+        self.assertTrue(requested)
+        self.assertEqual(requested_at, "2026-03-27T00:00:00+00:00")
+
+    def test_fetch_stop_request_state_falls_back_to_legacy_live_run(self) -> None:
+        legacy = FakeRun("legacy-run")
+        legacy.summary.update(
+            {
+                wandb_store.SUMMARY_STOP_REQUESTED: True,
+                wandb_store.SUMMARY_STOP_REQUESTED_AT: "2026-03-27T00:00:00+00:00",
+            }
+        )
+
+        def fake_fetch_run(
+            backend_ref,
+            *,
+            experiment_id,
+            phase,
+            run_name,
+            attempt_token=None,
+        ):
+            _unused = (backend_ref, phase, run_name, attempt_token)
+            if experiment_id == wandb_store._stop_control_experiment_id("wordle_exp"):
+                raise LookupError("no control record yet")
+            return legacy
+
+        with patch.object(wandb_store, "fetch_run", side_effect=fake_fetch_run):
+            requested, requested_at = wandb_store.fetch_stop_request_state(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="sft",
+                run_name="sft_main",
+            )
+
+        self.assertTrue(requested)
+        self.assertEqual(requested_at, "2026-03-27T00:00:00+00:00")
 
 
 if __name__ == "__main__":

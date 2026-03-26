@@ -294,6 +294,17 @@ def begin_run_attempt(
         experiment_id=experiment_id,
         phase=phase_name or "run",
         run_name=run_id,
+        attempt_token=attempt_token,
+    )
+    wandb_store.set_stop_requested(
+        client.db_url,
+        experiment_id=experiment_id,
+        phase=phase_name or "run",
+        run_name=run_id,
+        requested=False,
+        when_iso=None,
+        create_if_missing=False,
+        attempt_token=attempt_token,
     )
     wandb_store.update_run_summary(
         run,

@@ -34,6 +34,14 @@ SUMMARY_JOB_RESULT_JSON = f"{SUMMARY_PREFIX}job_result_json"
 SUMMARY_RESULTS_JSON = f"{SUMMARY_PREFIX}results_json"
 SUMMARY_RESULT_ARTIFACT = f"{SUMMARY_PREFIX}result_artifact"
 SUMMARY_PROJECT_URL = f"{SUMMARY_PREFIX}project_url"
+SUMMARY_CONTROL_KIND = f"{SUMMARY_PREFIX}control_kind"
+SUMMARY_CONTROL_TARGET_EXPERIMENT_ID = f"{SUMMARY_PREFIX}control_target_experiment_id"
+SUMMARY_CONTROL_TARGET_PHASE = f"{SUMMARY_PREFIX}control_target_phase"
+SUMMARY_CONTROL_TARGET_RUN_NAME = f"{SUMMARY_PREFIX}control_target_run_name"
+
+CONTROL_EXPERIMENT_PREFIX = "__tenyson_control__:"
+CONTROL_PHASE = "__control__"
+CONTROL_RUN_NAME_PREFIX = "__manual_stop__:"
 
 
 _LOCAL_WANDB_RUN_LOCK = threading.RLock()
@@ -57,6 +65,10 @@ def is_wandb_backend_ref(value: str) -> bool:
     return str(value or "").startswith("wandb://")
 
 
+def is_internal_control_experiment_id(value: str) -> bool:
+    return str(value or "").startswith(CONTROL_EXPERIMENT_PREFIX)
+
+
 def parse_backend_ref(value: str) -> WandBTarget:
     raw = str(value or "").strip()
     if not raw.startswith("wandb://"):
@@ -73,6 +85,29 @@ def parse_backend_ref(value: str) -> WandBTarget:
 def _normalize_attempt_token(value: Optional[str]) -> Optional[str]:
     normalized = str(value or "").strip()
     return normalized or None
+
+
+def _stop_control_experiment_id(experiment_id: str) -> str:
+    return f"{CONTROL_EXPERIMENT_PREFIX}{str(experiment_id or '').strip()}"
+
+
+def _stop_control_run_name(phase: str, run_name: str) -> str:
+    normalized_phase = str(phase or "").strip().lower() or "run"
+    normalized_run_name = str(run_name or "").strip()
+    return f"{CONTROL_RUN_NAME_PREFIX}{normalized_phase}::{normalized_run_name}"
+
+
+def _stop_control_identifiers(
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+) -> tuple[str, str, str]:
+    return (
+        _stop_control_experiment_id(experiment_id),
+        CONTROL_PHASE,
+        _stop_control_run_name(phase, run_name),
+    )
 
 
 def build_run_id(
@@ -432,8 +467,49 @@ def fetch_stop_requested(
     run_name: str,
     attempt_token: Optional[str] = None,
 ) -> bool:
+    requested, _requested_at = fetch_stop_request_state(
+        backend_ref,
+        experiment_id=experiment_id,
+        phase=phase,
+        run_name=run_name,
+        attempt_token=attempt_token,
+    )
+    return requested
+
+
+def fetch_stop_request_state(
+    backend_ref: str,
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+    attempt_token: Optional[str] = None,
+) -> Tuple[bool, Optional[str]]:
+    control_experiment_id, control_phase, control_run_name = _stop_control_identifiers(
+        experiment_id=experiment_id,
+        phase=phase,
+        run_name=run_name,
+    )
     try:
         run = fetch_run(
+            backend_ref,
+            experiment_id=control_experiment_id,
+            phase=control_phase,
+            run_name=control_run_name,
+            attempt_token=attempt_token,
+        )
+    except Exception:  # noqa: BLE001
+        run = None
+    if run is not None:
+        return (
+            bool(_summary_get(run, SUMMARY_STOP_REQUESTED)),
+            _summary_get(run, SUMMARY_STOP_REQUESTED_AT),
+        )
+
+    # Backwards-compatibility path for older runs that still wrote the flag
+    # directly into the live run summary.
+    try:
+        legacy_run = fetch_run(
             backend_ref,
             experiment_id=experiment_id,
             phase=phase,
@@ -441,8 +517,11 @@ def fetch_stop_requested(
             attempt_token=attempt_token,
         )
     except Exception:  # noqa: BLE001
-        return False
-    return bool(_summary_get(run, SUMMARY_STOP_REQUESTED))
+        return False, None
+    return (
+        bool(_summary_get(legacy_run, SUMMARY_STOP_REQUESTED)),
+        _summary_get(legacy_run, SUMMARY_STOP_REQUESTED_AT),
+    )
 
 
 def set_stop_requested(
@@ -456,24 +535,54 @@ def set_stop_requested(
     create_if_missing: bool = False,
     attempt_token: Optional[str] = None,
 ) -> bool:
+    control_experiment_id, control_phase, control_run_name = _stop_control_identifiers(
+        experiment_id=experiment_id,
+        phase=phase,
+        run_name=run_name,
+    )
+    normalized_attempt = _normalize_attempt_token(attempt_token)
+    expected_control_run_id = build_run_id(
+        control_experiment_id,
+        control_phase,
+        control_run_name,
+        attempt_token=normalized_attempt,
+    )
     try:
         run = resolve_run(
             backend_ref,
-            experiment_id=experiment_id,
-            phase=phase,
-            run_name=run_name,
+            experiment_id=control_experiment_id,
+            phase=control_phase,
+            run_name=control_run_name,
             create_if_missing=create_if_missing,
-            attempt_token=attempt_token,
+            attempt_token=normalized_attempt,
         )
     except Exception:  # noqa: BLE001
         return False
     update_run_summary(
         run,
         {
+            SUMMARY_EXPERIMENT_ID: control_experiment_id,
+            SUMMARY_PHASE: control_phase,
+            SUMMARY_RUN_NAME: control_run_name,
+            SUMMARY_ATTEMPT_TOKEN: normalized_attempt,
+            SUMMARY_STATUS: "control",
+            SUMMARY_IS_ACTIVE: False,
+            SUMMARY_CONTROL_KIND: "manual_stop",
+            SUMMARY_CONTROL_TARGET_EXPERIMENT_ID: str(experiment_id),
+            SUMMARY_CONTROL_TARGET_PHASE: str(phase),
+            SUMMARY_CONTROL_TARGET_RUN_NAME: str(run_name),
             SUMMARY_STOP_REQUESTED: bool(requested),
             SUMMARY_STOP_REQUESTED_AT: when_iso if requested else None,
         },
     )
+    local_control_run = active_run()
+    if getattr(local_control_run, "id", None) == expected_control_run_id:
+        try:
+            import wandb
+
+            wandb.finish()
+        except Exception:  # noqa: BLE001
+            pass
     return True
 
 

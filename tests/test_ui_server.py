@@ -133,6 +133,14 @@ def make_run(
 class DashboardDataServiceTests(unittest.TestCase):
     def test_list_experiments_groups_runs_by_experiment_and_activity(self) -> None:
         now = datetime.now(timezone.utc)
+        control = make_run(
+            experiment_id=f"{wandb_store.CONTROL_EXPERIMENT_PREFIX}wordle_new",
+            phase=wandb_store.CONTROL_PHASE,
+            run_name="__manual_stop__::wordle_eval_mixed",
+            created_at=now - timedelta(minutes=10),
+            heartbeat_at=now - timedelta(minutes=10),
+            status="control",
+        )
         older = make_run(
             experiment_id="wordle_old",
             phase="sft",
@@ -153,7 +161,7 @@ class DashboardDataServiceTests(unittest.TestCase):
             metrics={"constraint_accuracy": 0.71},
         )
 
-        fake_wandb = build_fake_wandb_module([older, newer])
+        fake_wandb = build_fake_wandb_module([control, older, newer])
 
         with patch.dict(sys.modules, {"wandb": fake_wandb}):
             service = ui_server.DashboardDataService(
