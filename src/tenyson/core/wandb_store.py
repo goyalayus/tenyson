@@ -356,16 +356,31 @@ def fetch_run_result(
     run_name: str,
     attempt_token: Optional[str] = None,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    try:
-        run = fetch_run(
-            backend_ref,
+    run = None
+    normalized_attempt = _normalize_attempt_token(attempt_token)
+    if normalized_attempt is None:
+        target = parse_backend_ref(backend_ref)
+        import wandb
+
+        api = wandb.Api()
+        run = _find_latest_matching_result_run(
+            api.runs(path=f"{target.entity}/{target.project}"),
             experiment_id=experiment_id,
             phase=phase,
             run_name=run_name,
-            attempt_token=attempt_token,
         )
-    except Exception:  # noqa: BLE001
-        return None
+
+    if run is None:
+        try:
+            run = fetch_run(
+                backend_ref,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=run_name,
+                attempt_token=attempt_token,
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
     summary_token = _summary_get(run, SUMMARY_ATTEMPT_TOKEN)
     if attempt_token and str(summary_token or "") != str(attempt_token):
@@ -611,6 +626,34 @@ def _find_latest_matching_run(
             run_name=run_name,
             attempt_token=attempt_token,
         )
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=_run_sort_key)
+
+
+def _run_has_result_payload(run: Any) -> bool:
+    return bool(_summary_get(run, SUMMARY_JOB_RESULT_JSON))
+
+
+def _find_latest_matching_result_run(
+    runs: Any,
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+) -> Optional[Any]:
+    candidates = [
+        run
+        for run in runs
+        if _match_run(
+            run,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_name,
+            attempt_token=None,
+        )
+        and _run_has_result_payload(run)
     ]
     if not candidates:
         return None

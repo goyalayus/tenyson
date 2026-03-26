@@ -295,6 +295,59 @@ class WandBStoreTests(unittest.TestCase):
 
         self.assertIs(resolved, valid)
 
+    def test_fetch_run_result_prefers_latest_completed_attempt_over_newer_active_one(self) -> None:
+        completed = FakeRun(
+            "completed-run",
+            name="sft_main",
+            group="wordle_exp",
+            job_type="sft",
+            updated_at="2026-03-25T12:30:10+00:00",
+        )
+        completed.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "sft",
+                wandb_store.SUMMARY_RUN_NAME: "sft_main",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "done",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-25T12:30:10+00:00",
+                wandb_store.SUMMARY_JOB_RESULT_JSON: '{"status":"partial","run_id":"sft_main"}',
+                wandb_store.SUMMARY_RESULTS_JSON: '{"metrics":{"global_step":256}}',
+            }
+        )
+        active = FakeRun(
+            "active-run",
+            name="sft_main",
+            group="wordle_exp",
+            job_type="sft",
+            updated_at="2026-03-26T18:53:17+00:00",
+        )
+        active.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "sft",
+                wandb_store.SUMMARY_RUN_NAME: "sft_main",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "live",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-26T18:53:17+00:00",
+                wandb_store.SUMMARY_STATUS: "running",
+                wandb_store.SUMMARY_IS_ACTIVE: True,
+            }
+        )
+        fake_wandb = build_fake_wandb_module(api_run=active)
+        fake_wandb.api_runs = [completed, active]
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            result = wandb_store.fetch_run_result(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="sft",
+                run_name="sft_main",
+            )
+
+        self.assertEqual(
+            result,
+            ({"metrics": {"global_step": 256}}, {"status": "partial", "run_id": "sft_main"}),
+        )
+
     def test_set_stop_requested_passes_create_if_missing_to_resolve_run(self) -> None:
         run = FakeRun("run123")
         with patch.object(
