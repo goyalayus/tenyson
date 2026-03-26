@@ -325,6 +325,7 @@ class EvalJob:
                 experiment_id=experiment_id,
                 run_id=run_name,
                 phase="eval",
+                attempt_token=attempt_token,
             )
 
         backend = "vLLM"

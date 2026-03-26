@@ -127,6 +127,10 @@ class LiveRunInfo:
     is_active: bool
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
+    attempt_token: Optional[str] = None
+
+
+_WANDB_RECORD_LOCK = threading.RLock()
 
 
 def _normalize_timestamp(value: Optional[datetime]) -> Optional[datetime]:
@@ -253,6 +257,7 @@ def list_live_run_heartbeats(
             is_active=bool(row.get("is_active")),
             created_at=_normalize_timestamp(row.get("created_at")),
             updated_at=_normalize_timestamp(row.get("updated_at")),
+            attempt_token=str(row.get("attempt_token") or "").strip() or None,
         )
         for row in rows
     ]
@@ -416,50 +421,51 @@ def record_run_summary(
     """
     Upsert final run summary keyed by (experiment_id, run_id, phase).
     """
-    run_id = str(getattr(result, "run_id", "unknown"))
-    metrics = getattr(result, "metrics", {}) or {}
-    attempt_token = getattr(result, "attempt_token", None)
-    run = wandb_store.resolve_run(
-        client.db_url,
-        experiment_id=experiment_id,
-        phase=phase,
-        run_name=run_id,
-        create_if_missing=True,
-        attempt_token=attempt_token,
-    )
-    wandb_store.update_run_summary(
-        run,
-        {
-            wandb_store.SUMMARY_EXPERIMENT_ID: experiment_id,
-            wandb_store.SUMMARY_PHASE: phase,
-            wandb_store.SUMMARY_RUN_NAME: run_id,
-            wandb_store.SUMMARY_STATUS: str(getattr(result, "status", "unknown")),
-            wandb_store.SUMMARY_TOTAL_TIME: getattr(
-                result, "total_time_seconds", None
-            ),
-            wandb_store.SUMMARY_METRICS_JSON: json.dumps(
-                metrics,
-                ensure_ascii=False,
-                default=str,
-            ),
-            wandb_store.SUMMARY_HF_REPO_ID: getattr(result, "hf_repo_id", None),
-            wandb_store.SUMMARY_HF_REVISION: getattr(
-                result, "hf_revision", None
-            ),
-            wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None)
-            or getattr(result, "wandb_url", None),
-            wandb_store.SUMMARY_FAILURE_REASON: getattr(
-                result, "failure_reason", None
-            ),
-            wandb_store.SUMMARY_INSTANCE_ID: getattr(result, "instance_id", None),
-            wandb_store.SUMMARY_SPOT_INTERRUPTION: getattr(
-                result, "spot_interruption", None
-            ),
-            wandb_store.SUMMARY_IS_ACTIVE: False,
-            wandb_store.SUMMARY_ATTEMPT_TOKEN: attempt_token,
-            wandb_store.SUMMARY_HEARTBEAT_AT: datetime.now(timezone.utc).isoformat(),
-        },
-    )
+    with _WANDB_RECORD_LOCK:
+        run_id = str(getattr(result, "run_id", "unknown"))
+        metrics = getattr(result, "metrics", {}) or {}
+        attempt_token = getattr(result, "attempt_token", None)
+        run = wandb_store.resolve_run(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_id,
+            create_if_missing=True,
+            attempt_token=attempt_token,
+        )
+        wandb_store.update_run_summary(
+            run,
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: experiment_id,
+                wandb_store.SUMMARY_PHASE: phase,
+                wandb_store.SUMMARY_RUN_NAME: run_id,
+                wandb_store.SUMMARY_STATUS: str(getattr(result, "status", "unknown")),
+                wandb_store.SUMMARY_TOTAL_TIME: getattr(
+                    result, "total_time_seconds", None
+                ),
+                wandb_store.SUMMARY_METRICS_JSON: json.dumps(
+                    metrics,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                wandb_store.SUMMARY_HF_REPO_ID: getattr(result, "hf_repo_id", None),
+                wandb_store.SUMMARY_HF_REVISION: getattr(
+                    result, "hf_revision", None
+                ),
+                wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None)
+                or getattr(result, "wandb_url", None),
+                wandb_store.SUMMARY_FAILURE_REASON: getattr(
+                    result, "failure_reason", None
+                ),
+                wandb_store.SUMMARY_INSTANCE_ID: getattr(result, "instance_id", None),
+                wandb_store.SUMMARY_SPOT_INTERRUPTION: getattr(
+                    result, "spot_interruption", None
+                ),
+                wandb_store.SUMMARY_IS_ACTIVE: False,
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: attempt_token,
+                wandb_store.SUMMARY_HEARTBEAT_AT: datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
 
 def _as_payload_dict(value: Any) -> Dict[str, Any]:
@@ -481,50 +487,51 @@ def record_run_result(
     """
     Upsert canonical per-run payloads in run_results.
     """
-    results_payload_dict = _as_payload_dict(results_payload)
-    job_result_payload_dict = _as_payload_dict(job_result_payload)
-    attempt_token = job_result_payload_dict.get("attempt_token")
-    run = wandb_store.ensure_run(
-        client.db_url,
-        experiment_id=experiment_id,
-        phase=phase,
-        run_name=str(run_id),
-        attempt_token=attempt_token,
-    )
-    serialized_results = json.dumps(
-        results_payload_dict,
-        ensure_ascii=False,
-        default=str,
-    )
-    artifact_name = None
-    if len(serialized_results) > 50_000:
-        artifact_name = wandb_store.log_result_payload(
-            run,
+    with _WANDB_RECORD_LOCK:
+        results_payload_dict = _as_payload_dict(results_payload)
+        job_result_payload_dict = _as_payload_dict(job_result_payload)
+        attempt_token = job_result_payload_dict.get("attempt_token")
+        run = wandb_store.ensure_run(
+            client.db_url,
             experiment_id=experiment_id,
             phase=phase,
             run_name=str(run_id),
-            results_payload=results_payload_dict,
-            job_result_payload=job_result_payload_dict,
             attempt_token=attempt_token,
         )
-        serialized_results = ""
-    wandb_store.update_run_summary(
-        run,
-        {
-            wandb_store.SUMMARY_JOB_RESULT_JSON: json.dumps(
-                job_result_payload_dict,
-                ensure_ascii=False,
-                default=str,
-            ),
-            wandb_store.SUMMARY_RESULTS_JSON: serialized_results or None,
-            wandb_store.SUMMARY_RESULT_ARTIFACT: artifact_name,
-            wandb_store.SUMMARY_IS_ACTIVE: False,
-            wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None),
-            wandb_store.SUMMARY_ATTEMPT_TOKEN: job_result_payload_dict.get(
-                "attempt_token"
-            ),
-        },
-    )
+        serialized_results = json.dumps(
+            results_payload_dict,
+            ensure_ascii=False,
+            default=str,
+        )
+        artifact_name = None
+        if len(serialized_results) > 50_000:
+            artifact_name = wandb_store.log_result_payload(
+                run,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=str(run_id),
+                results_payload=results_payload_dict,
+                job_result_payload=job_result_payload_dict,
+                attempt_token=attempt_token,
+            )
+            serialized_results = ""
+        wandb_store.update_run_summary(
+            run,
+            {
+                wandb_store.SUMMARY_JOB_RESULT_JSON: json.dumps(
+                    job_result_payload_dict,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                wandb_store.SUMMARY_RESULTS_JSON: serialized_results or None,
+                wandb_store.SUMMARY_RESULT_ARTIFACT: artifact_name,
+                wandb_store.SUMMARY_IS_ACTIVE: False,
+                wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None),
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: job_result_payload_dict.get(
+                    "attempt_token"
+                ),
+            },
+        )
 
 
 def get_run_result(
@@ -575,12 +582,14 @@ def run_stop_requested(
     experiment_id: str,
     run_id: str,
     phase: str,
+    attempt_token: Optional[str] = None,
 ) -> bool:
     return wandb_store.fetch_stop_requested(
         client.db_url,
         experiment_id=experiment_id,
         phase=phase,
         run_name=run_id,
+        attempt_token=attempt_token,
     )
 
 
@@ -740,12 +749,14 @@ class ManualStopTelemetryCallback(TrainerCallback):
         experiment_id: str,
         phase: str,
         client: TelemetryClient,
+        attempt_token: Optional[str] = None,
         check_every_n_steps: int = 1,
     ):
         self.run_id = run_id
         self.experiment_id = experiment_id
         self.phase = str(phase)
         self.client = client
+        self.attempt_token = str(attempt_token or "").strip() or None
         self.check_every_n_steps = max(1, int(check_every_n_steps))
         self.stop_requested = False
         self.stop_step: Optional[int] = None
@@ -760,6 +771,7 @@ class ManualStopTelemetryCallback(TrainerCallback):
                 experiment_id=self.experiment_id,
                 run_id=self.run_id,
                 phase=self.phase,
+                attempt_token=self.attempt_token,
             ):
                 print(
                     f"[ManualStopTelemetryCallback] Stop requested for run_id="

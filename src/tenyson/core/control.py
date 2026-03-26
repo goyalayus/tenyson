@@ -15,6 +15,7 @@ def request_stop(
     experiment_id: Optional[str] = None,
     phase: Optional[str] = None,
     create_if_missing: bool = True,
+    attempt_token: Optional[str] = None,
 ) -> bool:
     """
     Set stop_requested = True for the given run_id in the active telemetry backend.
@@ -29,6 +30,18 @@ def request_stop(
     client = TelemetryClient(db_url=db_url)
     explicit_phase = str(phase or "").strip().lower() or None
     now_iso = datetime.now(timezone.utc).isoformat()
+    explicit_attempt = str(attempt_token or "").strip() or None
+    if explicit_phase is not None and explicit_attempt is not None:
+        return wandb_store.set_stop_requested(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=explicit_phase,
+            run_name=str(run_id),
+            requested=True,
+            when_iso=now_iso,
+            create_if_missing=bool(create_if_missing),
+            attempt_token=explicit_attempt,
+        )
     if explicit_phase is not None:
         return wandb_store.set_stop_requested(
             client.db_url,
@@ -38,6 +51,7 @@ def request_stop(
             requested=True,
             when_iso=now_iso,
             create_if_missing=bool(create_if_missing),
+            attempt_token=None,
         )
 
     matched = list_live_run_heartbeats(
@@ -45,6 +59,37 @@ def request_stop(
         experiment_id=experiment_id,
         max_age_seconds=365 * 24 * 60 * 60,
     )
+    exact_live_matches = [
+        row
+        for row in matched
+        if row.run_id == str(run_id)
+        and (explicit_phase is None or row.phase == explicit_phase)
+    ]
+    exact_live_matches.sort(
+        key=lambda row: row.updated_at or row.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    requested_any = False
+    seen_live_attempts: set[tuple[str, Optional[str]]] = set()
+    for row in exact_live_matches:
+        key = (str(row.phase or "").strip().lower(), row.attempt_token)
+        if key in seen_live_attempts:
+            continue
+        seen_live_attempts.add(key)
+        if wandb_store.set_stop_requested(
+            client.db_url,
+            experiment_id=experiment_id,
+            phase=key[0],
+            run_name=str(run_id),
+            requested=True,
+            when_iso=now_iso,
+            create_if_missing=False,
+            attempt_token=row.attempt_token,
+        ):
+            requested_any = True
+    if requested_any:
+        return True
+
     detected_phase = None
     for row in matched:
         if row.run_id == str(run_id):
@@ -69,6 +114,7 @@ def request_stop(
             requested=True,
             when_iso=now_iso,
             create_if_missing=False,
+            attempt_token=explicit_attempt,
         ):
             return True
     return False

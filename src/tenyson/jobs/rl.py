@@ -804,6 +804,7 @@ class RLJob:
             experiment_id=experiment_id,
             phase="rl",
             client=telemetry_client,
+            attempt_token=attempt_token,
             check_every_n_steps=manual_stop_every,
         )
         callbacks = list(callbacks) + [

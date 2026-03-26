@@ -41,6 +41,7 @@ class HeartbeatTelemetryTests(unittest.TestCase):
                     "is_active": True,
                     "created_at": now,
                     "updated_at": now,
+                    "attempt_token": "attempt-1",
                 }
             ],
         ):
@@ -54,6 +55,7 @@ class HeartbeatTelemetryTests(unittest.TestCase):
         self.assertEqual(live[0].phase, "sft")
         self.assertEqual(live[0].provider, "modal")
         self.assertTrue(live[0].is_active)
+        self.assertEqual(live[0].attempt_token, "attempt-1")
 
 
 class CtlStopTests(unittest.TestCase):
@@ -250,6 +252,7 @@ class WandBStopTests(unittest.TestCase):
             requested=True,
             when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
             create_if_missing=True,
+            attempt_token=None,
         )
 
     def test_request_stop_uses_wandb_phase_from_live_runs(self) -> None:
@@ -290,6 +293,49 @@ class WandBStopTests(unittest.TestCase):
             requested=True,
             when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
             create_if_missing=False,
+            attempt_token=None,
+        )
+
+    def test_request_stop_targets_exact_live_attempt_token_when_available(self) -> None:
+        live_runs = [
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+                attempt_token="attempt-live",
+            )
+        ]
+
+        with patch.object(
+            control_module,
+            "list_live_run_heartbeats",
+            return_value=live_runs,
+        ), patch.object(
+            control_module.wandb_store,
+            "set_stop_requested",
+            return_value=True,
+        ) as set_stop_requested_mock:
+            stopped = control_module.request_stop(
+                db_url="wandb://ayush/wordle",
+                run_id="wordle_rl_mixed",
+                experiment_id="wordle_exp",
+                create_if_missing=False,
+            )
+
+        self.assertTrue(stopped)
+        set_stop_requested_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            requested=True,
+            when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
+            create_if_missing=False,
+            attempt_token="attempt-live",
         )
 
     def test_request_stop_without_phase_does_not_create_guessed_runs(self) -> None:

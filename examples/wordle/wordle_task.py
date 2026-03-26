@@ -58,6 +58,15 @@ _DEFAULT_WORD_SOURCE_URL = (
     "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
 )
 
+_DEFAULT_REWARD_CONFIG = {
+    "format": 0.2,
+    "dict": 0.2,
+    "repeat_penalty": -0.5,
+    "constraint": 0.5,
+    "constraint_perfect_bonus": 0.2,
+    "overlength_penalty": -0.5,
+}
+
 
 def _normalize_feedback_string(feedback: str) -> str:
     compact = "".join(ch for ch in str(feedback).upper() if ch in {"G", "Y", "X"})
@@ -313,17 +322,32 @@ def score_completion(
     history_guesses = {g for g, _ in history_rows}
 
     rewards_cfg = task_cfg.get("rewards", {})
-    format_reward = float(rewards_cfg.get("format", 0.2))
-    dict_reward = float(rewards_cfg.get("dict", 0.2))
-    repeat_penalty = float(rewards_cfg.get("repeat_penalty", -0.5))
-    constraint_reward = float(rewards_cfg.get("constraint", 0.1))
+    format_reward = float(rewards_cfg.get("format", _DEFAULT_REWARD_CONFIG["format"]))
+    dict_reward = float(rewards_cfg.get("dict", _DEFAULT_REWARD_CONFIG["dict"]))
+    repeat_penalty = float(
+        rewards_cfg.get("repeat_penalty", _DEFAULT_REWARD_CONFIG["repeat_penalty"])
+    )
+    constraint_reward = float(
+        rewards_cfg.get("constraint", _DEFAULT_REWARD_CONFIG["constraint"])
+    )
+    constraint_perfect_bonus = float(
+        rewards_cfg.get(
+            "constraint_perfect_bonus",
+            _DEFAULT_REWARD_CONFIG["constraint_perfect_bonus"],
+        )
+    )
 
     max_output_tokens = int(
         reward_max_output_tokens
         if reward_max_output_tokens is not None
         else rewards_cfg.get("max_output_tokens", 2048)
     )
-    overlength_penalty = float(rewards_cfg.get("overlength_penalty", -0.5))
+    overlength_penalty = float(
+        rewards_cfg.get(
+            "overlength_penalty",
+            _DEFAULT_REWARD_CONFIG["overlength_penalty"],
+        )
+    )
 
     completion_tokens = _count_completion_tokens(completion_text, tokenizer=tokenizer)
     is_overlength = int(completion_tokens > max_output_tokens)
@@ -355,8 +379,15 @@ def score_completion(
     is_wordle_valid = int(guess in valid_set)
     total_constraints = sum(int(value or 0) for value in totals.values())
 
+    constraint_ratio = (
+        float(sat_count) / float(total_constraints) if total_constraints > 0 else 0.0
+    )
+    is_perfect_constraint_match = bool(
+        is_wordle_valid and total_constraints > 0 and sat_count == total_constraints
+    )
     reward_constraints = (
-        constraint_reward * float(sat_count) / float(total_constraints)
+        (constraint_reward * constraint_ratio)
+        + (constraint_perfect_bonus if is_perfect_constraint_match else 0.0)
         if is_wordle_valid and total_constraints > 0
         else 0.0
     )
@@ -380,6 +411,8 @@ def score_completion(
         "is_overlength": is_overlength,
         "completion_tokens": completion_tokens,
         "sat_count": sat_count,
+        "constraint_ratio": constraint_ratio,
+        "is_perfect_constraint_match": int(is_perfect_constraint_match),
         "totals": totals,
         "satisfied": sats,
         "reward_format": format_reward,
@@ -736,6 +769,7 @@ def compute_metrics(
     format_ok = 0
     dict_ok = 0
     consistent = 0
+    total_constraint_reward = 0.0
 
     detailed_results = []
 
@@ -785,11 +819,13 @@ def compute_metrics(
             dict_ok += 1
         if is_consistent:
             consistent += 1
+        total_constraint_reward += float(scored.get("reward_constraints") or 0.0)
 
         detailed_results.append(row_res)
 
     return {
         "metrics": {
+            "avg_constraint_reward": total_constraint_reward / max(total, 1),
             "format_accuracy": format_ok / max(total, 1),
             "dict_accuracy": dict_ok / max(total, 1),
             "constraint_accuracy": consistent / max(total, 1),
@@ -861,13 +897,7 @@ _RL_OVERRIDES: Dict[str, Any] = {
         "synthetic_samples": 4096,
         "min_history_turns": 1,
         "max_history_turns": 5,
-        "rewards": {
-            "format": 0.2,
-            "dict": 0.2,
-            "repeat_penalty": -0.5,
-            "constraint": 0.1,
-            "overlength_penalty": -0.5,
-        },
+        "rewards": dict(_DEFAULT_REWARD_CONFIG),
     }
 }
 _RL_OVERRIDES["task"].update(_wordlists_override()["task"])
@@ -876,6 +906,7 @@ _EVAL_OVERRIDES: Dict[str, Any] = {
     "task": {
         "eval_samples": 100,
         "eval_seed": 42,
+        "rewards": dict(_DEFAULT_REWARD_CONFIG),
     }
 }
 _EVAL_OVERRIDES["task"].update(_wordlists_override()["task"])

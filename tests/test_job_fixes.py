@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from types import ModuleType
 
+from datasets import Dataset
 import torch
 
 from tenyson.core.telemetry import RLRolloutTracker
@@ -216,13 +217,70 @@ class WordleParserTests(unittest.TestCase):
             prompt_text=prompt,
             completion_text="<think>test</think><guess>[fghij]</guess>",
             valid_set={"fghij"},
-            task_cfg={"rewards": {"constraint": 0.1}},
+            task_cfg={
+                "rewards": {
+                    "constraint": 0.5,
+                    "constraint_perfect_bonus": 0.2,
+                }
+            },
             tokenizer=FakeTokenizer(),
         )
 
         self.assertEqual(scored["sat_count"], 5)
         self.assertEqual(sum(scored["totals"].values()), 5)
-        self.assertAlmostEqual(scored["reward_constraints"], 0.1)
+        self.assertAlmostEqual(scored["constraint_ratio"], 1.0)
+        self.assertEqual(scored["is_perfect_constraint_match"], 1)
+        self.assertAlmostEqual(scored["reward_constraints"], 0.7)
+
+    def test_compute_metrics_reports_avg_constraint_reward(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        prompts = [
+            wordle_task.build_prompt_text([("abcde", "X X X X X")]),
+            wordle_task.build_prompt_text([("abcde", "X X X X X")]),
+        ]
+        completions = [
+            "<think>test</think><guess>[fghij]</guess>",
+            "<think>test</think><guess>[abcde]</guess>",
+        ]
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return list(text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            solutions_path = Path(tmpdir) / "solutions.txt"
+            allowed_path = Path(tmpdir) / "allowed.txt"
+            solutions_path.write_text("fghij\nabcde\n", encoding="utf-8")
+            allowed_path.write_text("fghij\nabcde\n", encoding="utf-8")
+
+            metrics_payload = wordle_task.compute_metrics(
+                prompts=prompts,
+                completions=completions,
+                dataset_rows=Dataset.from_list(
+                    [
+                        {"id": 0, "secret": "mango"},
+                        {"id": 1, "secret": "pearl"},
+                    ]
+                ),
+                config={
+                    "task": {
+                        "wordlists": {
+                            "solutions": str(solutions_path),
+                            "allowed": str(allowed_path),
+                        },
+                        "rewards": {
+                            "constraint": 0.5,
+                            "constraint_perfect_bonus": 0.2,
+                        },
+                    }
+                },
+                tokenizer=FakeTokenizer(),
+            )
+
+        metrics = metrics_payload["metrics"]
+        self.assertAlmostEqual(metrics["avg_constraint_reward"], 0.35)
+        self.assertAlmostEqual(metrics["constraint_accuracy"], 0.5)
+        self.assertEqual(metrics["total_samples"], 2)
 
     def test_resolve_reward_max_output_tokens_prefers_training_limit(self) -> None:
         wordle_task = _load_wordle_task_module()

@@ -41,6 +41,7 @@ _PREFERRED_HISTORY_KEYS = {
     ],
     "eval": [
         "constraint_accuracy",
+        "avg_constraint_reward",
         "dict_accuracy",
         "format_accuracy",
         "total_samples",

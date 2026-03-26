@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
+import threading
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 
@@ -33,6 +34,9 @@ SUMMARY_JOB_RESULT_JSON = f"{SUMMARY_PREFIX}job_result_json"
 SUMMARY_RESULTS_JSON = f"{SUMMARY_PREFIX}results_json"
 SUMMARY_RESULT_ARTIFACT = f"{SUMMARY_PREFIX}result_artifact"
 SUMMARY_PROJECT_URL = f"{SUMMARY_PREFIX}project_url"
+
+
+_LOCAL_WANDB_RUN_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -103,58 +107,60 @@ def ensure_run(
     target = parse_backend_ref(backend_ref)
     import wandb
 
-    expected_id = build_run_id(
-        experiment_id,
-        phase,
-        run_name,
-        attempt_token=attempt_token,
-    )
-    current_run = getattr(wandb, "run", None)
-    if current_run is not None and getattr(current_run, "id", None) != expected_id:
-        try:
-            wandb.finish()
-        except Exception:  # noqa: BLE001
-            pass
-        current_run = None
-
-    os.environ["WANDB_ENTITY"] = target.entity
-    os.environ["WANDB_PROJECT"] = target.project
-    os.environ["WANDB_RUN_ID"] = expected_id
-    os.environ["WANDB_RESUME"] = "allow"
-    os.environ["WANDB_NAME"] = run_name
-    os.environ["WANDB_RUN_GROUP"] = experiment_id
-
-    if current_run is None:
-        current_run = wandb.init(
-            entity=target.entity,
-            project=target.project,
-            id=expected_id,
-            resume="allow",
-            name=run_name,
-            group=experiment_id,
-            job_type=phase,
-            config=dict(config or {}),
+    with _LOCAL_WANDB_RUN_LOCK:
+        expected_id = build_run_id(
+            experiment_id,
+            phase,
+            run_name,
+            attempt_token=attempt_token,
         )
+        current_run = getattr(wandb, "run", None)
+        if current_run is not None and getattr(current_run, "id", None) != expected_id:
+            try:
+                wandb.finish()
+            except Exception:  # noqa: BLE001
+                pass
+            current_run = None
 
-    update_run_summary(
-        current_run,
-        {
-            SUMMARY_EXPERIMENT_ID: experiment_id,
-            SUMMARY_PHASE: phase,
-            SUMMARY_RUN_NAME: run_name,
-            SUMMARY_ATTEMPT_TOKEN: _normalize_attempt_token(attempt_token),
-            SUMMARY_PROJECT_URL: target.project_url,
-            SUMMARY_WANDB_URL: getattr(current_run, "url", None),
-        },
-    )
-    return current_run
+        os.environ["WANDB_ENTITY"] = target.entity
+        os.environ["WANDB_PROJECT"] = target.project
+        os.environ["WANDB_RUN_ID"] = expected_id
+        os.environ["WANDB_RESUME"] = "allow"
+        os.environ["WANDB_NAME"] = run_name
+        os.environ["WANDB_RUN_GROUP"] = experiment_id
+
+        if current_run is None:
+            current_run = wandb.init(
+                entity=target.entity,
+                project=target.project,
+                id=expected_id,
+                resume="allow",
+                name=run_name,
+                group=experiment_id,
+                job_type=phase,
+                config=dict(config or {}),
+            )
+
+        update_run_summary(
+            current_run,
+            {
+                SUMMARY_EXPERIMENT_ID: experiment_id,
+                SUMMARY_PHASE: phase,
+                SUMMARY_RUN_NAME: run_name,
+                SUMMARY_ATTEMPT_TOKEN: _normalize_attempt_token(attempt_token),
+                SUMMARY_PROJECT_URL: target.project_url,
+                SUMMARY_WANDB_URL: getattr(current_run, "url", None),
+            },
+        )
+        return current_run
 
 
 def active_run() -> Any:
     try:
         import wandb
 
-        return getattr(wandb, "run", None)
+        with _LOCAL_WANDB_RUN_LOCK:
+            return getattr(wandb, "run", None)
     except Exception:  # noqa: BLE001
         return None
 
@@ -162,17 +168,18 @@ def active_run() -> Any:
 def update_run_summary(run: Any, values: Mapping[str, Any]) -> None:
     if run is None:
         return
-    summary = getattr(run, "summary", None)
-    if summary is None:
-        return
-    for key, value in values.items():
-        summary[key] = value
-    updater = getattr(summary, "update", None)
-    if callable(updater):
-        try:
-            updater()
-        except TypeError:
-            updater(values)
+    with _LOCAL_WANDB_RUN_LOCK:
+        summary = getattr(run, "summary", None)
+        if summary is None:
+            return
+        for key, value in values.items():
+            summary[key] = value
+        updater = getattr(summary, "update", None)
+        if callable(updater):
+            try:
+                updater()
+            except TypeError:
+                updater(values)
 
 
 def resolve_run(
@@ -236,37 +243,38 @@ def log_result_payload(
         return None
     import wandb
 
-    payload = {
-        "experiment_id": experiment_id,
-        "phase": phase,
-        "run_name": run_name,
-        "results_payload": dict(results_payload),
-        "job_result_payload": dict(job_result_payload),
-    }
-    normalized_attempt = _normalize_attempt_token(attempt_token)
-    artifact_source = f"tenyson-{experiment_id}-{phase}-{run_name}-result"
-    if normalized_attempt:
-        artifact_source = f"{artifact_source}-{normalized_attempt[:8]}"
-    artifact_name = _safe_component(artifact_source, default="tenyson-result")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        payload_path = Path(tmpdir) / "run_result.json"
-        payload_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-        artifact = wandb.Artifact(
-            name=artifact_name,
-            type="tenyson-run-result",
-            metadata={
-                "experiment_id": experiment_id,
-                "phase": phase,
-                "run_name": run_name,
-                "attempt_token": normalized_attempt,
-            },
-        )
-        artifact.add_file(str(payload_path), name="run_result.json")
-        run.log_artifact(artifact)
-    return artifact_name
+    with _LOCAL_WANDB_RUN_LOCK:
+        payload = {
+            "experiment_id": experiment_id,
+            "phase": phase,
+            "run_name": run_name,
+            "results_payload": dict(results_payload),
+            "job_result_payload": dict(job_result_payload),
+        }
+        normalized_attempt = _normalize_attempt_token(attempt_token)
+        artifact_source = f"tenyson-{experiment_id}-{phase}-{run_name}-result"
+        if normalized_attempt:
+            artifact_source = f"{artifact_source}-{normalized_attempt[:8]}"
+        artifact_name = _safe_component(artifact_source, default="tenyson-result")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "run_result.json"
+            payload_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            artifact = wandb.Artifact(
+                name=artifact_name,
+                type="tenyson-run-result",
+                metadata={
+                    "experiment_id": experiment_id,
+                    "phase": phase,
+                    "run_name": run_name,
+                    "attempt_token": normalized_attempt,
+                },
+            )
+            artifact.add_file(str(payload_path), name="run_result.json")
+            run.log_artifact(artifact)
+        return artifact_name
 
 
 def fetch_run(
@@ -391,6 +399,7 @@ def fetch_stop_requested(
     experiment_id: str,
     phase: str,
     run_name: str,
+    attempt_token: Optional[str] = None,
 ) -> bool:
     try:
         run = fetch_run(
@@ -398,6 +407,7 @@ def fetch_stop_requested(
             experiment_id=experiment_id,
             phase=phase,
             run_name=run_name,
+            attempt_token=attempt_token,
         )
     except Exception:  # noqa: BLE001
         return False
@@ -413,6 +423,7 @@ def set_stop_requested(
     requested: bool,
     when_iso: Optional[str] = None,
     create_if_missing: bool = False,
+    attempt_token: Optional[str] = None,
 ) -> bool:
     try:
         run = resolve_run(
@@ -421,6 +432,7 @@ def set_stop_requested(
             phase=phase,
             run_name=run_name,
             create_if_missing=create_if_missing,
+            attempt_token=attempt_token,
         )
     except Exception:  # noqa: BLE001
         return False
@@ -452,6 +464,13 @@ def list_live_runs(
         ).strip()
         if summary_experiment_id != str(experiment_id):
             continue
+        summary_run_name = str(_summary_get(run, SUMMARY_RUN_NAME) or "").strip()
+        actual_run_name = str(getattr(run, "name", "") or "").strip()
+        if summary_run_name and actual_run_name and summary_run_name != actual_run_name:
+            continue
+        effective_run_name = summary_run_name or actual_run_name
+        if not effective_run_name:
+            continue
         if not bool(_summary_get(run, SUMMARY_IS_ACTIVE)):
             continue
         heartbeat_at = _parse_datetime(_summary_get(run, SUMMARY_HEARTBEAT_AT))
@@ -462,11 +481,14 @@ def list_live_runs(
             continue
         rows.append(
             {
-                "run_id": str(_summary_get(run, SUMMARY_RUN_NAME) or getattr(run, "name", "")),
+                "run_id": effective_run_name,
                 "phase": str(_summary_get(run, SUMMARY_PHASE) or ""),
                 "provider": _summary_get(run, SUMMARY_PROVIDER),
                 "status": str(_summary_get(run, SUMMARY_STATUS) or "running"),
                 "is_active": True,
+                "attempt_token": _normalize_attempt_token(
+                    _summary_get(run, SUMMARY_ATTEMPT_TOKEN)
+                ),
                 "created_at": _parse_datetime(getattr(run, "created_at", None)),
                 "updated_at": heartbeat_at,
             }
@@ -524,13 +546,15 @@ def _match_run(
     summary_phase = str(
         _summary_get(run, SUMMARY_PHASE) or getattr(run, "job_type", "") or ""
     ).strip()
-    summary_run_name = str(
-        _summary_get(run, SUMMARY_RUN_NAME) or getattr(run, "name", "") or ""
-    ).strip()
+    summary_run_name = str(_summary_get(run, SUMMARY_RUN_NAME) or "").strip()
+    actual_run_name = str(getattr(run, "name", "") or "").strip()
+    if summary_run_name and actual_run_name and summary_run_name != actual_run_name:
+        return False
+    effective_run_name = summary_run_name or actual_run_name
     if (
         summary_experiment_id != str(experiment_id)
         or summary_phase != str(phase)
-        or summary_run_name != str(run_name)
+        or effective_run_name != str(run_name)
     ):
         return False
     normalized_attempt = _normalize_attempt_token(attempt_token)

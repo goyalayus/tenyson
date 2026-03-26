@@ -249,6 +249,52 @@ class WandBStoreTests(unittest.TestCase):
 
         self.assertIs(resolved, newer)
 
+    def test_fetch_run_ignores_inconsistent_summary_run_name(self) -> None:
+        corrupted = FakeRun(
+            "corrupted-run",
+            name="mixed_rl",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-25T12:30:25+00:00",
+        )
+        corrupted.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "curr_rl_t2",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "bad",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-25T12:30:25+00:00",
+            }
+        )
+        valid = FakeRun(
+            "valid-run",
+            name="curr_rl_t2",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-26T13:29:56+00:00",
+        )
+        valid.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "curr_rl_t2",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "good",
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-26T13:29:56+00:00",
+            }
+        )
+        fake_wandb = build_fake_wandb_module(api_run=valid)
+        fake_wandb.api_runs = [corrupted, valid]
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            resolved = wandb_store.fetch_run(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="curr_rl_t2",
+            )
+
+        self.assertIs(resolved, valid)
+
     def test_set_stop_requested_passes_create_if_missing_to_resolve_run(self) -> None:
         run = FakeRun("run123")
         with patch.object(
@@ -273,6 +319,30 @@ class WandBStoreTests(unittest.TestCase):
             "2026-03-22T10:00:00+00:00",
         )
         self.assertEqual(resolve_run_mock.call_args.kwargs["create_if_missing"], True)
+
+    def test_set_stop_requested_passes_attempt_token_to_resolve_run(self) -> None:
+        run = FakeRun("run123")
+        with patch.object(
+            wandb_store,
+            "resolve_run",
+            return_value=run,
+        ) as resolve_run_mock:
+            stopped = wandb_store.set_stop_requested(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="wordle_rl_main",
+                requested=True,
+                when_iso="2026-03-22T10:00:00+00:00",
+                create_if_missing=False,
+                attempt_token="attempt-live",
+            )
+
+        self.assertTrue(stopped)
+        self.assertEqual(
+            resolve_run_mock.call_args.kwargs["attempt_token"],
+            "attempt-live",
+        )
 
 
 if __name__ == "__main__":

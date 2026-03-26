@@ -97,6 +97,90 @@ def _report_output_path(base_dir: Path) -> Path:
     return base_dir / "final_report.md"
 
 
+def _canonical_report_stage_order() -> list[str]:
+    return [
+        "sft_main",
+        "eval_baseline_mixed",
+        "mixed_rl",
+        "mixed_final_eval",
+        "curr_rl_t2",
+        "curr_eval_after_t2_turn2",
+        "curr_rl_t3",
+        "curr_eval_after_t3_turn2",
+        "curr_eval_after_t3_turn3",
+        "curr_rl_t4",
+        "curr_eval_after_t4_turn3",
+        "curr_eval_after_t4_turn4",
+        "curr_rl_t5",
+        "curr_eval_after_t5_turn4",
+        "curr_eval_after_t5_turn5",
+        "curr_final_eval",
+    ]
+
+
+def _recovery_restart_stages() -> list[str]:
+    restart_from = str(
+        os.getenv("TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE", "")
+    ).strip()
+    if not restart_from:
+        return []
+    ordered_stages = _canonical_report_stage_order()
+    if restart_from not in ordered_stages:
+        raise ValueError(
+            "TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE must be one of "
+            f"{ordered_stages}, got {restart_from!r}."
+        )
+    return ordered_stages[ordered_stages.index(restart_from) :]
+
+
+def _report_backend_ref(report: ExperimentReport) -> str:
+    existing = str(getattr(report, "telemetry_backend_ref", "") or "").strip()
+    if existing:
+        return existing
+    entity = str(os.getenv("TENYSON_WANDB_ENTITY", "")).strip()
+    project = str(os.getenv("TENYSON_WANDB_PROJECT", "")).strip()
+    if entity and project:
+        return f"wandb://{entity}/{project}"
+    return ""
+
+
+def _rebuild_report_from_telemetry(report: ExperimentReport, task: object) -> None:
+    experiment_id = str(
+        getattr(report, "experiment_id", None)
+        or os.getenv("TENYSON_EXPERIMENT_ID", "")
+        or ""
+    ).strip()
+    backend_ref = _report_backend_ref(report)
+    if not experiment_id or not backend_ref:
+        return
+
+    environment_name = None
+    if hasattr(task, "get_environment_name"):
+        try:
+            environment_name = task.get_environment_name()
+        except Exception:  # noqa: BLE001
+            environment_name = None
+
+    try:
+        report.rebuild_from_telemetry(
+            backend_ref=backend_ref,
+            experiment_id=experiment_id,
+            environment_name=environment_name,
+            run_name_allowlist=_canonical_report_stage_order(),
+        )
+        print(
+            "[wordle experiment] Rebuilt final report from telemetry at "
+            f"{report.output_path}.",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            "[wordle experiment] Warning: failed to rebuild final report from "
+            f"telemetry: {exc}",
+            flush=True,
+        )
+
+
 def main() -> None:
     base_dir = Path(__file__).parent
     task = load_task(str(base_dir / "wordle_task.py"))
@@ -118,6 +202,13 @@ def main() -> None:
             f"experiment_id={recovery_experiment_id}.",
             flush=True,
         )
+    recovery_restart_stages = _recovery_restart_stages()
+    if recovery_restart_stages:
+        print(
+            "[wordle experiment] Recovery will restart stages: "
+            f"{', '.join(recovery_restart_stages)}.",
+            flush=True,
+        )
 
     session = ExperimentSession(
         task=task,
@@ -134,6 +225,7 @@ def main() -> None:
         report_metric_precision=4,
         report_wandb_text="run",
         recovery_experiment_id=recovery_experiment_id,
+        recovery_restart_stages=recovery_restart_stages,
     )
     primary_branch = session.branch(cloud=session.create_cloud())
 
@@ -281,6 +373,7 @@ def main() -> None:
         print(exc)
     finally:
         session.close()
+        _rebuild_report_from_telemetry(report, task)
 
 
 if __name__ == "__main__":

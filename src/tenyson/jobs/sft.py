@@ -391,6 +391,7 @@ class SFTJob:
             experiment_id=experiment_id,
             phase="sft",
             client=telemetry_client,
+            attempt_token=attempt_token,
         )
         callbacks.append(manual_stop_callback)
         callbacks.append(

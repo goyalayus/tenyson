@@ -560,6 +560,58 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertNotIn("resume_from_checkpoint", stage.config["training"])
         run_pipeline_mock.assert_called_once()
 
+    def test_run_stage_recovery_restart_set_ignores_prior_success(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+            recovery_restart_stages=["eval_baseline_mixed"],
+        )
+        adapter = AdapterRef(repo_id="repo/id", revision="sha123")
+        stage = session.eval(
+            "eval_baseline_mixed",
+            adapter=adapter,
+            run_name="eval_baseline_mixed",
+        )
+        recovered = _result(
+            "eval_baseline_mixed",
+            status="success",
+            processed_samples=25,
+            expected_samples=25,
+        )
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            del cloud, on_failure
+            self.assertEqual(steps[0][0], "eval_baseline_mixed")
+            return [
+                _result(
+                    "eval_baseline_mixed",
+                    status="success",
+                    processed_samples=100,
+                    expected_samples=100,
+                )
+            ]
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=({}, dict(recovered.__dict__)),
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            side_effect=fake_run_pipeline,
+        ) as run_pipeline_mock:
+            result = session.run_stage(stage, cloud=object())
+
+        self.assertEqual(result.processed_samples, 100)
+        run_pipeline_mock.assert_called_once()
+
     def test_run_parallel_only_launches_unrecovered_stages(self) -> None:
         session = ExperimentSession(
             task=object(),

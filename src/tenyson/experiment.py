@@ -180,6 +180,7 @@ class _ActiveRun:
     backend_ref: Optional[str]
     experiment_id: Optional[str]
     phase: Optional[str]
+    attempt_token: Optional[str]
     label: str
 
 
@@ -205,6 +206,10 @@ class _ExperimentAbortController:
                 backend_ref=backend_ref,
                 experiment_id=experiment_id,
                 phase=_resolve_stage_phase(stage),
+                attempt_token=str(
+                    stage.config.get("telemetry", {}).get("attempt_token") or ""
+                ).strip()
+                or None,
                 label=stage.id,
             )
         return run_id
@@ -244,6 +249,7 @@ class _ExperimentAbortController:
                     run_id=active_run.run_id,
                     experiment_id=active_run.experiment_id,
                     phase=active_run.phase,
+                    attempt_token=active_run.attempt_token,
                     create_if_missing=True,
                 )
                 _red_print(
@@ -556,6 +562,7 @@ class ExperimentSession:
         report_missing: str = "n/a",
         report_poll_interval_seconds: float = 2.0,
         recovery_experiment_id: Optional[str] = None,
+        recovery_restart_stages: Optional[Sequence[str]] = None,
     ) -> None:
         if report is not None and report_builder is not None:
             raise ValueError("Pass either report or report_builder, not both.")
@@ -569,6 +576,11 @@ class ExperimentSession:
         self.recovery_experiment_id = (
             str(recovery_experiment_id or "").strip() or None
         )
+        self.recovery_restart_stages = {
+            str(stage_name).strip()
+            for stage_name in (recovery_restart_stages or [])
+            if str(stage_name).strip()
+        }
         self._abort_controller = _ExperimentAbortController()
         resolved_report = report if report is not None else report_builder
         self._report_controller = (
@@ -653,12 +665,28 @@ class ExperimentSession:
                 f'run_id "{run_id}": {exc}'
             ) from exc
 
+    def _should_restart_recovered_stage(self, stage: StageSpec) -> bool:
+        if not self.recovery_restart_stages:
+            return False
+        stage_id = str(stage.id).strip()
+        run_name = str(stage.run_name).strip()
+        return stage_id in self.recovery_restart_stages or run_name in self.recovery_restart_stages
+
     def _resolve_recovered_stage_result(self, stage: StageSpec) -> Optional[JobResult]:
         prior_result = self._load_recovered_result(stage)
         if prior_result is None:
             return None
 
         status = str(getattr(prior_result, "status", "") or "").strip().lower()
+        if self._should_restart_recovered_stage(stage):
+            train_cfg = stage.config.get("training")
+            if isinstance(train_cfg, dict):
+                train_cfg.pop("resume_from_checkpoint", None)
+            _red_print(
+                f'[TENYSON] Recovery restart requested for stage "{stage.id}". '
+                f'Ignoring prior {status or "unknown"} result and rerunning it.'
+            )
+            return None
         if status in {"success", "partial"}:
             _red_print(
                 f'[TENYSON] Reusing prior {status} result for stage "{stage.id}" '
