@@ -452,6 +452,7 @@ class ExperimentSessionTests(unittest.TestCase):
             hf_revision="sha123",
             failure_reason="Manual stop requested at step 12.",
             stopped_early=True,
+            attempt_token="old-attempt-token",
         )
 
         def fake_run_pipeline(steps, cloud, on_failure):
@@ -459,6 +460,10 @@ class ExperimentSessionTests(unittest.TestCase):
             self.assertEqual(
                 config["training"]["resume_from_checkpoint"],
                 "repo/id:sha123",
+            )
+            self.assertEqual(
+                config["telemetry"]["attempt_token"],
+                "old-attempt-token",
             )
             return [_result("wordle_sft_main", status="success")]
 
@@ -485,6 +490,10 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertEqual(
             stage.config["training"]["resume_from_checkpoint"],
             "repo/id:sha123",
+        )
+        self.assertEqual(
+            stage.config["telemetry"]["attempt_token"],
+            "old-attempt-token",
         )
         prompt_mock.assert_called_once()
         run_pipeline_mock.assert_called_once()

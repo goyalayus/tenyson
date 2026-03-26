@@ -711,6 +711,9 @@ class ExperimentSession:
             train_cfg["resume_from_checkpoint"] = (
                 f"{prior_result.hf_repo_id}:{prior_result.hf_revision}"
             )
+            prior_attempt_token = str(getattr(prior_result, "attempt_token", "") or "").strip()
+            if prior_attempt_token:
+                stage.config.setdefault("telemetry", {})["attempt_token"] = prior_attempt_token
             _red_print(
                 f'[TENYSON] Resuming stage "{stage.id}" from '
                 f'{train_cfg["resume_from_checkpoint"]}.'
