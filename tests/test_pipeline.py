@@ -82,6 +82,32 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(action, "resume")
         self.assertEqual(config["training"]["resume_from_checkpoint"], "repo:rev")
 
+    def test_prompt_failure_action_empty_stdin_defaults_to_abort(self) -> None:
+        config = {"training": {"resume_from_checkpoint": "repo:old"}}
+        last_result = JobResult(
+            run_id="wordle_rl_main",
+            status="stopped",
+            total_time_seconds=0.0,
+            hf_repo_id="repo",
+            hf_revision="rev",
+        )
+
+        with patch.object(sys, "stdin", io.StringIO("")), patch.object(
+            sys,
+            "stderr",
+            io.StringIO(),
+        ):
+            action = pipeline_module._prompt_failure_action(
+                step_label="rl_main",
+                config=config,
+                job_type="rl",
+                on_failure="wait",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "abort")
+        self.assertEqual(config["training"]["resume_from_checkpoint"], "repo:old")
+
     def test_prompt_failure_action_continue_accepts_stopped_checkpoint(self) -> None:
         config = {"training": {"resume_from_checkpoint": "repo:old"}}
         last_result = JobResult(

@@ -181,6 +181,8 @@ def _prompt_failure_action(
                 choice = sys.stdin.readline().strip().lower()
             except (EOFError, KeyboardInterrupt):
                 choice = "abort"
+            if not choice:
+                choice = "abort"
             if choice == "abort":
                 return "abort"
             if choice == "restart":

@@ -1,4 +1,6 @@
 import copy
+import io
+import sys
 import tempfile
 import time
 import unittest
@@ -51,6 +53,29 @@ def _telemetry_shared_overrides(experiment_id: str = "wordle_exp") -> dict:
 
 
 class ExperimentSessionTests(unittest.TestCase):
+    def test_prompt_recovery_action_empty_stdin_defaults_to_restart(self) -> None:
+        last_result = JobResult(
+            run_id="wordle_sft_main",
+            status="stopped",
+            total_time_seconds=0.0,
+            hf_repo_id="repo",
+            hf_revision="rev",
+        )
+
+        with patch.object(sys, "stdin", io.StringIO("")), patch.object(
+            sys,
+            "stderr",
+            io.StringIO(),
+        ):
+            action = experiment_module._prompt_recovery_action(
+                step_label="sft_main",
+                run_id="wordle_sft_main",
+                job_type="sft",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "restart")
+
     def test_stage_building_clones_templates_and_injects_adapter(self) -> None:
         base_rl_template = {
             "training": {"epochs": 1},

@@ -127,6 +127,8 @@ def _prompt_recovery_action(
                 choice = sys.stdin.readline().strip().lower()
             except (EOFError, KeyboardInterrupt):
                 choice = "restart"
+            if not choice:
+                choice = "restart"
 
             normalized_choice = choice.replace("_", "-").strip()
             if normalized_choice == "resume" and can_resume:
