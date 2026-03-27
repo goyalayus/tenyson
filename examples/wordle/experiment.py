@@ -199,6 +199,10 @@ def _report_output_path(base_dir: Path) -> Path:
     return base_dir / "final_report.md"
 
 
+def _resolve_on_failure_policy() -> str:
+    return str(os.getenv("TENYSON_ON_FAILURE", "wait")).strip() or "wait"
+
+
 def _canonical_report_stage_order() -> list[str]:
     return [
         "sft_main",
@@ -381,7 +385,7 @@ def main() -> None:
     rl_overrides = smoke_overrides.get("rl")
     eval_overrides = smoke_overrides.get("eval")
 
-    on_failure = "wait"
+    on_failure = _resolve_on_failure_policy()
     modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
     modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
     recovery_experiment_id = (

@@ -35,12 +35,17 @@ _FAILURE_PROMPT_NO_INPUT_WAIT_SECONDS = 5.0
 
 def _normalize_on_failure_policy(on_failure: Optional[str]) -> str:
     """
-    Tenyson now always waits for an operator decision after a failure or
-    manual stop. Keep accepting legacy inputs such as "abort", but normalize
-    them to the only supported policy.
+    Normalize the failure policy used after a step returns failed/stopped.
+
+    - `wait`: prompt the operator for resume/restart/continue/abort.
+    - `abort`: stop the pipeline immediately without prompting.
     """
-    del on_failure
-    return "wait"
+    normalized = str(on_failure or "").strip().lower()
+    if not normalized:
+        return "wait"
+    if normalized in {"wait", "abort"}:
+        return normalized
+    raise ValueError("on_failure must be either 'wait' or 'abort'.")
 
 
 def _is_terminal_nonfailure(result: JobResult) -> bool:
@@ -146,6 +151,8 @@ def _prompt_failure_action(
     last_result: JobResult,
 ) -> str:
     on_failure = _normalize_on_failure_policy(on_failure)
+    if on_failure == "abort":
+        return "abort"
 
     train_cfg = config.get("training", {})
     hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
@@ -332,9 +339,9 @@ def run_pipeline(
     When reporting is enabled (report_template_path + report_output_path),
     a report file is created at start and updated after each step.
 
-    When a step returns status "failed", do not exit: print failure in red,
-    call notify_failure, then enter a wait loop (resume / restart / abort).
-    Works with both AWS and Modal.
+    When a step returns status "failed", print failure in red, call
+    notify_failure, then either abort immediately or wait for an operator
+    decision depending on `on_failure`. Works with both AWS and Modal.
     """
     if (report_template_path is None) != (report_output_path is None):
         raise ValueError(
@@ -423,6 +430,14 @@ def run_pipeline(
                             phase=job_type,
                         )
 
+                        if on_failure == "abort":
+                            abort_parallel_stage = True
+                            _abort_parallel_stage_runs(
+                                branches,
+                                source_run_id=getattr(result, "run_id", None),
+                            )
+                            return results
+
                         action = _prompt_failure_action(
                             step_label=label,
                             config=config,
@@ -482,6 +497,9 @@ def run_pipeline(
                 experiment_id=experiment_id,
                 phase=job_type,
             )
+
+            if on_failure == "abort":
+                return results
 
             action = _prompt_failure_action(
                 step_label=label,

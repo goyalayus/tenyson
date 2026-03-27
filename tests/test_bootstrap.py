@@ -322,6 +322,71 @@ class BootstrapTests(unittest.TestCase):
         close_mock.assert_called_once_with()
         rebuild_mock.assert_called_once_with(fake_report, fake_task)
 
+    def test_wordle_experiment_main_uses_env_on_failure_policy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_on_failure_test__",
+            )
+
+        captured_session_kwargs = {}
+        fake_task = object()
+        fake_report = Mock()
+        fake_branch = Mock()
+        fake_branch.sft.return_value = "fake-sft-stage"
+        fake_branch.run.side_effect = KeyboardInterrupt
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs) -> None:
+                del args
+                captured_session_kwargs.update(kwargs)
+
+            def create_cloud(self):
+                return object()
+
+            def branch(self, cloud=None):
+                del cloud
+                return fake_branch
+
+            def close(self):
+                return None
+
+        class FakeConfigTemplates:
+            @staticmethod
+            def from_directory(*args, **kwargs):
+                del args, kwargs
+                return object()
+
+        class FakeModalManager:
+            @staticmethod
+            def factory_from_env(**kwargs):
+                del kwargs
+                return lambda: object()
+
+        main_fn = module_globals["main"]
+        main_globals = main_fn.__globals__
+        main_globals["_install_graceful_shutdown_handlers"] = lambda: None
+        main_globals["_load_example_env"] = lambda path=None: {}
+        main_globals["load_task"] = lambda path: fake_task
+        main_globals["ExperimentReport"] = lambda output_path: fake_report
+        main_globals["_wordle_smoke_overrides"] = lambda: {}
+        main_globals["shared_overrides_from_env"] = lambda: None
+        main_globals["ConfigTemplates"] = FakeConfigTemplates
+        main_globals["ModalManager"] = FakeModalManager
+        main_globals["ExperimentSession"] = FakeSession
+        main_globals["_rebuild_report_from_telemetry"] = lambda report, task: None
+
+        with patch.dict(os.environ, {"TENYSON_ON_FAILURE": "abort"}, clear=False):
+            main_fn()
+
+        self.assertEqual(captured_session_kwargs["on_failure"], "abort")
+
     def test_wordle_experiment_main_ignores_keyboardinterrupt_during_report_rebuild(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
