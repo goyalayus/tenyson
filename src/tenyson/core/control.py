@@ -83,7 +83,7 @@ def request_stop(
             run_name=str(run_id),
             requested=True,
             when_iso=now_iso,
-            create_if_missing=False,
+            create_if_missing=True,
             attempt_token=row.attempt_token,
         ):
             requested_any = True

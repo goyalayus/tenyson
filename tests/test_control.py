@@ -292,7 +292,7 @@ class WandBStopTests(unittest.TestCase):
             run_name="wordle_rl_mixed",
             requested=True,
             when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
-            create_if_missing=False,
+            create_if_missing=True,
             attempt_token=None,
         )
 
@@ -334,7 +334,7 @@ class WandBStopTests(unittest.TestCase):
             run_name="wordle_rl_mixed",
             requested=True,
             when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
-            create_if_missing=False,
+            create_if_missing=True,
             attempt_token="attempt-live",
         )
 
