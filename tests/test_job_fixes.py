@@ -517,6 +517,68 @@ class RLJobTelemetryStartupTests(unittest.TestCase):
             job.run()
 
 
+class EvalJobFailureTelemetryTests(unittest.TestCase):
+    def test_eval_run_records_failed_result_when_startup_raises(self) -> None:
+        job = EvalJob(
+            config={
+                "evaluation": {"run_name": "eval_smoke", "batch_size": 1},
+                "telemetry": {
+                    "backend": "wandb",
+                    "entity": "demo",
+                    "project": "tenyson",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-eval",
+                },
+            },
+            task=SimpleNamespace(),
+        )
+
+        fake_client = SimpleNamespace(db_url="wandb://demo/tenyson")
+        fake_wandb_run = SimpleNamespace(url="https://wandb.example/runs/eval_smoke")
+        fake_wandb = SimpleNamespace(finish=lambda: None)
+
+        with patch.object(eval_module, "require_gpu_provider_runtime"), patch.object(
+            telemetry_module,
+            "resolve_required_telemetry_context",
+            return_value=("wandb://demo/tenyson", "wordle_exp"),
+        ), patch.object(
+            telemetry_module,
+            "TelemetryClient",
+            return_value=fake_client,
+        ), patch.object(
+            telemetry_module,
+            "ensure_wandb_telemetry_run",
+            return_value=fake_wandb_run,
+        ), patch.object(
+            telemetry_module,
+            "begin_run_attempt",
+            return_value=False,
+        ), patch.object(
+            telemetry_module,
+            "start_run_heartbeat",
+        ), patch.object(
+            telemetry_module,
+            "record_run_summary",
+        ) as record_run_summary_mock, patch.object(
+            telemetry_module,
+            "record_run_result",
+        ) as record_run_result_mock, patch.object(
+            job,
+            "_build_model_and_tokenizer",
+            side_effect=RuntimeError("adapter download 504"),
+        ), patch.dict(sys.modules, {"wandb": fake_wandb}):
+            result = job.run()
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("adapter download 504", result.failure_reason or "")
+        self.assertEqual(result.wandb_url, "https://wandb.example/runs/eval_smoke")
+        recorded_summary_result = record_run_summary_mock.call_args.kwargs["result"]
+        recorded_payload = record_run_result_mock.call_args.kwargs["job_result_payload"]
+        self.assertEqual(recorded_summary_result.status, "failed")
+        self.assertEqual(recorded_payload.status, "failed")
+        self.assertIn("adapter download 504", recorded_payload.failure_reason or "")
+
+
 class RewardTelemetryCollectorTests(unittest.TestCase):
     def test_build_results_payload_records_weighted_rollouts_for_wandb(self) -> None:
         collector = _RewardTelemetryCollector(

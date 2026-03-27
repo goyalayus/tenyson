@@ -16,6 +16,13 @@ from tenyson.jobs.result import JobResult
 from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
 
 
+def _format_failure_reason(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {message}"
+
+
 def _resolve_eval_fast_inference_requested(
     model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
@@ -332,142 +339,188 @@ class EvalJob:
                 f"continuing evaluation. {exc}",
                 flush=True,
             )
+        try:
+            model, tokenizer = self._build_model_and_tokenizer()
 
-        model, tokenizer = self._build_model_and_tokenizer()
+            print("[EvalJob] Loading eval dataset via TaskPlugin...", flush=True)
+            dataset = self.task.get_eval_dataset(self.config)
+            print(
+                f"[EvalJob] Loaded {len(dataset)} examples for evaluation.",
+                flush=True,
+            )
 
-        print("[EvalJob] Loading eval dataset via TaskPlugin...", flush=True)
-        dataset = self.task.get_eval_dataset(self.config)
-        print(f"[EvalJob] Loaded {len(dataset)} examples for evaluation.", flush=True)
+            sampling_params = self._build_sampling_params(tokenizer)
+            all_prompts: Sequence[str] = self._extract_prompts(dataset)
 
-        sampling_params = self._build_sampling_params(tokenizer)
-        all_prompts: Sequence[str] = self._extract_prompts(dataset)
+            batch_size = int(self.config.get("evaluation", {}).get("batch_size", 32))
+            batch_size = max(1, batch_size)
 
-        batch_size = int(self.config.get("evaluation", {}).get("batch_size", 32))
-        batch_size = max(1, batch_size)
+            processed_prompts: List[str] = []
+            processed_completions: List[str] = []
+            last_heartbeat_at = 0.0
+            heartbeat_warned = False
 
-        processed_prompts: List[str] = []
-        processed_completions: List[str] = []
-        last_heartbeat_at = 0.0
-        heartbeat_warned = False
+            def _heartbeat(force: bool = False) -> None:
+                nonlocal heartbeat_warned, last_heartbeat_at
+                now = time.monotonic()
+                if not force and (now - last_heartbeat_at) < 10.0:
+                    return
+                try:
+                    beat_run_heartbeat(
+                        client=client,
+                        experiment_id=experiment_id,
+                        run_id=run_name,
+                        phase="eval",
+                    )
+                    last_heartbeat_at = now
+                    heartbeat_warned = False
+                except Exception as exc:  # noqa: BLE001
+                    if not heartbeat_warned:
+                        print(
+                            "[EvalJob] Warning: heartbeat update failed; continuing "
+                            f"evaluation. {exc}",
+                            flush=True,
+                        )
+                        heartbeat_warned = True
 
-        def _heartbeat(force: bool = False) -> None:
-            nonlocal heartbeat_warned, last_heartbeat_at
-            now = time.monotonic()
-            if not force and (now - last_heartbeat_at) < 10.0:
-                return
+            def _should_stop() -> bool:
+                return run_stop_requested(
+                    client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase="eval",
+                    attempt_token=attempt_token,
+                )
+
+            backend = "vLLM"
+            temperature = sampling_params.temperature
+            print(
+                f"[EvalJob] Starting batched generation with {backend} (temp={temperature})...",
+                flush=True,
+            )
+            _heartbeat(force=True)
+            for start_idx in range(0, len(all_prompts), batch_size):
+                end_idx = min(start_idx + batch_size, len(all_prompts))
+                batch_prompts = list(all_prompts[start_idx:end_idx])
+
+                batch_completions = self._generate_batch(
+                    model,
+                    tokenizer,
+                    batch_prompts,
+                    sampling_params,
+                )
+                processed_completions.extend(batch_completions)
+                processed_prompts.extend(batch_prompts)
+                _heartbeat(force=False)
+
+                if _should_stop():
+                    print(
+                        f"[EvalJob] Manual stop requested after processing {len(processed_prompts)} prompts; stopping early.",
+                        flush=True,
+                    )
+                    break
+
+            print("[EvalJob] Generation complete. Computing metrics...", flush=True)
+
+            # Only pass the processed subset through to metrics.
+            processed_samples = len(processed_prompts)
+            expected_samples = len(all_prompts)
+            processed_dataset = dataset.select(range(processed_samples))
+            results = self.task.compute_metrics(
+                processed_prompts,
+                processed_completions,
+                processed_dataset,
+                self.config,
+                tokenizer,
+            )
+            stopped_early = processed_samples < expected_samples
+            results.setdefault("metadata", {})
+            results["metadata"]["processed_samples"] = processed_samples
+            results["metadata"]["expected_samples"] = expected_samples
+            if stopped_early:
+                # Flag partial evaluations so downstream tooling can recognise them.
+                results["metadata"]["stopped_early"] = True
+
+            metrics = results.get("metrics", {})
+            for key, value in metrics.items():
+                print(f"[EvalJob] {key}: {value}", flush=True)
+
+            total_time = time.time() - start
+
+            result = JobResult(
+                run_id=run_name,
+                status="partial" if stopped_early else "success",
+                total_time_seconds=total_time,
+                metrics=metrics,
+                stopped_early=stopped_early,
+                processed_samples=processed_samples,
+                expected_samples=expected_samples,
+                wandb_url=getattr(wandb_run, "url", None)
+                if wandb_run is not None
+                else None,
+                attempt_token=attempt_token,
+            )
+            record_run_summary(
+                client=client,
+                experiment_id=experiment_id,
+                phase="eval",
+                result=result,
+            )
+            record_run_result(
+                client=client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase="eval",
+                results_payload=results,
+                job_result_payload=result,
+            )
+            if wandb_run is not None:
+                try:
+                    import wandb
+
+                    wandb.log(metrics)
+                except Exception:  # noqa: BLE001
+                    pass
+            return result
+        except Exception as exc:
+            result = JobResult(
+                run_id=run_name,
+                status="failed",
+                total_time_seconds=time.time() - start,
+                metrics={},
+                failure_reason=_format_failure_reason(exc),
+                wandb_url=getattr(wandb_run, "url", None)
+                if wandb_run is not None
+                else None,
+                attempt_token=attempt_token,
+            )
             try:
-                beat_run_heartbeat(
+                record_run_summary(
+                    client=client,
+                    experiment_id=experiment_id,
+                    phase="eval",
+                    result=result,
+                )
+                record_run_result(
                     client=client,
                     experiment_id=experiment_id,
                     run_id=run_name,
                     phase="eval",
+                    results_payload=result,
+                    job_result_payload=result,
                 )
-                last_heartbeat_at = now
-                heartbeat_warned = False
-            except Exception as exc:  # noqa: BLE001
-                if not heartbeat_warned:
-                    print(
-                        "[EvalJob] Warning: heartbeat update failed; continuing "
-                        f"evaluation. {exc}",
-                        flush=True,
-                    )
-                    heartbeat_warned = True
-
-        def _should_stop() -> bool:
-            return run_stop_requested(
-                client,
-                experiment_id=experiment_id,
-                run_id=run_name,
-                phase="eval",
-                attempt_token=attempt_token,
-            )
-
-        backend = "vLLM"
-        temperature = sampling_params.temperature
-        print(
-            f"[EvalJob] Starting batched generation with {backend} (temp={temperature})...",
-            flush=True,
-        )
-        _heartbeat(force=True)
-        for start_idx in range(0, len(all_prompts), batch_size):
-            end_idx = min(start_idx + batch_size, len(all_prompts))
-            batch_prompts = list(all_prompts[start_idx:end_idx])
-
-            batch_completions = self._generate_batch(
-                model,
-                tokenizer,
-                batch_prompts,
-                sampling_params,
-            )
-            processed_completions.extend(batch_completions)
-            processed_prompts.extend(batch_prompts)
-            _heartbeat(force=False)
-
-            if _should_stop():
+            except Exception as record_exc:  # noqa: BLE001
                 print(
-                    f"[EvalJob] Manual stop requested after processing {len(processed_prompts)} prompts; stopping early.",
+                    "[EvalJob] Warning: failed to record terminal eval failure "
+                    f"telemetry. {record_exc}",
                     flush=True,
                 )
-                break
+            return result
+        finally:
+            if wandb_run is not None:
+                try:
+                    import wandb
 
-        print("[EvalJob] Generation complete. Computing metrics...", flush=True)
-
-        # Only pass the processed subset through to metrics.
-        processed_samples = len(processed_prompts)
-        expected_samples = len(all_prompts)
-        processed_dataset = dataset.select(range(processed_samples))
-        results = self.task.compute_metrics(
-            processed_prompts,
-            processed_completions,
-            processed_dataset,
-            self.config,
-            tokenizer,
-        )
-        stopped_early = processed_samples < expected_samples
-        results.setdefault("metadata", {})
-        results["metadata"]["processed_samples"] = processed_samples
-        results["metadata"]["expected_samples"] = expected_samples
-        if stopped_early:
-            # Flag partial evaluations so downstream tooling can recognise them.
-            results["metadata"]["stopped_early"] = True
-
-        metrics = results.get("metrics", {})
-        for key, value in metrics.items():
-            print(f"[EvalJob] {key}: {value}", flush=True)
-
-        total_time = time.time() - start
-
-        result = JobResult(
-            run_id=run_name,
-            status="partial" if stopped_early else "success",
-            total_time_seconds=total_time,
-            metrics=metrics,
-            stopped_early=stopped_early,
-            processed_samples=processed_samples,
-            expected_samples=expected_samples,
-            wandb_url=getattr(wandb_run, "url", None) if wandb_run is not None else None,
-            attempt_token=attempt_token,
-        )
-        record_run_summary(
-            client=client,
-            experiment_id=experiment_id,
-            phase="eval",
-            result=result,
-        )
-        record_run_result(
-            client=client,
-            experiment_id=experiment_id,
-            run_id=run_name,
-            phase="eval",
-            results_payload=results,
-            job_result_payload=result,
-        )
-        if wandb_run is not None:
-            try:
-                import wandb
-
-                wandb.log(metrics)
-                wandb.finish()
-            except Exception:  # noqa: BLE001
-                pass
-        return result
+                    wandb.finish()
+                except Exception:  # noqa: BLE001
+                    pass
