@@ -162,6 +162,10 @@ def _modal_run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: 
         # Set this before spawning the Python runner so Unsloth sees it before
         # any vLLM-related imports.
         os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"
+        print(
+            "[ModalManager] Runtime env: UNSLOTH_VLLM_NO_FLASHINFER=1",
+            flush=True,
+        )
     config_path = os.path.join(
         tempfile.gettempdir(),
         f"tenyson-{job_type}-config.yaml",
