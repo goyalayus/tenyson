@@ -152,8 +152,26 @@ def _configure_rl_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
         ).strip().upper()
         if not attention_backend or attention_backend == "FLASHINFER":
             os.environ["VLLM_ATTENTION_BACKEND"] = "TORCH_SDPA"
+        _hide_flashinfer_imports()
     # Mirror the Unsloth GRPO notebook's standby mode.
     os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+
+
+def _hide_flashinfer_imports() -> None:
+    import importlib.util
+
+    current = importlib.util.find_spec
+    if getattr(current, "_tenyson_hides_flashinfer", False):
+        return
+
+    def wrapped(name: str, package: str | None = None):  # type: ignore[override]
+        normalized = str(name or "")
+        if normalized == "flashinfer" or normalized.startswith("flashinfer."):
+            return None
+        return current(name, package)
+
+    setattr(wrapped, "_tenyson_hides_flashinfer", True)
+    importlib.util.find_spec = wrapped  # type: ignore[assignment]
 
 
 def _require_rl_vllm_config(
