@@ -79,6 +79,7 @@ def build_fake_wandb_module(current_run=None, api_run=None):
     module.api_runs = []
     module.api_run_error = None
     module.last_runs_call = None
+    module.api_calls = []
 
     def init(**kwargs):
         run = FakeRun(kwargs["id"])
@@ -93,12 +94,33 @@ def build_fake_wandb_module(current_run=None, api_run=None):
 
     module.init = init
     module.finish = finish
-    module.Api = lambda: FakeApi(module)
+    def _api_factory(*args, **kwargs):
+        module.api_calls.append({"args": args, "kwargs": kwargs})
+        return FakeApi(module)
+
+    module.Api = _api_factory
     module.Artifact = FakeArtifact
     return module
 
 
 class WandBStoreTests(unittest.TestCase):
+    def test_fetch_run_uses_configured_api_timeout(self) -> None:
+        fake_wandb = build_fake_wandb_module(api_run=FakeRun("run123"))
+        with patch.dict(sys.modules, {"wandb": fake_wandb}), patch.dict(
+            os.environ,
+            {"TENYSON_WANDB_API_TIMEOUT": "17"},
+            clear=False,
+        ):
+            resolved = wandb_store.fetch_run(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="sft",
+                run_name="wordle_sft_main",
+            )
+
+        self.assertEqual(resolved.id, "run123")
+        self.assertEqual(fake_wandb.api_calls[0]["kwargs"].get("timeout"), 17)
+
     def test_ensure_run_initializes_run_and_updates_summary(self) -> None:
         fake_wandb = build_fake_wandb_module()
         with patch.dict(sys.modules, {"wandb": fake_wandb}), patch.dict(

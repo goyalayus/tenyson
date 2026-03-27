@@ -11,6 +11,8 @@ model:
 vllm:
   # Eval now requires the Unsloth/vLLM fast inference path.
   enabled: true
+  # Avoid FlashInfer JIT on environments without nvcc (for example T4 Modal images).
+  disable_flashinfer: true
   # Fraction of GPU memory reserved for vLLM generation.
   gpu_memory_utilization: 0.9
   temperature: 0.0  # Greedy decoding for evals

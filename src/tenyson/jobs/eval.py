@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Any, Dict, List, Sequence
 
@@ -56,6 +57,17 @@ def _require_eval_vllm_config(
         )
 
 
+def _configure_eval_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
+    if not bool(vllm_cfg.get("enabled", False)):
+        return
+    disable_flashinfer = vllm_cfg.get("disable_flashinfer")
+    if disable_flashinfer is None:
+        disable_flashinfer = True
+    if bool(disable_flashinfer):
+        # Unsloth expects this before importing its vLLM utilities.
+        os.environ.setdefault("UNSLOTH_VLLM_NO_FLASHINFER", "1")
+
+
 class EvalJob:
     """
     Evaluation job using Unsloth + vLLM.
@@ -70,11 +82,11 @@ class EvalJob:
         self._vllm_runtime_enabled: bool | None = None
 
     def _build_model_and_tokenizer(self):
-        from unsloth import FastLanguageModel
-
         model_cfg = self.config.get("model", {})
         vllm_cfg = self.config.get("vllm", {})
         _require_eval_vllm_config(model_cfg, vllm_cfg)
+        _configure_eval_unsloth_runtime_env(vllm_cfg)
+        from unsloth import FastLanguageModel
 
         init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
         init_adapter = None

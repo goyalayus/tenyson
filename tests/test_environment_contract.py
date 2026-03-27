@@ -513,6 +513,85 @@ class ExperimentReportTests(unittest.TestCase):
         self.assertIn("- Metric `rollout_batches`: `525`", content)
         self.assertIn("- Metric `total_samples`: `2100`", content)
 
+    def test_fixed_report_rebuild_marks_failed_when_wandb_state_is_terminal(self) -> None:
+        class _FakeRun:
+            def __init__(
+                self,
+                *,
+                name: str,
+                job_type: str,
+                group: str,
+                summary: dict,
+                config: dict,
+                url: str,
+                created_at: str,
+                updated_at: str,
+                state: str,
+            ) -> None:
+                self.name = name
+                self.job_type = job_type
+                self.group = group
+                self.summary = summary
+                self.config = config
+                self.url = url
+                self.created_at = created_at
+                self.updated_at = updated_at
+                self.state = state
+
+        now = datetime.now(timezone.utc)
+        experiment_id = "wordle_exp"
+        backend_ref = "wandb://ayush/wordle"
+        stale_running_but_failed = _FakeRun(
+            name="eval_baseline_mixed",
+            job_type="eval",
+            group=experiment_id,
+            summary={
+                "tenyson/experiment_id": experiment_id,
+                "tenyson/phase": "eval",
+                "tenyson/run_name": "eval_baseline_mixed",
+                "tenyson/status": "running",
+                "tenyson/attempt_token": "eval-a",
+                "tenyson/heartbeat_at": now.isoformat(),
+                "tenyson/is_active": True,
+                "tenyson/wandb_url": "https://wandb.example/runs/eval_baseline_mixed",
+                "tenyson/job_result_json": None,
+                "tenyson/failure_reason": None,
+            },
+            config={"_tenyson": {"environment_run": "wordle_eval_mixed"}},
+            url="https://wandb.example/runs/eval_baseline_mixed",
+            created_at=(now - timedelta(minutes=1)).isoformat(),
+            updated_at=now.isoformat(),
+            state="failed",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "final_report.md"
+            report = ExperimentReport(output_path=report_path)
+
+            with patch(
+                "tenyson.reporting.fixed._project_runs_for_backend",
+                return_value=[stale_running_but_failed],
+            ), patch(
+                "tenyson.reporting.fixed.wandb_store.fetch_run_result",
+                return_value=None,
+            ):
+                rebuilt = report.rebuild_from_telemetry(
+                    backend_ref=backend_ref,
+                    experiment_id=experiment_id,
+                    environment_name="wordle",
+                    prefer_terminal_results=True,
+                )
+
+            content = report_path.read_text(encoding="utf-8")
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(report._stages["eval_baseline_mixed"].status, "failed")
+        self.assertIn(
+            "state=failed before a canonical tenyson job result was written.",
+            report._stages["eval_baseline_mixed"].failure_reason or "",
+        )
+        self.assertIn("Stage summary: 1 failed", content)
+
 
     def test_fixed_report_rebuild_prefers_terminal_results_for_final_snapshot(self) -> None:
         class _FakeRun:

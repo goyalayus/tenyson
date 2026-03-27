@@ -19,6 +19,8 @@ lora:
 
 vllm:
   enabled: true
+  # Avoid FlashInfer JIT on environments without nvcc (for example T4 Modal images).
+  disable_flashinfer: true
   # Fraction of GPU memory reserved for Unsloth's colocated vLLM generation path.
   gpu_memory_utilization: 0.9
   temperature: 1.0

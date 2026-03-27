@@ -82,6 +82,21 @@ def parse_backend_ref(value: str) -> WandBTarget:
     return WandBTarget(entity=parts[0], project=parts[1])
 
 
+def _wandb_api_timeout_seconds() -> int:
+    raw = str(os.getenv("TENYSON_WANDB_API_TIMEOUT", "30")).strip()
+    try:
+        timeout = int(float(raw))
+    except Exception:  # noqa: BLE001
+        timeout = 30
+    return max(5, min(timeout, 300))
+
+
+def _wandb_api() -> Any:
+    import wandb
+
+    return wandb.Api(timeout=_wandb_api_timeout_seconds())
+
+
 def _normalize_attempt_token(value: Optional[str]) -> Optional[str]:
     normalized = str(value or "").strip()
     return normalized or None
@@ -321,9 +336,7 @@ def fetch_run(
     attempt_token: Optional[str] = None,
 ) -> Any:
     target = parse_backend_ref(backend_ref)
-    import wandb
-
-    api = wandb.Api()
+    api = _wandb_api()
     normalized_attempt = _normalize_attempt_token(attempt_token)
     if normalized_attempt:
         run_id = build_run_id(
@@ -402,9 +415,7 @@ def fetch_run_result(
     normalized_attempt = _normalize_attempt_token(attempt_token)
     if normalized_attempt is None:
         target = parse_backend_ref(backend_ref)
-        import wandb
-
-        api = wandb.Api()
+        api = _wandb_api()
         run = _find_latest_matching_result_run(
             _query_matching_runs(
                 api,
@@ -593,9 +604,7 @@ def list_live_runs(
     max_age_seconds: int = 90,
 ) -> list[dict[str, Any]]:
     target = parse_backend_ref(backend_ref)
-    import wandb
-
-    api = wandb.Api()
+    api = _wandb_api()
     now = _utc_now()
     rows: list[dict[str, Any]] = []
     for run in api.runs(path=f"{target.entity}/{target.project}"):
@@ -646,9 +655,7 @@ def fetch_artifact_results(
     artifact_name: str,
 ) -> Optional[Dict[str, Any]]:
     target = parse_backend_ref(backend_ref)
-    import wandb
-
-    api = wandb.Api()
+    api = _wandb_api()
     artifact = api.artifact(f"{target.entity}/{target.project}/{artifact_name}:latest")
     with tempfile.TemporaryDirectory() as tmpdir:
         artifact_dir = Path(artifact.download(root=tmpdir))

@@ -46,6 +46,7 @@ class _TelemetryStageCandidate:
     failure_reason: Optional[str]
     job_result_payload: Dict[str, Any] = field(default_factory=dict)
     summary_metrics: Dict[str, Any] = field(default_factory=dict)
+    run_state: Optional[str] = None
 
 
 _PHASE_ORDER = {
@@ -314,6 +315,23 @@ class ExperimentReport:
     ) -> StageReportEntry:
         stage_id = run_name
         variant = candidate.environment_run
+        terminal_state_status = _candidate_terminal_state_status(candidate)
+        failure_reason = candidate.failure_reason
+        if terminal_state_status == "failed" and not failure_reason:
+            failure_reason = (
+                "W&B run ended with state="
+                f"{candidate.run_state} before a canonical tenyson job result was written."
+            )
+        if terminal_state_status and not candidate.has_job_result:
+            return StageReportEntry(
+                stage_id=stage_id,
+                run_type=phase,
+                run_name=run_name,
+                variant=variant,
+                status=terminal_state_status,
+                wandb_url=candidate.wandb_url,
+                failure_reason=failure_reason,
+            )
         is_fresh_active = _candidate_is_fresh_active(
             candidate,
             max_live_age_seconds=max_live_age_seconds,
@@ -326,7 +344,7 @@ class ExperimentReport:
                 variant=variant,
                 status=str(candidate.status or "running"),
                 wandb_url=candidate.wandb_url,
-                failure_reason=candidate.failure_reason,
+                failure_reason=failure_reason,
             )
 
         results_payload: Dict[str, Any] = {}
@@ -374,7 +392,7 @@ class ExperimentReport:
             variant=variant,
             status=str(candidate.status or "unknown"),
             wandb_url=candidate.wandb_url,
-            failure_reason=candidate.failure_reason,
+            failure_reason=failure_reason,
         )
 
     def _entry_from_result(
@@ -520,9 +538,8 @@ class ExperimentReport:
 
 def _project_runs_for_backend(backend_ref: str) -> list[Any]:
     target = wandb_store.parse_backend_ref(backend_ref)
-    import wandb
 
-    api = wandb.Api()
+    api = wandb_store._wandb_api()
     return list(api.runs(path=f"{target.entity}/{target.project}"))
 
 
@@ -603,7 +620,15 @@ def _candidate_from_run(
         or None,
         job_result_payload=job_result_payload,
         summary_metrics=summary_metrics,
+        run_state=str(getattr(run, "state", "") or "").strip().lower() or None,
     )
+
+
+def _candidate_terminal_state_status(candidate: _TelemetryStageCandidate) -> Optional[str]:
+    state = str(candidate.run_state or "").strip().lower()
+    if state in {"failed", "crashed", "killed"}:
+        return "failed"
+    return None
 
 
 def _select_candidate(

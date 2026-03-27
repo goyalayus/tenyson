@@ -137,6 +137,19 @@ def _resolve_unsloth_model_load_kwargs(
     return kwargs
 
 
+def _configure_rl_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
+    if not bool(vllm_cfg.get("enabled", False)):
+        return
+    disable_flashinfer = vllm_cfg.get("disable_flashinfer")
+    if disable_flashinfer is None:
+        disable_flashinfer = True
+    if bool(disable_flashinfer):
+        # Unsloth expects this before importing its vLLM utilities.
+        os.environ.setdefault("UNSLOTH_VLLM_NO_FLASHINFER", "1")
+    # Mirror the Unsloth GRPO notebook's standby mode.
+    os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+
+
 def _require_rl_vllm_config(
     model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
@@ -490,15 +503,13 @@ class RLJob:
         self._vllm_runtime_enabled: bool | None = None
 
     def _build_model_and_tokenizer(self) -> Any:
-        # Mirror the Unsloth GRPO notebook's standby mode before importing Unsloth.
-        os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
-        from unsloth import FastLanguageModel
-
         model_cfg = self.config.get("model", {})
         lora_cfg = self.config.get("lora", {})
         train_cfg = self.config.get("training", {})
         vllm_cfg = self.config.get("vllm", {})
         _require_rl_vllm_config(model_cfg, vllm_cfg)
+        _configure_rl_unsloth_runtime_env(vllm_cfg)
+        from unsloth import FastLanguageModel
 
         init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
         init_adapter = None
