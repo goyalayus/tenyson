@@ -14,6 +14,7 @@ from tenyson.cloud.modal import (
     _bind_modal_run_remote,
     _build_modal_launcher_command,
     _build_clone_repo_command,
+    _finish_local_failed_run_record,
     _modal_run_remote,
     _normalize_modal_python_version,
     _normalize_git_clone_url,
@@ -519,6 +520,29 @@ class RuntimeDependencyTests(unittest.TestCase):
 
 
 class ModalManagerRunTests(unittest.TestCase):
+    def test_finish_local_failed_run_record_finishes_matching_active_run(self) -> None:
+        fake_run = SimpleNamespace(id="expected-run-id")
+        fake_wandb = SimpleNamespace(finish=lambda: None)
+
+        with patch(
+            "tenyson.cloud.modal.wandb_store.active_run",
+            return_value=fake_run,
+        ), patch(
+            "tenyson.cloud.modal.wandb_store.build_run_id",
+            return_value="expected-run-id",
+        ), patch.dict(sys.modules, {"wandb": fake_wandb}), patch.object(
+            fake_wandb,
+            "finish",
+        ) as finish_mock:
+            _finish_local_failed_run_record(
+                experiment_id="wordle_exp",
+                phase="eval",
+                run_name="eval_baseline_mixed",
+                attempt_token="attempt-123",
+            )
+
+        finish_mock.assert_called_once_with()
+
     def test_run_waits_for_job_result_without_fetching_results_payload(self) -> None:
         manager = ModalManager()
         job = EvalJob(
@@ -728,13 +752,21 @@ class ModalManagerRunTests(unittest.TestCase):
             "tenyson.core.telemetry.record_run_summary"
         ) as record_summary_mock, patch(
             "tenyson.core.telemetry.record_run_result"
-        ) as record_result_mock:
+        ) as record_result_mock, patch(
+            "tenyson.cloud.modal._finish_local_failed_run_record"
+        ) as finish_run_mock:
             result = manager.run(job)
 
         self.assertEqual(result.status, "failed")
         self.assertIn("code -11", str(result.failure_reason))
         self.assertEqual(record_summary_mock.call_count, 1)
         self.assertEqual(record_result_mock.call_count, 1)
+        finish_run_mock.assert_called_once_with(
+            experiment_id="wordle_exp",
+            phase="eval",
+            run_name="eval_baseline_mixed",
+            attempt_token="attempt-123",
+        )
 
 
 if __name__ == "__main__":

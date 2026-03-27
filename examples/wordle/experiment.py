@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import signal
 import sys
+import threading
 
 # src-layout convenience for running this file directly from a fresh checkout.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +19,23 @@ from tenyson.loader import load_task
 from tenyson.reporting.fixed import ExperimentReport
 
 ensure_local_controller_environment(anchor_file=__file__)
+
+_FORCED_STOP_REQUESTED = False
+
+
+def _graceful_shutdown_signal_handler(signum: int, _frame: object) -> None:
+    global _FORCED_STOP_REQUESTED
+    _FORCED_STOP_REQUESTED = True
+    signal_name = signal.Signals(signum).name
+    print(
+        f"[wordle experiment] Received {signal_name}; shutting down cleanly.",
+        flush=True,
+    )
+    raise KeyboardInterrupt
+
+
+def _install_graceful_shutdown_handlers() -> None:
+    signal.signal(signal.SIGTERM, _graceful_shutdown_signal_handler)
 
 
 def _load_example_env(path: Path | None = None) -> dict[str, str]:
@@ -256,7 +275,46 @@ def _rebuild_report_from_telemetry(report: ExperimentReport, task: object) -> No
         )
 
 
+def _best_effort_rebuild_report_from_telemetry(
+    report: ExperimentReport,
+    task: object,
+    *,
+    timeout_seconds: float,
+) -> None:
+    outcome: dict[str, BaseException | None] = {"error": None}
+
+    def _target() -> None:
+        try:
+            _rebuild_report_from_telemetry(report, task)
+        except BaseException as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    worker = threading.Thread(
+        target=_target,
+        daemon=True,
+        name="wordle-report-rebuild",
+    )
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
+        print(
+            "[wordle experiment] Report rebuild timed out during forced stop; keeping the latest local report.",
+            flush=True,
+        )
+        return
+    error = outcome["error"]
+    if isinstance(error, KeyboardInterrupt):
+        print(
+            "[wordle experiment] Report rebuild interrupted; keeping the latest local report.",
+            flush=True,
+        )
+        return
+    if error is not None:
+        raise error
+
+
 def main() -> None:
+    _install_graceful_shutdown_handlers()
     base_dir = Path(__file__).parent
     loaded_env = _load_example_env(base_dir / ".env")
     _configure_smoke_identity(base_dir=base_dir, loaded_env=loaded_env)
@@ -448,9 +506,26 @@ def main() -> None:
         )
     except ExperimentAborted as exc:
         print(exc)
+    except KeyboardInterrupt:
+        print("[wordle experiment] Interrupted.", flush=True)
     finally:
         session.close()
-        _rebuild_report_from_telemetry(report, task)
+        if _FORCED_STOP_REQUESTED:
+            _best_effort_rebuild_report_from_telemetry(
+                report,
+                task,
+                timeout_seconds=5.0,
+            )
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
+        try:
+            _rebuild_report_from_telemetry(report, task)
+        except KeyboardInterrupt:
+            print(
+                "[wordle experiment] Report rebuild interrupted; keeping the latest local report.",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

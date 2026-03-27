@@ -15,6 +15,7 @@ import yaml
 from tenyson.cloud.base import BaseCloudManager, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
+from tenyson.core import wandb_store
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
@@ -52,6 +53,32 @@ def _resolve_modal_python_version(explicit: Any | None = None) -> str:
         # default while still allowing an explicit override.
         return "3.12"
     return f"{major}.{minor}"
+
+
+def _finish_local_failed_run_record(
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+    attempt_token: str | None,
+) -> None:
+    try:
+        current_run = wandb_store.active_run()
+        if current_run is None:
+            return
+        expected_id = wandb_store.build_run_id(
+            experiment_id,
+            phase,
+            run_name,
+            attempt_token=attempt_token,
+        )
+        if getattr(current_run, "id", None) != expected_id:
+            return
+        import wandb
+
+        wandb.finish()
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _drain_subprocess_stream(
@@ -787,6 +814,12 @@ class ModalManager(BaseCloudManager):
                     results_payload=result,
                     job_result_payload=result,
                 )
+                _finish_local_failed_run_record(
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
+                )
                 _red_print(f"[TENYSON] Step failed (Modal): {exc}")
                 return result
 
@@ -830,6 +863,12 @@ class ModalManager(BaseCloudManager):
                     phase=job_type,
                     results_payload=result,
                     job_result_payload=result,
+                )
+                _finish_local_failed_run_record(
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
                 )
                 _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
                 return result

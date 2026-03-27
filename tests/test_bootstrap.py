@@ -1,9 +1,10 @@
 import os
 import runpy
+import signal
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tenyson.bootstrap import (
     ensure_local_controller_environment,
@@ -239,6 +240,221 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(experiment_id, "from_shell")
         self.assertEqual(hf_repo_base, "org/custom-smoke")
         self.assertEqual(report_path, "/tmp/custom-smoke-report.md")
+
+    def test_wordle_experiment_sigterm_handler_raises_keyboardinterrupt(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_sigterm_test__",
+            )
+
+        with self.assertRaises(KeyboardInterrupt):
+            module_globals["_graceful_shutdown_signal_handler"](signal.SIGTERM, None)
+
+    def test_wordle_experiment_main_rebuilds_report_on_keyboardinterrupt(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_interrupt_test__",
+            )
+
+        close_mock = Mock()
+        fake_task = object()
+        fake_report = Mock()
+        fake_branch = Mock()
+        fake_branch.sft.return_value = "fake-sft-stage"
+        fake_branch.run.side_effect = KeyboardInterrupt
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+
+            def create_cloud(self):
+                return object()
+
+            def branch(self, cloud=None):
+                del cloud
+                return fake_branch
+
+            def close(self):
+                close_mock()
+
+        class FakeConfigTemplates:
+            @staticmethod
+            def from_directory(*args, **kwargs):
+                del args, kwargs
+                return object()
+
+        class FakeModalManager:
+            @staticmethod
+            def factory_from_env(**kwargs):
+                del kwargs
+                return lambda: object()
+
+        rebuild_mock = Mock()
+        main_fn = module_globals["main"]
+        main_globals = main_fn.__globals__
+        main_globals["_install_graceful_shutdown_handlers"] = lambda: None
+        main_globals["_load_example_env"] = lambda path=None: {}
+        main_globals["load_task"] = lambda path: fake_task
+        main_globals["ExperimentReport"] = lambda output_path: fake_report
+        main_globals["_wordle_smoke_overrides"] = lambda: {}
+        main_globals["shared_overrides_from_env"] = lambda: None
+        main_globals["ConfigTemplates"] = FakeConfigTemplates
+        main_globals["ModalManager"] = FakeModalManager
+        main_globals["ExperimentSession"] = FakeSession
+        main_globals["_rebuild_report_from_telemetry"] = rebuild_mock
+
+        main_fn()
+
+        close_mock.assert_called_once_with()
+        rebuild_mock.assert_called_once_with(fake_report, fake_task)
+
+    def test_wordle_experiment_main_ignores_keyboardinterrupt_during_report_rebuild(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_rebuild_interrupt_test__",
+            )
+
+        close_mock = Mock()
+        fake_task = object()
+        fake_report = Mock()
+        fake_branch = Mock()
+        fake_branch.sft.return_value = "fake-sft-stage"
+        fake_branch.run.side_effect = KeyboardInterrupt
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+
+            def create_cloud(self):
+                return object()
+
+            def branch(self, cloud=None):
+                del cloud
+                return fake_branch
+
+            def close(self):
+                close_mock()
+
+        class FakeConfigTemplates:
+            @staticmethod
+            def from_directory(*args, **kwargs):
+                del args, kwargs
+                return object()
+
+        class FakeModalManager:
+            @staticmethod
+            def factory_from_env(**kwargs):
+                del kwargs
+                return lambda: object()
+
+        main_fn = module_globals["main"]
+        main_globals = main_fn.__globals__
+        main_globals["_install_graceful_shutdown_handlers"] = lambda: None
+        main_globals["_load_example_env"] = lambda path=None: {}
+        main_globals["load_task"] = lambda path: fake_task
+        main_globals["ExperimentReport"] = lambda output_path: fake_report
+        main_globals["_wordle_smoke_overrides"] = lambda: {}
+        main_globals["shared_overrides_from_env"] = lambda: None
+        main_globals["ConfigTemplates"] = FakeConfigTemplates
+        main_globals["ModalManager"] = FakeModalManager
+        main_globals["ExperimentSession"] = FakeSession
+        main_globals["_rebuild_report_from_telemetry"] = Mock(
+            side_effect=KeyboardInterrupt
+        )
+
+        main_fn()
+
+        close_mock.assert_called_once_with()
+
+    def test_wordle_experiment_main_forces_exit_after_sigterm_shutdown(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_forced_exit_test__",
+            )
+
+        close_mock = Mock()
+        fake_task = object()
+        fake_report = Mock()
+        fake_branch = Mock()
+        fake_branch.sft.return_value = "fake-sft-stage"
+        fake_branch.run.side_effect = KeyboardInterrupt
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+
+            def create_cloud(self):
+                return object()
+
+            def branch(self, cloud=None):
+                del cloud
+                return fake_branch
+
+            def close(self):
+                close_mock()
+
+        class FakeConfigTemplates:
+            @staticmethod
+            def from_directory(*args, **kwargs):
+                del args, kwargs
+                return object()
+
+        class FakeModalManager:
+            @staticmethod
+            def factory_from_env(**kwargs):
+                del kwargs
+                return lambda: object()
+
+        rebuild_mock = Mock()
+        main_fn = module_globals["main"]
+        main_globals = main_fn.__globals__
+        main_globals["_FORCED_STOP_REQUESTED"] = True
+        main_globals["_install_graceful_shutdown_handlers"] = lambda: None
+        main_globals["_load_example_env"] = lambda path=None: {}
+        main_globals["load_task"] = lambda path: fake_task
+        main_globals["ExperimentReport"] = lambda output_path: fake_report
+        main_globals["_wordle_smoke_overrides"] = lambda: {}
+        main_globals["shared_overrides_from_env"] = lambda: None
+        main_globals["ConfigTemplates"] = FakeConfigTemplates
+        main_globals["ModalManager"] = FakeModalManager
+        main_globals["ExperimentSession"] = FakeSession
+        main_globals["_rebuild_report_from_telemetry"] = rebuild_mock
+
+        with patch.object(main_globals["os"], "_exit", side_effect=SystemExit(0)) as exit_mock:
+            with self.assertRaises(SystemExit):
+                main_fn()
+
+        close_mock.assert_called_once_with()
+        rebuild_mock.assert_called_once_with(fake_report, fake_task)
+        exit_mock.assert_called_once_with(0)
 
 
 class SharedOverridesTests(unittest.TestCase):
