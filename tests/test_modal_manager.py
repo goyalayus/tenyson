@@ -423,8 +423,11 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         )
 
         with patch("tenyson.cloud.modal.request_stop", return_value=True) as request_stop_mock, patch(
-            "tenyson.cloud.modal._wait_for_modal_function_call",
-            return_value=None,
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ) as client_mock, patch(
+            "tenyson.core.telemetry.wait_for_run_result",
+            return_value=({}, {"status": "stopped"}),
         ) as wait_mock, patch("tenyson.cloud.modal.subprocess.run") as stop_app_mock:
             manager.close()
 
@@ -436,10 +439,16 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
             attempt_token="attempt-123",
             create_if_missing=True,
         )
+        client_mock.assert_called_once_with(db_url="wandb://demo/tenyson")
         wait_mock.assert_called_once_with(
-            "fc-live",
-            poll_timeout_seconds=5.0,
-            overall_timeout_seconds=90.0,
+            client=client_mock.return_value,
+            experiment_id="wordle_exp",
+            run_id="sft_main",
+            phase="sft",
+            timeout_seconds=90.0,
+            poll_interval_seconds=2.0,
+            attempt_token="attempt-123",
+            include_results_payload=False,
         )
         stop_app_mock.assert_not_called()
         self.assertEqual(manager._snapshot_active_launches(), [])
@@ -459,7 +468,10 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         )
 
         with patch("tenyson.cloud.modal.request_stop", return_value=True), patch(
-            "tenyson.cloud.modal._wait_for_modal_function_call",
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ), patch(
+            "tenyson.core.telemetry.wait_for_run_result",
             side_effect=TimeoutError("still running"),
         ), patch("tenyson.cloud.modal.subprocess.run") as stop_app_mock:
             manager.close()
@@ -598,7 +610,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
             )
 
         self.assertTrue(captured["enable_output_entered"])
-        self.assertEqual(captured["run_kwargs"], {})
+        self.assertEqual(captured["run_kwargs"], {"detach": True})
         self.assertEqual(
             captured["spawn_args"],
             ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),

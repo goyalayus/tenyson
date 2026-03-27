@@ -608,10 +608,20 @@ class ModalManager(BaseCloudManager):
             else:
                 if stop_requested:
                     try:
-                        _wait_for_modal_function_call(
-                            launch.function_call_id,
-                            poll_timeout_seconds=5.0,
-                            overall_timeout_seconds=_MODAL_CLOSE_GRACE_SECONDS,
+                        from tenyson.core.telemetry import (
+                            TelemetryClient,
+                            wait_for_run_result,
+                        )
+
+                        wait_for_run_result(
+                            client=TelemetryClient(db_url=launch.backend_ref),
+                            experiment_id=launch.experiment_id,
+                            run_id=launch.run_name,
+                            phase=launch.phase,
+                            timeout_seconds=_MODAL_CLOSE_GRACE_SECONDS,
+                            poll_interval_seconds=2.0,
+                            attempt_token=launch.attempt_token,
+                            include_results_payload=False,
                         )
                         self._forget_active_launch(launch.app_id)
                         continue
@@ -619,7 +629,7 @@ class ModalManager(BaseCloudManager):
                         pass
                     except Exception as exc:  # noqa: BLE001
                         _red_print(
-                            "[TENYSON] Warning: graceful stop wait failed for "
+                            "[TENYSON] Warning: graceful telemetry wait failed for "
                             f'Modal app "{launch.app_id}" ({launch.run_name}): {exc}'
                         )
 
@@ -724,12 +734,14 @@ class ModalManager(BaseCloudManager):
         function_call_id = None
         app_id = None
         with modal.enable_output():
-            with app.run():
+            # Keep the Modal app alive even if the local launcher process
+            # disconnects while we are still polling the spawned function call.
+            with app.run(detach=True):
                 function_call = run_remote.spawn(job_type, config_payload, task_spec)
                 function_call_id = str(function_call.object_id)
                 app_id = str(app.app_id)
                 print(
-                    "[ModalManager] Spawned Modal app "
+                    "[ModalManager] Spawned detached Modal app "
                     f"{app_id} with function call {function_call_id}.",
                     flush=True,
                 )
