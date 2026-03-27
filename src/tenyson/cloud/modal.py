@@ -163,16 +163,10 @@ def _modal_run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: 
         # any vLLM-related imports.
         os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-        attention_backend = str(
-            os.environ.get("VLLM_ATTENTION_BACKEND", "")
-        ).strip().upper()
-        if not attention_backend or attention_backend == "FLASHINFER":
-            os.environ["VLLM_ATTENTION_BACKEND"] = "TORCH_SDPA"
         print(
             "[ModalManager] Runtime env: "
             f"UNSLOTH_VLLM_NO_FLASHINFER=1 "
-            f"VLLM_USE_FLASHINFER_SAMPLER=0 "
-            f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '')}",
+            f"VLLM_USE_FLASHINFER_SAMPLER=0",
             flush=True,
         )
     config_path = os.path.join(

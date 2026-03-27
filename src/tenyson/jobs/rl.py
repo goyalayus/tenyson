@@ -147,12 +147,8 @@ def _configure_rl_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
         # Unsloth expects this before importing its vLLM utilities.
         os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-        attention_backend = str(
-            os.environ.get("VLLM_ATTENTION_BACKEND", "")
-        ).strip().upper()
-        if not attention_backend or attention_backend == "FLASHINFER":
-            os.environ["VLLM_ATTENTION_BACKEND"] = "TORCH_SDPA"
         _hide_flashinfer_imports()
+        _force_vllm_attention_backend()
     # Mirror the Unsloth GRPO notebook's standby mode.
     os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
 
@@ -172,6 +168,27 @@ def _hide_flashinfer_imports() -> None:
 
     setattr(wrapped, "_tenyson_hides_flashinfer", True)
     importlib.util.find_spec = wrapped  # type: ignore[assignment]
+
+
+def _force_vllm_attention_backend() -> None:
+    try:
+        from vllm.engine.arg_utils import EngineArgs
+    except Exception:  # noqa: BLE001
+        return
+
+    init = EngineArgs.__init__
+    if getattr(init, "_tenyson_forces_flash_attn_backend", False):
+        return
+
+    @functools.wraps(init)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> None:
+        backend = kwargs.get("attention_backend")
+        if backend in (None, "", "FLASHINFER"):
+            kwargs["attention_backend"] = "FLASH_ATTN"
+        init(self, *args, **kwargs)
+
+    setattr(wrapped, "_tenyson_forces_flash_attn_backend", True)
+    EngineArgs.__init__ = wrapped
 
 
 def _require_rl_vllm_config(
