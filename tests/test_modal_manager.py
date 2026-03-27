@@ -134,6 +134,11 @@ class ModalTaskSpecTests(unittest.TestCase):
 
 
 class ModalFunctionOptionsTests(unittest.TestCase):
+    def test_resolve_modal_gpu_request_supports_t4(self) -> None:
+        manager = ModalManager(gpu="T4")
+
+        self.assertEqual(manager._resolve_modal_gpu_request(), "T4")
+
     def test_run_remote_options_do_not_serialize_by_default(self) -> None:
         manager = ModalManager()
 

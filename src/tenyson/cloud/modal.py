@@ -391,6 +391,7 @@ class ModalManager(BaseCloudManager):
     def _resolve_modal_gpu_request(self) -> str:
         gpu_name = str(self.gpu or "").strip().upper()
         gpu_map = {
+            "T4": "T4",
             "A10G": "A10G",
             "A100": "A100-40GB",
             "A100-80GB": "A100-80GB",
