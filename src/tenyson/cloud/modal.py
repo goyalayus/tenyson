@@ -971,6 +971,19 @@ class ModalManager(BaseCloudManager):
             lowered = normalized.lower()
             return any(marker in lowered for marker in crash_markers)
 
+        def _has_active_launch_for_run() -> bool:
+            for launch in self._snapshot_active_launches():
+                if launch.experiment_id != experiment_id:
+                    continue
+                if launch.phase != job_type:
+                    continue
+                if launch.run_name != run_name:
+                    continue
+                if launch.attempt_token != attempt_token:
+                    continue
+                return True
+            return False
+
         def _recover_terminal_result_after_launcher_failure() -> JobResult | None:
             try:
                 _results_payload, job_result_payload = wait_for_run_result(
@@ -990,6 +1003,29 @@ class ModalManager(BaseCloudManager):
                 return JobResult.from_dict(job_result_payload)
             except Exception:  # noqa: BLE001
                 return None
+
+        def _recover_started_run_after_launcher_failure() -> tuple[JobResult | None, bool]:
+            try:
+                job_result_payload = _wait_for_run_start_or_terminal_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    timeout_seconds=min(
+                        float(self.timeout),
+                        _MODAL_TELEMETRY_START_TIMEOUT_SECONDS,
+                    ),
+                    poll_interval_seconds=2.0,
+                    attempt_token=attempt_token,
+                )
+            except Exception:
+                return None, False
+            if job_result_payload is None:
+                return None, True
+            try:
+                return JobResult.from_dict(job_result_payload), False
+            except Exception:  # noqa: BLE001
+                return None, False
 
         def _wait_for_launch_telemetry_signal() -> JobResult | None:
             try:
@@ -1016,6 +1052,7 @@ class ModalManager(BaseCloudManager):
 
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
+            launch_handed_off_to_telemetry = False
             try:
                 self._run_modal_job_via_launcher(
                     job_type=job_type,
@@ -1047,111 +1084,136 @@ class ModalManager(BaseCloudManager):
                             "telemetry result."
                         )
                         return recovered_result
+                    if _has_active_launch_for_run():
+                        recovered_launch_result, launch_handed_off_to_telemetry = (
+                            _recover_started_run_after_launcher_failure()
+                        )
+                        if recovered_launch_result is not None:
+                            self._forget_active_launch_for_run(
+                                experiment_id=experiment_id,
+                                phase=job_type,
+                                run_name=run_name,
+                                attempt_token=attempt_token,
+                            )
+                            _red_print(
+                                "[TENYSON] Modal launcher failed, but telemetry "
+                                "already handed this run off as live. Using "
+                                "telemetry result."
+                            )
+                            return recovered_launch_result
+                        if launch_handed_off_to_telemetry:
+                            _red_print(
+                                "[TENYSON] Modal launcher exited after the detached "
+                                "job had already started. Continuing to track the "
+                                "run via telemetry."
+                            )
 
-                hf_repo_id, hf_revision = _resolve_failed_resume_target()
-                result = JobResult(
-                    run_id=run_name,
-                    status="failed",
-                    total_time_seconds=0.0,
-                    hf_repo_id=hf_repo_id,
-                    hf_revision=hf_revision,
-                    failure_reason=str(exc),
-                    instance_id=None,
-                    spot_interruption=None,
-                    attempt_token=attempt_token,
-                )
-                record_run_summary(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    phase=job_type,
-                    result=result,
-                )
-                record_run_result(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    run_id=run_name,
-                    phase=job_type,
-                    results_payload=result,
-                    job_result_payload=result,
-                )
-                _finish_local_failed_run_record(
-                    experiment_id=experiment_id,
-                    phase=job_type,
-                    run_name=run_name,
-                    attempt_token=attempt_token,
-                )
-                _red_print(f"[TENYSON] Step failed (Modal): {exc}")
-                return result
+                if not launch_handed_off_to_telemetry:
+                    hf_repo_id, hf_revision = _resolve_failed_resume_target()
+                    result = JobResult(
+                        run_id=run_name,
+                        status="failed",
+                        total_time_seconds=0.0,
+                        hf_repo_id=hf_repo_id,
+                        hf_revision=hf_revision,
+                        failure_reason=str(exc),
+                        instance_id=None,
+                        spot_interruption=None,
+                        attempt_token=attempt_token,
+                    )
+                    record_run_summary(
+                        client=telemetry_client,
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        result=result,
+                    )
+                    record_run_result(
+                        client=telemetry_client,
+                        experiment_id=experiment_id,
+                        run_id=run_name,
+                        phase=job_type,
+                        results_payload=result,
+                        job_result_payload=result,
+                    )
+                    _finish_local_failed_run_record(
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        run_name=run_name,
+                        attempt_token=attempt_token,
+                    )
+                    _red_print(f"[TENYSON] Step failed (Modal): {exc}")
+                    return result
 
-            launch_terminal_result = _wait_for_launch_telemetry_signal()
-            if launch_terminal_result is not None:
-                self._forget_active_launch_for_run(
-                    experiment_id=experiment_id,
-                    phase=job_type,
-                    run_name=run_name,
-                    attempt_token=attempt_token,
-                )
-                return launch_terminal_result
+            if not launch_handed_off_to_telemetry:
+                launch_terminal_result = _wait_for_launch_telemetry_signal()
+                if launch_terminal_result is not None:
+                    self._forget_active_launch_for_run(
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        run_name=run_name,
+                        attempt_token=attempt_token,
+                    )
+                    return launch_terminal_result
 
-            live_match_seen = any(
-                live_run.run_id == run_name
-                and live_run.phase == job_type
-                and live_run.attempt_token == attempt_token
-                for live_run in list_live_run_heartbeats(
-                    telemetry_client,
-                    experiment_id=experiment_id,
-                    max_age_seconds=max(
-                        90,
-                        int(_MODAL_TELEMETRY_START_TIMEOUT_SECONDS) + 30,
-                    ),
+                live_match_seen = any(
+                    live_run.run_id == run_name
+                    and live_run.phase == job_type
+                    and live_run.attempt_token == attempt_token
+                    for live_run in list_live_run_heartbeats(
+                        telemetry_client,
+                        experiment_id=experiment_id,
+                        max_age_seconds=max(
+                            90,
+                            int(_MODAL_TELEMETRY_START_TIMEOUT_SECONDS) + 30,
+                        ),
+                    )
                 )
-            )
-            if not live_match_seen and get_run_result(
-                client=telemetry_client,
-                experiment_id=experiment_id,
-                run_id=run_name,
-                phase=job_type,
-                attempt_token=attempt_token,
-                include_results_payload=False,
-            ) is None:
-                failure_reason = (
-                    "Detached Modal job never published a live telemetry heartbeat "
-                    "or terminal result after launch."
-                )
-                hf_repo_id, hf_revision = _resolve_failed_resume_target()
-                result = JobResult(
-                    run_id=run_name,
-                    status="failed",
-                    total_time_seconds=0.0,
-                    hf_repo_id=hf_repo_id,
-                    hf_revision=hf_revision,
-                    failure_reason=failure_reason,
-                    instance_id=None,
-                    spot_interruption=None,
-                    attempt_token=attempt_token,
-                )
-                record_run_summary(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    phase=job_type,
-                    result=result,
-                )
-                record_run_result(
+                if not live_match_seen and get_run_result(
                     client=telemetry_client,
                     experiment_id=experiment_id,
                     run_id=run_name,
                     phase=job_type,
-                    results_payload=result,
-                    job_result_payload=result,
-                )
-                _finish_local_failed_run_record(
-                    experiment_id=experiment_id,
-                    phase=job_type,
-                    run_name=run_name,
                     attempt_token=attempt_token,
-                )
-                _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
-                return result
+                    include_results_payload=False,
+                ) is None:
+                    failure_reason = (
+                        "Detached Modal job never published a live telemetry heartbeat "
+                        "or terminal result after launch."
+                    )
+                    hf_repo_id, hf_revision = _resolve_failed_resume_target()
+                    result = JobResult(
+                        run_id=run_name,
+                        status="failed",
+                        total_time_seconds=0.0,
+                        hf_repo_id=hf_repo_id,
+                        hf_revision=hf_revision,
+                        failure_reason=failure_reason,
+                        instance_id=None,
+                        spot_interruption=None,
+                        attempt_token=attempt_token,
+                    )
+                    record_run_summary(
+                        client=telemetry_client,
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        result=result,
+                    )
+                    record_run_result(
+                        client=telemetry_client,
+                        experiment_id=experiment_id,
+                        run_id=run_name,
+                        phase=job_type,
+                        results_payload=result,
+                        job_result_payload=result,
+                    )
+                    _finish_local_failed_run_record(
+                        experiment_id=experiment_id,
+                        phase=job_type,
+                        run_name=run_name,
+                        attempt_token=attempt_token,
+                    )
+                    _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
+                    return result
 
             try:
                 _results_payload, job_result_payload = wait_for_run_result(

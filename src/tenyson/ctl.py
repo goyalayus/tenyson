@@ -141,9 +141,9 @@ def _cmd_launch(args: argparse.Namespace) -> None:
 
     cwd = os.path.abspath(str(args.cwd or "."))
     launch_time = datetime.now(timezone.utc).isoformat()
-    with open(log_path, "a", encoding="utf-8") as log_handle:
+    with open(log_path, "w", encoding="utf-8") as log_handle:
         log_handle.write(
-            f"\n[tenyson.ctl] Launching controller '{args.name}' at {launch_time}\n"
+            f"[tenyson.ctl] Launching controller '{args.name}' at {launch_time}\n"
         )
         log_handle.flush()
         process = subprocess.Popen(

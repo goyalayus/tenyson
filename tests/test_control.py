@@ -143,6 +143,8 @@ class CtlStopTests(unittest.TestCase):
 class CtlControllerLifecycleTests(unittest.TestCase):
     def test_launch_starts_detached_controller_and_writes_state_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "wordle-controller.log"
+            log_path.write_text("old log line\n", encoding="utf-8")
             args = argparse.Namespace(
                 name="Wordle Controller",
                 controller_dir=tmpdir,
@@ -159,7 +161,6 @@ class CtlControllerLifecycleTests(unittest.TestCase):
                 ctl_module._cmd_launch(args)
 
             pid_path = Path(tmpdir) / "wordle-controller.pid"
-            log_path = Path(tmpdir) / "wordle-controller.log"
             metadata_path = Path(tmpdir) / "wordle-controller.json"
 
             self.assertEqual(pid_path.read_text(encoding="utf-8").strip(), "43210")
@@ -172,6 +173,9 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             self.assertEqual(metadata["cwd"], "/repo")
             self.assertEqual(metadata["log_path"], str(log_path))
             self.assertTrue(log_path.exists())
+            log_contents = log_path.read_text(encoding="utf-8")
+            self.assertIn("[tenyson.ctl] Launching controller 'Wordle Controller'", log_contents)
+            self.assertNotIn("old log line", log_contents)
 
             popen_mock.assert_called_once()
             self.assertEqual(

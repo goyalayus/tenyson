@@ -952,6 +952,85 @@ class ModalManagerRunTests(unittest.TestCase):
         record_summary_mock.assert_not_called()
         record_result_mock.assert_not_called()
 
+    def test_run_hands_off_to_live_telemetry_when_launcher_fails_after_detached_start(self) -> None:
+        manager = ModalManager(timeout=60)
+        manager._remember_active_launch(
+            ActiveModalLaunch(
+                app_id="ap-live",
+                function_call_id="fc-live",
+                backend_ref="wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="eval",
+                run_name="eval_baseline_mixed",
+                attempt_token="attempt-123",
+            )
+        )
+        job = EvalJob(
+            {
+                "telemetry": {
+                    "entity": "ayush",
+                    "project": "wordle",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-123",
+                },
+                "evaluation": {
+                    "run_name": "eval_baseline_mixed",
+                },
+            },
+            task=SimpleNamespace(),
+        )
+
+        with patch.object(
+            manager,
+            "_resolve_local_project_root",
+            return_value="/repo",
+        ), patch.object(
+            manager,
+            "_resolve_task_spec",
+            return_value="examples/wordle/wordle_task.py",
+        ), patch.object(
+            manager,
+            "_run_modal_job_via_launcher",
+            side_effect=RuntimeError("Modal launcher subprocess failed with code 1."),
+        ), patch(
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ), patch(
+            "tenyson.cloud.modal._wait_for_run_start_or_terminal_result",
+            return_value=None,
+        ) as handoff_mock, patch(
+            "tenyson.core.telemetry.wait_for_run_result",
+            side_effect=[
+                TimeoutError("terminal result not written yet"),
+                (
+                    {},
+                    {
+                        "run_id": "eval_baseline_mixed",
+                        "status": "success",
+                        "total_time_seconds": 5.0,
+                        "attempt_token": "attempt-123",
+                    },
+                ),
+            ],
+        ) as wait_mock, patch(
+            "tenyson.core.telemetry.record_run_summary"
+        ) as record_summary_mock, patch(
+            "tenyson.core.telemetry.record_run_result"
+        ) as record_result_mock:
+            result = manager.run(job)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.run_id, "eval_baseline_mixed")
+        self.assertEqual(handoff_mock.call_count, 1)
+        self.assertEqual(wait_mock.call_count, 2)
+        self.assertEqual(wait_mock.call_args_list[0].kwargs["timeout_seconds"], 20)
+        self.assertEqual(wait_mock.call_args_list[0].kwargs["attempt_token"], "attempt-123")
+        self.assertEqual(wait_mock.call_args_list[1].kwargs["timeout_seconds"], 360)
+        self.assertEqual(wait_mock.call_args_list[1].kwargs["attempt_token"], "attempt-123")
+        record_summary_mock.assert_not_called()
+        record_result_mock.assert_not_called()
+        self.assertEqual(manager._snapshot_active_launches(), [])
+
     def test_run_records_failure_when_teardown_crash_has_no_recoverable_result(self) -> None:
         manager = ModalManager()
         job = EvalJob(
