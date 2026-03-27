@@ -383,7 +383,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
 
         def fake_run_subprocess(*args, **kwargs):
             kwargs["on_line"](
-                "[ModalManager] Spawned detached Modal app ap-live "
+                "[ModalManager] Spawned Modal app ap-live "
                 "with function call fc-live."
             )
             raise KeyboardInterrupt
@@ -503,7 +503,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(attempts[0], 0.25)
 
-    def test_run_modal_job_spawns_detached_app_and_waits_on_function_call(self) -> None:
+    def test_run_modal_job_keeps_app_session_open_while_waiting(self) -> None:
         captured: dict[str, object] = {}
 
         class FakeImageBuilder:
@@ -598,7 +598,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
             )
 
         self.assertTrue(captured["enable_output_entered"])
-        self.assertEqual(captured["run_kwargs"], {"detach": True})
+        self.assertEqual(captured["run_kwargs"], {})
         self.assertEqual(
             captured["spawn_args"],
             ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),

@@ -85,7 +85,7 @@ def _finish_local_failed_run_record(
 
 
 _DETACHED_MODAL_APP_RE = re.compile(
-    r"Spawned detached Modal app (?P<app_id>ap-[A-Za-z0-9]+) "
+    r"Spawned (?:detached )?Modal app (?P<app_id>ap-[A-Za-z0-9]+) "
     r"with function call (?P<function_call_id>fc-[A-Za-z0-9]+)\."
 )
 _MODAL_CLOSE_GRACE_SECONDS = 90.0
@@ -724,33 +724,34 @@ class ModalManager(BaseCloudManager):
         function_call_id = None
         app_id = None
         with modal.enable_output():
-            with app.run(detach=True):
+            with app.run():
                 function_call = run_remote.spawn(job_type, config_payload, task_spec)
                 function_call_id = str(function_call.object_id)
                 app_id = str(app.app_id)
                 print(
-                    "[ModalManager] Spawned detached Modal app "
+                    "[ModalManager] Spawned Modal app "
                     f"{app_id} with function call {function_call_id}.",
                     flush=True,
                 )
+                if not function_call_id:
+                    raise RuntimeError(
+                        "Modal job launch did not return a function call id."
+                    )
 
-        if not function_call_id:
-            raise RuntimeError("Modal job launch did not return a function call id.")
-
-        poll_timeout_seconds = min(30.0, max(1.0, float(self.timeout)))
-        overall_timeout_seconds = float(self.timeout) + 300.0
-        try:
-            _wait_for_modal_function_call(
-                function_call_id,
-                poll_timeout_seconds=poll_timeout_seconds,
-                overall_timeout_seconds=overall_timeout_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001
-            app_hint = f" app_id={app_id}." if app_id else ""
-            raise RuntimeError(
-                "Detached Modal function call failed"
-                f"{app_hint} function_call_id={function_call_id}. {exc}"
-            ) from exc
+                poll_timeout_seconds = min(30.0, max(1.0, float(self.timeout)))
+                overall_timeout_seconds = float(self.timeout) + 300.0
+                try:
+                    _wait_for_modal_function_call(
+                        function_call_id,
+                        poll_timeout_seconds=poll_timeout_seconds,
+                        overall_timeout_seconds=overall_timeout_seconds,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    app_hint = f" app_id={app_id}." if app_id else ""
+                    raise RuntimeError(
+                        "Modal function call failed"
+                        f"{app_hint} function_call_id={function_call_id}. {exc}"
+                    ) from exc
 
     def _run_modal_job_via_launcher(
         self,
