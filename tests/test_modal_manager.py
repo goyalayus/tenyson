@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from tenyson.cloud.manager import CloudManager
 from tenyson.cloud.modal import (
+    ActiveModalLaunch,
     ModalManager,
     _bind_modal_run_remote,
     _build_modal_launcher_command,
@@ -299,6 +300,27 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         self.assertIn("stderr-line", stderr_buffer.getvalue())
         self.assertIn("stderr-line", details)
 
+    def test_streaming_helper_emits_on_line_and_terminates_on_interrupt(self) -> None:
+        fake_process = SimpleNamespace(
+            stdout=io.StringIO("first-line\n"),
+            stderr=io.StringIO(""),
+            wait=unittest.mock.Mock(side_effect=KeyboardInterrupt),
+            terminate=unittest.mock.Mock(),
+            kill=unittest.mock.Mock(),
+        )
+        seen_lines: list[str] = []
+
+        with patch("tenyson.cloud.modal.subprocess.Popen", return_value=fake_process):
+            with self.assertRaises(KeyboardInterrupt):
+                _run_subprocess_with_streaming_logs(
+                    [sys.executable, "-c", "print('hi')"],
+                    env=os.environ.copy(),
+                    on_line=seen_lines.append,
+                )
+
+        fake_process.terminate.assert_called_once_with()
+        self.assertEqual(seen_lines, ["first-line"])
+
     def test_modal_launcher_runs_in_repo_subprocess(self) -> None:
         manager = ModalManager(gpu="A100", timeout=7200, serialized=True)
 
@@ -314,6 +336,10 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                 config_payload={"training": {"steps": 4}},
                 task_spec="examples/wordle/wordle_task.py",
                 local_project_root="/repo",
+                backend_ref="wandb://demo/tenyson",
+                experiment_id="wordle_exp",
+                run_name="mixed_rl",
+                attempt_token="attempt-123",
             )
 
         run_subprocess.assert_called_once()
@@ -346,7 +372,105 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                     config_payload={"eval": {"samples": 10}},
                     task_spec="examples/wordle/wordle_task.py",
                     local_project_root="/repo",
+                    backend_ref="wandb://demo/tenyson",
+                    experiment_id="wordle_exp",
+                    run_name="eval_baseline_mixed",
+                    attempt_token="attempt-123",
                 )
+
+    def test_modal_launcher_keeps_active_launch_on_interrupt_and_close_requests_stop(self) -> None:
+        manager = ModalManager()
+
+        def fake_run_subprocess(*args, **kwargs):
+            kwargs["on_line"](
+                "[ModalManager] Spawned detached Modal app ap-live "
+                "with function call fc-live."
+            )
+            raise KeyboardInterrupt
+
+        with patch(
+            "tenyson.cloud.modal._write_temp_config_payload",
+            return_value="/tmp/fake-job.yaml",
+        ), patch(
+            "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
+            side_effect=fake_run_subprocess,
+        ), patch("tenyson.cloud.modal.os.unlink"):
+            with self.assertRaises(KeyboardInterrupt):
+                manager._run_modal_job_via_launcher(
+                    job_type="sft",
+                    config_payload={"training": {"steps": 4}},
+                    task_spec="examples/wordle/wordle_task.py",
+                    local_project_root="/repo",
+                    backend_ref="wandb://demo/tenyson",
+                    experiment_id="wordle_exp",
+                    run_name="sft_main",
+                    attempt_token="attempt-123",
+                )
+
+        self.assertEqual(
+            manager._snapshot_active_launches(),
+            [
+                ActiveModalLaunch(
+                    app_id="ap-live",
+                    function_call_id="fc-live",
+                    backend_ref="wandb://demo/tenyson",
+                    experiment_id="wordle_exp",
+                    phase="sft",
+                    run_name="sft_main",
+                    attempt_token="attempt-123",
+                )
+            ],
+        )
+
+        with patch("tenyson.cloud.modal.request_stop", return_value=True) as request_stop_mock, patch(
+            "tenyson.cloud.modal._wait_for_modal_function_call",
+            return_value=None,
+        ) as wait_mock, patch("tenyson.cloud.modal.subprocess.run") as stop_app_mock:
+            manager.close()
+
+        request_stop_mock.assert_called_once_with(
+            db_url="wandb://demo/tenyson",
+            run_id="sft_main",
+            experiment_id="wordle_exp",
+            phase="sft",
+            attempt_token="attempt-123",
+            create_if_missing=True,
+        )
+        wait_mock.assert_called_once_with(
+            "fc-live",
+            poll_timeout_seconds=5.0,
+            overall_timeout_seconds=90.0,
+        )
+        stop_app_mock.assert_not_called()
+        self.assertEqual(manager._snapshot_active_launches(), [])
+
+    def test_modal_close_hard_stops_app_after_grace_timeout(self) -> None:
+        manager = ModalManager()
+        manager._remember_active_launch(
+            ActiveModalLaunch(
+                app_id="ap-live",
+                function_call_id="fc-live",
+                backend_ref="wandb://demo/tenyson",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="mixed_rl",
+                attempt_token="attempt-123",
+            )
+        )
+
+        with patch("tenyson.cloud.modal.request_stop", return_value=True), patch(
+            "tenyson.cloud.modal._wait_for_modal_function_call",
+            side_effect=TimeoutError("still running"),
+        ), patch("tenyson.cloud.modal.subprocess.run") as stop_app_mock:
+            manager.close()
+
+        stop_app_mock.assert_called_once()
+        stop_cmd = stop_app_mock.call_args.args[0]
+        self.assertEqual(
+            stop_cmd,
+            [sys.executable, "-m", "modal", "app", "stop", "ap-live"],
+        )
+        self.assertEqual(manager._snapshot_active_launches(), [])
 
 
 class ModalDetachedLaunchTests(unittest.TestCase):

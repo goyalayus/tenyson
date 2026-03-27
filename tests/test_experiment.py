@@ -326,6 +326,24 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertIn("status=success", content)
         self.assertIn("wandb=[run](https://wandb.example/run)", content)
 
+    def test_session_close_closes_registered_clouds(self) -> None:
+        close_calls: list[str] = []
+
+        class FakeCloud:
+            def close(self) -> None:
+                close_calls.append("closed")
+
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=FakeCloud,
+        )
+
+        session.create_cloud()
+        session.close()
+
+        self.assertEqual(close_calls, ["closed"])
+
     def test_report_controller_writes_wandb_link_from_telemetry_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             template_path = Path(tmpdir) / "template.md"

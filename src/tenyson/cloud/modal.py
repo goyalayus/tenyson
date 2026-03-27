@@ -1,8 +1,10 @@
+import contextlib
 import importlib
 import inspect
 import os
 from collections import deque
 from dataclasses import dataclass
+import re
 import shlex
 import subprocess
 import sys
@@ -14,6 +16,7 @@ import yaml
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
+from tenyson.core.control import request_stop
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core import wandb_store
 from tenyson.core.run_name import resolve_required_run_name
@@ -81,11 +84,31 @@ def _finish_local_failed_run_record(
         return
 
 
+_DETACHED_MODAL_APP_RE = re.compile(
+    r"Spawned detached Modal app (?P<app_id>ap-[A-Za-z0-9]+) "
+    r"with function call (?P<function_call_id>fc-[A-Za-z0-9]+)\."
+)
+_MODAL_CLOSE_GRACE_SECONDS = 90.0
+_MODAL_APP_STOP_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class ActiveModalLaunch:
+    app_id: str
+    function_call_id: str
+    backend_ref: str
+    experiment_id: str
+    phase: str
+    run_name: str
+    attempt_token: str | None
+
+
 def _drain_subprocess_stream(
     stream: Any,
     *,
     writer: Any,
     recent_lines: deque[str],
+    on_line: Callable[[str], None] | None = None,
 ) -> None:
     if stream is None:
         return
@@ -93,7 +116,10 @@ def _drain_subprocess_stream(
         for line in iter(stream.readline, ""):
             writer.write(line)
             writer.flush()
-            recent_lines.append(line.rstrip("\n"))
+            stripped = line.rstrip("\n")
+            recent_lines.append(stripped)
+            if on_line is not None:
+                on_line(stripped)
     except (OSError, ValueError):
         # The parent can close the pipe after the child exits to avoid hanging
         # forever on inherited file descriptors from grandchildren.
@@ -112,6 +138,7 @@ def _run_subprocess_with_streaming_logs(
     cwd: str | None = None,
     close_fds: bool = True,
     recent_line_limit: int = 200,
+    on_line: Callable[[str], None] | None = None,
 ) -> tuple[int, str]:
     """
     Run a subprocess while forwarding stdout/stderr live and keeping a short tail
@@ -137,6 +164,7 @@ def _run_subprocess_with_streaming_logs(
                 "stream": process.stdout,
                 "writer": sys.stdout,
                 "recent_lines": stdout_tail,
+                "on_line": on_line,
             },
             daemon=True,
         ),
@@ -146,6 +174,7 @@ def _run_subprocess_with_streaming_logs(
                 "stream": process.stderr,
                 "writer": sys.stderr,
                 "recent_lines": stderr_tail,
+                "on_line": on_line,
             },
             daemon=True,
         ),
@@ -153,16 +182,26 @@ def _run_subprocess_with_streaming_logs(
     for worker in workers:
         worker.start()
 
-    returncode = process.wait()
-    for stream in (process.stdout, process.stderr):
-        if stream is None:
-            continue
-        try:
-            stream.close()
-        except Exception:  # noqa: BLE001
-            pass
-    for worker in workers:
-        worker.join(timeout=5.0)
+    try:
+        returncode = process.wait()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            process.terminate()
+        with contextlib.suppress(Exception):
+            process.wait(timeout=5.0)
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise
+    finally:
+        for stream in (process.stdout, process.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        for worker in workers:
+            worker.join(timeout=5.0)
 
     detail_lines = list(stderr_tail) or list(stdout_tail)
     details = "\n".join(detail_lines).strip()
@@ -390,6 +429,8 @@ class ModalManager(BaseCloudManager):
         self.timeout = timeout
         self.serialized = serialized
         self.python_version = _resolve_modal_python_version(python_version)
+        self._active_launches: dict[str, ActiveModalLaunch] = {}
+        self._active_launch_lock = threading.Lock()
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "ModalManager":
@@ -532,6 +573,82 @@ class ModalManager(BaseCloudManager):
         )
         return GitRepoSource(clone_url=clone_url, commit=commit)
 
+    def _remember_active_launch(self, launch: ActiveModalLaunch) -> None:
+        with self._active_launch_lock:
+            self._active_launches[launch.app_id] = launch
+
+    def _forget_active_launch(self, app_id: str | None) -> None:
+        if not app_id:
+            return
+        with self._active_launch_lock:
+            self._active_launches.pop(str(app_id), None)
+
+    def _snapshot_active_launches(self) -> list[ActiveModalLaunch]:
+        with self._active_launch_lock:
+            return list(self._active_launches.values())
+
+    def close(self) -> None:
+        launches = self._snapshot_active_launches()
+        for launch in launches:
+            stop_requested = False
+            try:
+                stop_requested = request_stop(
+                    db_url=launch.backend_ref,
+                    run_id=launch.run_name,
+                    experiment_id=launch.experiment_id,
+                    phase=launch.phase,
+                    attempt_token=launch.attempt_token,
+                    create_if_missing=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _red_print(
+                    "[TENYSON] Warning: failed to request graceful stop for "
+                    f'Modal app "{launch.app_id}" ({launch.run_name}): {exc}'
+                )
+            else:
+                if stop_requested:
+                    try:
+                        _wait_for_modal_function_call(
+                            launch.function_call_id,
+                            poll_timeout_seconds=5.0,
+                            overall_timeout_seconds=_MODAL_CLOSE_GRACE_SECONDS,
+                        )
+                        self._forget_active_launch(launch.app_id)
+                        continue
+                    except TimeoutError:
+                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        _red_print(
+                            "[TENYSON] Warning: graceful stop wait failed for "
+                            f'Modal app "{launch.app_id}" ({launch.run_name}): {exc}'
+                        )
+
+            if not self.auto_terminate:
+                continue
+            try:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "modal",
+                        "app",
+                        "stop",
+                        launch.app_id,
+                    ],
+                    check=False,
+                    timeout=_MODAL_APP_STOP_TIMEOUT_SECONDS,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=os.environ.copy(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                _red_print(
+                    "[TENYSON] Warning: failed to stop detached Modal app "
+                    f'"{launch.app_id}" ({launch.run_name}): {exc}'
+                )
+            finally:
+                self._forget_active_launch(launch.app_id)
+
     def _run_modal_job(
         self,
         *,
@@ -642,10 +759,16 @@ class ModalManager(BaseCloudManager):
         config_payload: Dict[str, Any],
         task_spec: str,
         local_project_root: str,
+        backend_ref: str,
+        experiment_id: str,
+        run_name: str,
+        attempt_token: str | None,
     ) -> None:
         config_path = _write_temp_config_payload(job_type, config_payload)
         returncode = -1
         details = ""
+        active_launch: ActiveModalLaunch | None = None
+        subprocess_finished = False
         try:
             cmd = _build_modal_launcher_command(
                 python_executable=sys.executable,
@@ -666,13 +789,36 @@ class ModalManager(BaseCloudManager):
                 if not existing_pythonpath
                 else os.pathsep.join([src_path, existing_pythonpath])
             )
+
+            def _capture_launch(line: str) -> None:
+                nonlocal active_launch
+                if active_launch is not None:
+                    return
+                match = _DETACHED_MODAL_APP_RE.search(str(line or ""))
+                if match is None:
+                    return
+                active_launch = ActiveModalLaunch(
+                    app_id=match.group("app_id"),
+                    function_call_id=match.group("function_call_id"),
+                    backend_ref=backend_ref,
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
+                )
+                self._remember_active_launch(active_launch)
+
             returncode, details = _run_subprocess_with_streaming_logs(
                 cmd,
                 cwd=None,
                 close_fds=True,
                 env=env,
+                on_line=_capture_launch,
             )
+            subprocess_finished = True
         finally:
+            if subprocess_finished and active_launch is not None:
+                self._forget_active_launch(active_launch.app_id)
             try:
                 os.unlink(config_path)
             except FileNotFoundError:
@@ -772,6 +918,10 @@ class ModalManager(BaseCloudManager):
                     config_payload=job.config,
                     task_spec=task_spec,
                     local_project_root=local_project_root,
+                    backend_ref=backend_ref,
+                    experiment_id=experiment_id,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
                 )
             except Exception as exc:  # noqa: BLE001
                 should_try_recover = (

@@ -596,6 +596,9 @@ class ExperimentSession:
             if resolved_report is not None
             else None
         )
+        self._owned_clouds: list[Any] = []
+        self._owned_cloud_ids: set[int] = set()
+        self._owned_cloud_lock = threading.Lock()
 
     @property
     def aborted(self) -> bool:
@@ -604,10 +607,14 @@ class ExperimentSession:
     def create_cloud(self) -> Any:
         if self.cloud_factory is None:
             raise RuntimeError("This experiment session has no cloud_factory.")
-        return self.cloud_factory()
+        cloud = self.cloud_factory()
+        self._register_cloud(cloud)
+        return cloud
 
     def branch(self, *, cloud: Optional[Any] = None) -> ExperimentBranch:
         self.raise_if_aborted()
+        if cloud is not None:
+            self._register_cloud(cloud)
         return ExperimentBranch(self, cloud=cloud)
 
     def raise_if_aborted(self) -> None:
@@ -615,8 +622,29 @@ class ExperimentSession:
             raise ExperimentAborted(self.abort_message)
 
     def close(self) -> None:
+        with self._owned_cloud_lock:
+            clouds = list(self._owned_clouds)
+        for cloud in clouds:
+            close_method = getattr(cloud, "close", None)
+            if not callable(close_method):
+                continue
+            try:
+                close_method()
+            except Exception as exc:  # noqa: BLE001
+                _red_print(
+                    "[TENYSON] Warning: failed to close cloud manager during "
+                    f"session shutdown: {exc}"
+                )
         if self._report_controller is not None:
             self._report_controller.close()
+
+    def _register_cloud(self, cloud: Any) -> None:
+        cloud_id = id(cloud)
+        with self._owned_cloud_lock:
+            if cloud_id in self._owned_cloud_ids:
+                return
+            self._owned_cloud_ids.add(cloud_id)
+            self._owned_clouds.append(cloud)
 
     def _resolve_recovery_context(self, stage: StageSpec) -> Optional[Tuple[str, str]]:
         recovery_experiment_id = self.recovery_experiment_id
