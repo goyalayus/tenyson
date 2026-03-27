@@ -419,6 +419,12 @@ class ModalManager(BaseCloudManager):
         }
         return gpu_map.get(gpu_name, "A100-40GB")
 
+    def _resolve_runtime_dependency_profile(self) -> str:
+        gpu_name = str(self.gpu or "").strip().upper()
+        if gpu_name == "T4":
+            return "modal_t4_colab_compat"
+        return "default"
+
     def _resolve_local_project_root(self) -> str:
         """
         Resolve the local project root that contains src-layout package files.
@@ -530,7 +536,11 @@ class ModalManager(BaseCloudManager):
         image = (
             modal.Image.debian_slim(python_version=self.python_version)
             .run_commands("apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*")
-            .run_commands(runtime_pip_install_command())
+            .run_commands(
+                runtime_pip_install_command(
+                    profile=self._resolve_runtime_dependency_profile()
+                )
+            )
             .run_commands(
                 _build_clone_repo_command(),
                 env={

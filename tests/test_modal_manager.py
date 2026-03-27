@@ -496,6 +496,27 @@ class RuntimeDependencyTests(unittest.TestCase):
         self.assertIn("unsloth", command)
         self.assertIn("vllm", command)
 
+    def test_runtime_pip_install_command_t4_profile_uses_colab_compat_stack(self) -> None:
+        command = runtime_pip_install_command(profile="modal_t4_colab_compat")
+        self.assertIn("uv pip install --system", command)
+        self.assertIn("vllm==0.9.2", command)
+        self.assertIn("triton==3.2.0", command)
+        self.assertIn("python3 -m pip uninstall -y", command)
+
+    def test_runtime_pip_install_command_rejects_unknown_profile(self) -> None:
+        with self.assertRaises(ValueError):
+            runtime_pip_install_command(profile="unknown-profile")
+
+    def test_modal_manager_resolves_t4_runtime_profile(self) -> None:
+        self.assertEqual(
+            ModalManager(gpu="T4")._resolve_runtime_dependency_profile(),
+            "modal_t4_colab_compat",
+        )
+        self.assertEqual(
+            ModalManager(gpu="A100")._resolve_runtime_dependency_profile(),
+            "default",
+        )
+
 
 class ModalManagerRunTests(unittest.TestCase):
     def test_run_waits_for_job_result_without_fetching_results_payload(self) -> None:
