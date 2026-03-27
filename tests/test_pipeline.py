@@ -82,7 +82,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(action, "resume")
         self.assertEqual(config["training"]["resume_from_checkpoint"], "repo:rev")
 
-    def test_prompt_failure_action_empty_stdin_defaults_to_abort(self) -> None:
+    def test_prompt_failure_action_empty_stdin_waits_for_retry(self) -> None:
         config = {"training": {"resume_from_checkpoint": "repo:old"}}
         last_result = JobResult(
             run_id="wordle_rl_main",
@@ -92,11 +92,21 @@ class PipelineTests(unittest.TestCase):
             hf_revision="rev",
         )
 
-        with patch.object(sys, "stdin", io.StringIO("")), patch.object(
+        class SequencedStdin:
+            def __init__(self) -> None:
+                self._values = ["", "restart\n"]
+
+            def readline(self) -> str:
+                if self._values:
+                    return self._values.pop(0)
+                return "restart\n"
+
+        stderr = io.StringIO()
+        with patch.object(sys, "stdin", SequencedStdin()), patch.object(
             sys,
             "stderr",
-            io.StringIO(),
-        ):
+            stderr,
+        ), patch.object(pipeline_module.time, "sleep") as sleep_mock:
             action = pipeline_module._prompt_failure_action(
                 step_label="rl_main",
                 config=config,
@@ -105,8 +115,12 @@ class PipelineTests(unittest.TestCase):
                 last_result=last_result,
             )
 
-        self.assertEqual(action, "abort")
-        self.assertEqual(config["training"]["resume_from_checkpoint"], "repo:old")
+        self.assertEqual(action, "restart")
+        self.assertNotIn("resume_from_checkpoint", config["training"])
+        sleep_mock.assert_called_once_with(
+            pipeline_module._FAILURE_PROMPT_NO_INPUT_WAIT_SECONDS
+        )
+        self.assertIn("No operator input available", stderr.getvalue())
 
     def test_prompt_failure_action_continue_accepts_stopped_checkpoint(self) -> None:
         config = {"training": {"resume_from_checkpoint": "repo:old"}}

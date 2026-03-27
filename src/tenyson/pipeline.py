@@ -6,6 +6,7 @@ or abort.
 
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -29,6 +30,7 @@ PipelineStep = Union[StepTuple, ParallelStage]
 
 
 _FAILURE_PROMPT_LOCK = threading.Lock()
+_FAILURE_PROMPT_NO_INPUT_WAIT_SECONDS = 5.0
 
 
 def _normalize_on_failure_policy(on_failure: Optional[str]) -> str:
@@ -178,11 +180,22 @@ def _prompt_failure_action(
             sys.stderr.write(f"Choice ({'/'.join(choices)}): ")
             sys.stderr.flush()
             try:
-                choice = sys.stdin.readline().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                choice = "abort"
+                raw_choice = sys.stdin.readline()
+            except EOFError:
+                raw_choice = ""
+            except KeyboardInterrupt:
+                return "abort"
+            if raw_choice == "":
+                sys.stderr.write(
+                    "  No operator input available. Waiting 5s before retrying.\n"
+                )
+                sys.stderr.flush()
+                time.sleep(_FAILURE_PROMPT_NO_INPUT_WAIT_SECONDS)
+                continue
+            choice = raw_choice.strip().lower()
             if not choice:
-                choice = "abort"
+                sys.stderr.write("  Empty choice.\n")
+                continue
             if choice == "abort":
                 return "abort"
             if choice == "restart":
