@@ -396,6 +396,10 @@ class WandBStoreTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(fake_wandb.last_runs_call["filters"], {"group": "wordle_exp"})
+        self.assertEqual(fake_wandb.last_runs_call["order"], "-created_at")
+        self.assertEqual(fake_wandb.last_runs_call["per_page"], 200)
+        self.assertEqual(fake_wandb.last_runs_call["lazy"], True)
 
     def test_fetch_run_result_prefers_latest_completed_attempt_over_newer_active_one(self) -> None:
         completed = FakeRun(

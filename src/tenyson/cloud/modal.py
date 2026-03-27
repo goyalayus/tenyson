@@ -1212,43 +1212,69 @@ class ModalManager(BaseCloudManager):
                     )
                     return launch_terminal_result
 
-                live_match_seen = any(
-                    live_run.run_id == run_name
-                    and live_run.phase == job_type
-                    and live_run.attempt_token == attempt_token
-                    and (
-                        launch_started_at is None
-                        or (
-                            (
-                                getattr(live_run, "updated_at", None)
-                                or getattr(live_run, "created_at", None)
+                live_match_seen = False
+                terminal_result_seen = False
+                launch_status_check_failed = False
+                try:
+                    live_match_seen = any(
+                        live_run.run_id == run_name
+                        and live_run.phase == job_type
+                        and live_run.attempt_token == attempt_token
+                        and (
+                            launch_started_at is None
+                            or (
+                                (
+                                    getattr(live_run, "updated_at", None)
+                                    or getattr(live_run, "created_at", None)
+                                )
+                                is not None
+                                and (
+                                    getattr(live_run, "updated_at", None)
+                                    or getattr(live_run, "created_at", None)
+                                )
+                                >= launch_started_at
                             )
-                            is not None
-                            and (
-                                getattr(live_run, "updated_at", None)
-                                or getattr(live_run, "created_at", None)
-                            )
-                            >= launch_started_at
+                        )
+                        for live_run in list_live_run_heartbeats(
+                            telemetry_client,
+                            experiment_id=experiment_id,
+                            max_age_seconds=max(
+                                90,
+                                int(_MODAL_TELEMETRY_START_TIMEOUT_SECONDS) + 30,
+                            ),
                         )
                     )
-                    for live_run in list_live_run_heartbeats(
-                        telemetry_client,
-                        experiment_id=experiment_id,
-                        max_age_seconds=max(
-                            90,
-                            int(_MODAL_TELEMETRY_START_TIMEOUT_SECONDS) + 30,
-                        ),
+                except Exception as exc:  # noqa: BLE001
+                    launch_status_check_failed = True
+                    _red_print(
+                        "[TENYSON] Warning: failed to confirm detached Modal launch "
+                        f"heartbeat after startup wait: {exc}"
                     )
-                )
-                if not live_match_seen and get_run_result(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    run_id=run_name,
-                    phase=job_type,
-                    attempt_token=attempt_token,
-                    min_attempt_updated_at=launch_started_at,
-                    include_results_payload=False,
-                ) is None:
+                if not live_match_seen:
+                    try:
+                        terminal_result_seen = (
+                            get_run_result(
+                                client=telemetry_client,
+                                experiment_id=experiment_id,
+                                run_id=run_name,
+                                phase=job_type,
+                                attempt_token=attempt_token,
+                                min_attempt_updated_at=launch_started_at,
+                                include_results_payload=False,
+                            )
+                            is not None
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        launch_status_check_failed = True
+                        _red_print(
+                            "[TENYSON] Warning: failed to confirm detached Modal "
+                            f"launch terminal result after startup wait: {exc}"
+                        )
+                if (
+                    not live_match_seen
+                    and not terminal_result_seen
+                    and not launch_status_check_failed
+                ):
                     failure_reason = (
                         "Detached Modal job never published a live telemetry heartbeat "
                         "or terminal result after launch."

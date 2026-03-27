@@ -216,7 +216,10 @@ class ExperimentReport:
                 if str(run_name).strip()
             }
 
-        runs = _project_runs_for_backend(resolved_backend_ref)
+        runs = _project_runs_for_backend(
+            resolved_backend_ref,
+            experiment_id=resolved_experiment_id,
+        )
         candidates_by_key: Dict[tuple[str, str], list[_TelemetryStageCandidate]] = {}
         for run in runs:
             candidate = _candidate_from_run(
@@ -536,11 +539,20 @@ class ExperimentReport:
         return str(value)
 
 
-def _project_runs_for_backend(backend_ref: str) -> list[Any]:
+def _project_runs_for_backend(
+    backend_ref: str,
+    *,
+    experiment_id: str,
+) -> list[Any]:
     target = wandb_store.parse_backend_ref(backend_ref)
-
     api = wandb_store._wandb_api()
-    return list(api.runs(path=f"{target.entity}/{target.project}"))
+    return list(
+        wandb_store._query_experiment_runs(
+            api,
+            target,
+            experiment_id=experiment_id,
+        )
+    )
 
 
 def _candidate_from_run(

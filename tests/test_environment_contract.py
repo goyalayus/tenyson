@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import tenyson.reporting.fixed as fixed_module
 from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
 from tenyson.jobs.result import JobResult
 from tenyson.loader import load_task
@@ -73,6 +74,36 @@ class EnvironmentContractTests(unittest.TestCase):
 
 
 class ExperimentReportTests(unittest.TestCase):
+    def test_fixed_report_rebuild_queries_only_matching_experiment_group(self) -> None:
+        calls: dict[str, object] = {}
+
+        class _FakeApi:
+            def runs(self, path, filters=None, order=None, per_page=None, lazy=None):
+                calls["path"] = path
+                calls["filters"] = filters
+                calls["order"] = order
+                calls["per_page"] = per_page
+                calls["lazy"] = lazy
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            fixed_module.wandb_store,
+            "_wandb_api",
+            return_value=_FakeApi(),
+        ):
+            report = ExperimentReport(output_path=Path(tmpdir) / "final_report.md")
+            rebuilt = report.rebuild_from_telemetry(
+                backend_ref="wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+            )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(calls["path"], "ayush/wordle")
+        self.assertEqual(calls["filters"], {"group": "wordle_exp"})
+        self.assertEqual(calls["order"], "-created_at")
+        self.assertEqual(calls["per_page"], 200)
+        self.assertEqual(calls["lazy"], True)
+
     def test_fixed_report_renders_context_and_stage_details(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             report_path = Path(tmpdir) / "final_report.md"

@@ -618,7 +618,11 @@ def list_live_runs(
     api = _wandb_api()
     now = _utc_now()
     rows: list[dict[str, Any]] = []
-    for run in api.runs(path=f"{target.entity}/{target.project}"):
+    for run in _query_experiment_runs(
+        api,
+        target,
+        experiment_id=experiment_id,
+    ):
         summary_experiment_id = str(
             _summary_get(run, SUMMARY_EXPERIMENT_ID) or getattr(run, "group", "") or ""
         ).strip()
@@ -811,6 +815,21 @@ def _query_matching_runs(
         filters=filters,
         order="-created_at",
         per_page=100,
+        lazy=True,
+    )
+
+
+def _query_experiment_runs(
+    api: Any,
+    target: WandBTarget,
+    *,
+    experiment_id: str,
+) -> Any:
+    return api.runs(
+        path=f"{target.entity}/{target.project}",
+        filters={"group": str(experiment_id)},
+        order="-created_at",
+        per_page=200,
         lazy=True,
     )
 
