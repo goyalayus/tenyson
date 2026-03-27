@@ -445,6 +445,78 @@ class EvalStopTests(unittest.TestCase):
 
 
 
+class RLJobTelemetryStartupTests(unittest.TestCase):
+    def test_rl_run_starts_telemetry_before_model_build(self) -> None:
+        job = RLJob(
+            config={
+                "training": {
+                    "run_name": "rl_smoke",
+                    "hf_repo_base": "goyalayus/rl-smoke",
+                },
+                "telemetry": {
+                    "backend": "wandb",
+                    "entity": "demo",
+                    "project": "tenyson",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-rl",
+                },
+                "vllm": {"enabled": True},
+            },
+            task=SimpleNamespace(),
+        )
+
+        order: list[str] = []
+        fake_client = SimpleNamespace(backend="wandb", db_url="wandb://demo/tenyson")
+
+        def remember(label: str):
+            def wrapped(*args, **kwargs):
+                del args, kwargs
+                order.append(label)
+                return False if label == "begin_run_attempt" else None
+
+            return wrapped
+
+        def fake_build_model_and_tokenizer():
+            self.assertEqual(
+                order,
+                [
+                    "ensure_wandb_telemetry_run",
+                    "begin_run_attempt",
+                    "start_run_heartbeat",
+                ],
+            )
+            raise RuntimeError("stop after startup ordering check")
+
+        with patch.dict(os.environ, {"HF_TOKEN": "hf-token"}, clear=False), patch.object(
+            rl_module, "require_gpu_provider_runtime"
+        ), patch.object(
+            telemetry_module,
+            "resolve_required_telemetry_context",
+            return_value=("wandb://demo/tenyson", "wordle_exp"),
+        ), patch.object(
+            telemetry_module,
+            "TelemetryClient",
+            return_value=fake_client,
+        ), patch.object(
+            telemetry_module,
+            "ensure_wandb_telemetry_run",
+            side_effect=remember("ensure_wandb_telemetry_run"),
+        ), patch.object(
+            telemetry_module,
+            "begin_run_attempt",
+            side_effect=remember("begin_run_attempt"),
+        ), patch.object(
+            telemetry_module,
+            "start_run_heartbeat",
+            side_effect=remember("start_run_heartbeat"),
+        ), patch.object(
+            job,
+            "_build_model_and_tokenizer",
+            side_effect=fake_build_model_and_tokenizer,
+        ), self.assertRaisesRegex(RuntimeError, "startup ordering check"):
+            job.run()
+
+
 class RewardTelemetryCollectorTests(unittest.TestCase):
     def test_build_results_payload_records_weighted_rollouts_for_wandb(self) -> None:
         collector = _RewardTelemetryCollector(

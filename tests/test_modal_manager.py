@@ -1,9 +1,11 @@
 import contextlib
+from datetime import datetime, timedelta, timezone
 import io
 import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -408,20 +410,17 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                     attempt_token="attempt-123",
                 )
 
-        self.assertEqual(
-            manager._snapshot_active_launches(),
-            [
-                ActiveModalLaunch(
-                    app_id="ap-live",
-                    function_call_id="fc-live",
-                    backend_ref="wandb://demo/tenyson",
-                    experiment_id="wordle_exp",
-                    phase="sft",
-                    run_name="sft_main",
-                    attempt_token="attempt-123",
-                )
-            ],
-        )
+        launches = manager._snapshot_active_launches()
+        self.assertEqual(len(launches), 1)
+        launch = launches[0]
+        self.assertEqual(launch.app_id, "ap-live")
+        self.assertEqual(launch.function_call_id, "fc-live")
+        self.assertEqual(launch.backend_ref, "wandb://demo/tenyson")
+        self.assertEqual(launch.experiment_id, "wordle_exp")
+        self.assertEqual(launch.phase, "sft")
+        self.assertEqual(launch.run_name, "sft_main")
+        self.assertEqual(launch.attempt_token, "attempt-123")
+        self.assertIsNotNone(launch.launched_at)
 
         with patch("tenyson.cloud.modal.request_stop", return_value=True) as request_stop_mock, patch(
             "tenyson.core.telemetry.TelemetryClient",
@@ -449,6 +448,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
             timeout_seconds=90.0,
             poll_interval_seconds=2.0,
             attempt_token="attempt-123",
+            min_attempt_updated_at=launch.launched_at,
             include_results_payload=False,
         )
         stop_app_mock.assert_not_called()
@@ -482,20 +482,17 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                 attempt_token="attempt-123",
             )
 
-        self.assertEqual(
-            manager._snapshot_active_launches(),
-            [
-                ActiveModalLaunch(
-                    app_id="ap-live",
-                    function_call_id="fc-live",
-                    backend_ref="wandb://demo/tenyson",
-                    experiment_id="wordle_exp",
-                    phase="eval",
-                    run_name="eval_baseline_mixed",
-                    attempt_token="attempt-123",
-                )
-            ],
-        )
+        launches = manager._snapshot_active_launches()
+        self.assertEqual(len(launches), 1)
+        launch = launches[0]
+        self.assertEqual(launch.app_id, "ap-live")
+        self.assertEqual(launch.function_call_id, "fc-live")
+        self.assertEqual(launch.backend_ref, "wandb://demo/tenyson")
+        self.assertEqual(launch.experiment_id, "wordle_exp")
+        self.assertEqual(launch.phase, "eval")
+        self.assertEqual(launch.run_name, "eval_baseline_mixed")
+        self.assertEqual(launch.attempt_token, "attempt-123")
+        self.assertIsNotNone(launch.launched_at)
 
     def test_modal_close_hard_stops_app_after_grace_timeout(self) -> None:
         manager = ModalManager()
@@ -526,6 +523,50 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
             stop_cmd,
             [sys.executable, "-m", "modal", "app", "stop", "ap-live"],
         )
+        self.assertEqual(manager._snapshot_active_launches(), [])
+
+    def test_modal_close_waits_for_multiple_launches_in_parallel(self) -> None:
+        manager = ModalManager()
+        manager._remember_active_launch(
+            ActiveModalLaunch(
+                app_id="ap-live-1",
+                function_call_id="fc-live-1",
+                backend_ref="wandb://demo/tenyson",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="mixed_rl",
+                attempt_token="attempt-123",
+            )
+        )
+        manager._remember_active_launch(
+            ActiveModalLaunch(
+                app_id="ap-live-2",
+                function_call_id="fc-live-2",
+                backend_ref="wandb://demo/tenyson",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="curr_rl_t2",
+                attempt_token="attempt-456",
+            )
+        )
+
+        barrier = threading.Barrier(2, timeout=1.0)
+
+        def fake_wait_for_run_result(**kwargs):
+            barrier.wait()
+            return {}, {"status": "stopped", "run_id": kwargs["run_id"]}
+
+        with patch("tenyson.cloud.modal.request_stop", return_value=True), patch(
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ), patch(
+            "tenyson.core.telemetry.wait_for_run_result",
+            side_effect=fake_wait_for_run_result,
+        ) as wait_mock, patch("tenyson.cloud.modal.subprocess.run") as stop_app_mock:
+            manager.close()
+
+        self.assertEqual(wait_mock.call_count, 2)
+        stop_app_mock.assert_not_called()
         self.assertEqual(manager._snapshot_active_launches(), [])
 
 
@@ -597,6 +638,50 @@ class ModalDetachedLaunchTests(unittest.TestCase):
                 phase="rl",
                 timeout_seconds=5.0,
                 attempt_token="attempt-123",
+            )
+
+        self.assertIsNone(result)
+
+    def test_wait_for_run_start_or_terminal_result_ignores_stale_live_heartbeat(self) -> None:
+        launch_started_at = datetime.now(timezone.utc)
+        stale_heartbeat = launch_started_at - timedelta(seconds=60)
+        fresh_heartbeat = launch_started_at + timedelta(seconds=1)
+
+        with patch(
+            "tenyson.core.telemetry.get_run_result",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.list_live_run_heartbeats",
+            side_effect=[
+                [
+                    SimpleNamespace(
+                        run_id="mixed_rl",
+                        phase="rl",
+                        attempt_token="attempt-123",
+                        updated_at=stale_heartbeat,
+                        created_at=stale_heartbeat,
+                    )
+                ],
+                [
+                    SimpleNamespace(
+                        run_id="mixed_rl",
+                        phase="rl",
+                        attempt_token="attempt-123",
+                        updated_at=fresh_heartbeat,
+                        created_at=fresh_heartbeat,
+                    )
+                ],
+            ],
+        ):
+            result = _wait_for_run_start_or_terminal_result(
+                client=object(),
+                experiment_id="wordle_exp",
+                run_id="mixed_rl",
+                phase="rl",
+                timeout_seconds=5.0,
+                poll_interval_seconds=0.01,
+                attempt_token="attempt-123",
+                min_attempt_updated_at=launch_started_at,
             )
 
         self.assertIsNone(result)
@@ -813,6 +898,8 @@ class ModalManagerRunTests(unittest.TestCase):
                     run_id="eval_baseline_mixed",
                     phase="eval",
                     attempt_token="attempt-123",
+                    updated_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                    created_at=datetime.now(timezone.utc) + timedelta(seconds=60),
                 )
             ],
         ), patch(
@@ -831,6 +918,7 @@ class ModalManagerRunTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(result.run_id, "eval_baseline_mixed")
         self.assertEqual(wait_mock.call_args.kwargs["timeout_seconds"], 86700)
+        self.assertIsNotNone(wait_mock.call_args.kwargs["min_attempt_updated_at"])
         self.assertEqual(
             wait_mock.call_args.kwargs["include_results_payload"],
             False,
@@ -893,6 +981,7 @@ class ModalManagerRunTests(unittest.TestCase):
         self.assertEqual(result.run_id, "eval_baseline_mixed")
         self.assertEqual(wait_mock.call_count, 1)
         self.assertEqual(wait_mock.call_args.kwargs["timeout_seconds"], 20)
+        self.assertIsNotNone(wait_mock.call_args.kwargs["min_attempt_updated_at"])
         record_summary_mock.assert_not_called()
         record_result_mock.assert_not_called()
 
@@ -949,6 +1038,7 @@ class ModalManagerRunTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(wait_mock.call_count, 1)
         self.assertEqual(wait_mock.call_args.kwargs["attempt_token"], "attempt-123")
+        self.assertIsNotNone(wait_mock.call_args.kwargs["min_attempt_updated_at"])
         record_summary_mock.assert_not_called()
         record_result_mock.assert_not_called()
 
@@ -1025,8 +1115,14 @@ class ModalManagerRunTests(unittest.TestCase):
         self.assertEqual(wait_mock.call_count, 2)
         self.assertEqual(wait_mock.call_args_list[0].kwargs["timeout_seconds"], 20)
         self.assertEqual(wait_mock.call_args_list[0].kwargs["attempt_token"], "attempt-123")
+        self.assertIsNotNone(
+            wait_mock.call_args_list[0].kwargs["min_attempt_updated_at"]
+        )
         self.assertEqual(wait_mock.call_args_list[1].kwargs["timeout_seconds"], 360)
         self.assertEqual(wait_mock.call_args_list[1].kwargs["attempt_token"], "attempt-123")
+        self.assertIsNotNone(
+            wait_mock.call_args_list[1].kwargs["min_attempt_updated_at"]
+        )
         record_summary_mock.assert_not_called()
         record_result_mock.assert_not_called()
         self.assertEqual(manager._snapshot_active_launches(), [])

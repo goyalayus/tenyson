@@ -570,6 +570,7 @@ def get_run_result(
     phase: str,
     *,
     attempt_token: Optional[str] = None,
+    min_attempt_updated_at: Optional[datetime] = None,
     include_results_payload: bool = True,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """
@@ -581,6 +582,7 @@ def get_run_result(
         phase=phase,
         run_name=run_id,
         attempt_token=attempt_token,
+        min_attempt_updated_at=min_attempt_updated_at,
         include_results_payload=include_results_payload,
     )
 
@@ -597,13 +599,13 @@ def get_run_metadata_wandb_url(
     """
     Read the latest WandB URL for a run from run_metadata, if available.
     """
-    _unused = min_attempt_updated_at
     return wandb_store.fetch_run_url(
         client.db_url,
         experiment_id=experiment_id,
         phase=str(phase or ""),
         run_name=run_id,
         attempt_token=attempt_token,
+        min_attempt_updated_at=min_attempt_updated_at,
     )
 
 
@@ -632,6 +634,7 @@ def wait_for_run_result(
     timeout_seconds: int = 120,
     poll_interval_seconds: float = 2.0,
     attempt_token: Optional[str] = None,
+    min_attempt_updated_at: Optional[datetime] = None,
     include_results_payload: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
@@ -645,6 +648,7 @@ def wait_for_run_result(
             run_id=run_id,
             phase=phase,
             attempt_token=attempt_token,
+            min_attempt_updated_at=min_attempt_updated_at,
             include_results_payload=include_results_payload,
         )
         if row is not None:

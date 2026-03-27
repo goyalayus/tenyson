@@ -3,7 +3,9 @@ import importlib
 import inspect
 import os
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import re
 import shlex
 import subprocess
@@ -103,6 +105,7 @@ class ActiveModalLaunch:
     phase: str
     run_name: str
     attempt_token: str | None
+    launched_at: datetime | None = None
 
 
 def _drain_subprocess_stream(
@@ -326,42 +329,67 @@ def _wait_for_run_start_or_terminal_result(
     timeout_seconds: float,
     poll_interval_seconds: float = 2.0,
     attempt_token: str | None = None,
+    min_attempt_updated_at: datetime | None = None,
 ) -> Dict[str, Any] | None:
     from tenyson.core.telemetry import get_run_result, list_live_run_heartbeats
 
     deadline = time.time() + max(1.0, float(timeout_seconds))
     max_age_seconds = max(90, int(timeout_seconds) + 30)
+    last_error: Exception | None = None
     while True:
-        row = get_run_result(
-            client=client,
-            experiment_id=experiment_id,
-            run_id=run_id,
-            phase=phase,
-            attempt_token=attempt_token,
-            include_results_payload=False,
-        )
-        if row is not None:
-            _results_payload, job_result_payload = row
-            del _results_payload
-            return job_result_payload
+        try:
+            row = get_run_result(
+                client=client,
+                experiment_id=experiment_id,
+                run_id=run_id,
+                phase=phase,
+                attempt_token=attempt_token,
+                min_attempt_updated_at=min_attempt_updated_at,
+                include_results_payload=False,
+            )
+            if row is not None:
+                _results_payload, job_result_payload = row
+                del _results_payload
+                return job_result_payload
 
-        for live_run in list_live_run_heartbeats(
-            client,
-            experiment_id=experiment_id,
-            max_age_seconds=max_age_seconds,
-        ):
-            if live_run.run_id != run_id:
-                continue
-            if live_run.phase != phase:
-                continue
-            if live_run.attempt_token != attempt_token:
-                continue
-            return None
+            for live_run in list_live_run_heartbeats(
+                client,
+                experiment_id=experiment_id,
+                max_age_seconds=max_age_seconds,
+            ):
+                if live_run.run_id != run_id:
+                    continue
+                if live_run.phase != phase:
+                    continue
+                if live_run.attempt_token != attempt_token:
+                    continue
+                latest_update = getattr(live_run, "updated_at", None) or getattr(
+                    live_run,
+                    "created_at",
+                    None,
+                )
+                if (
+                    min_attempt_updated_at is not None
+                    and latest_update is not None
+                    and latest_update < min_attempt_updated_at
+                ):
+                    continue
+                if min_attempt_updated_at is not None and latest_update is None:
+                    continue
+                return None
+            last_error = None
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
 
         if time.time() >= deadline:
             break
         time.sleep(max(0.1, float(poll_interval_seconds)))
 
+    if last_error is not None:
+        raise TimeoutError(
+            "Timed out waiting for detached Modal launch telemetry after repeated "
+            f"poll errors: {last_error}"
+        ) from last_error
     raise TimeoutError(
         "Timed out waiting for detached Modal launch to publish a live "
         f"heartbeat or terminal result (experiment_id={experiment_id}, "
@@ -666,6 +694,9 @@ class ModalManager(BaseCloudManager):
 
     def close(self) -> None:
         launches = self._snapshot_active_launches()
+        launches_needing_hard_stop: list[ActiveModalLaunch] = []
+        launches_to_wait_for: list[ActiveModalLaunch] = []
+
         for launch in launches:
             stop_requested = False
             try:
@@ -682,34 +713,54 @@ class ModalManager(BaseCloudManager):
                     "[TENYSON] Warning: failed to request graceful stop for "
                     f'Modal app "{launch.app_id}" ({launch.run_name}): {exc}'
                 )
-            else:
-                if stop_requested:
-                    try:
-                        from tenyson.core.telemetry import (
-                            TelemetryClient,
-                            wait_for_run_result,
-                        )
 
-                        wait_for_run_result(
-                            client=TelemetryClient(db_url=launch.backend_ref),
-                            experiment_id=launch.experiment_id,
-                            run_id=launch.run_name,
-                            phase=launch.phase,
-                            timeout_seconds=_MODAL_CLOSE_GRACE_SECONDS,
-                            poll_interval_seconds=2.0,
-                            attempt_token=launch.attempt_token,
-                            include_results_payload=False,
-                        )
+            if stop_requested:
+                launches_to_wait_for.append(launch)
+                continue
+            launches_needing_hard_stop.append(launch)
+
+        if launches_to_wait_for:
+            from tenyson.core.telemetry import TelemetryClient, wait_for_run_result
+
+            def _await_terminal_result(
+                launch: ActiveModalLaunch,
+            ) -> tuple[ActiveModalLaunch, bool]:
+                try:
+                    wait_for_run_result(
+                        client=TelemetryClient(db_url=launch.backend_ref),
+                        experiment_id=launch.experiment_id,
+                        run_id=launch.run_name,
+                        phase=launch.phase,
+                        timeout_seconds=_MODAL_CLOSE_GRACE_SECONDS,
+                        poll_interval_seconds=2.0,
+                        attempt_token=launch.attempt_token,
+                        min_attempt_updated_at=launch.launched_at,
+                        include_results_payload=False,
+                    )
+                    return launch, True
+                except TimeoutError:
+                    return launch, False
+                except Exception as exc:  # noqa: BLE001
+                    _red_print(
+                        "[TENYSON] Warning: graceful telemetry wait failed for "
+                        f'Modal app "{launch.app_id}" ({launch.run_name}): {exc}'
+                    )
+                    return launch, False
+
+            max_workers = max(1, len(launches_to_wait_for))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_launch = {
+                    executor.submit(_await_terminal_result, launch): launch
+                    for launch in launches_to_wait_for
+                }
+                for future in as_completed(future_to_launch):
+                    launch, stopped_cleanly = future.result()
+                    if stopped_cleanly:
                         self._forget_active_launch(launch.app_id)
                         continue
-                    except TimeoutError:
-                        pass
-                    except Exception as exc:  # noqa: BLE001
-                        _red_print(
-                            "[TENYSON] Warning: graceful telemetry wait failed for "
-                            f'Modal app "{launch.app_id}" ({launch.run_name}): {exc}'
-                        )
+                    launches_needing_hard_stop.append(launch)
 
+        for launch in launches_needing_hard_stop:
             if not self.auto_terminate:
                 continue
             try:
@@ -884,6 +935,7 @@ class ModalManager(BaseCloudManager):
                     phase=job_type,
                     run_name=run_name,
                     attempt_token=attempt_token,
+                    launched_at=datetime.now(timezone.utc),
                 )
                 self._remember_active_launch(active_launch)
 
@@ -942,6 +994,7 @@ class ModalManager(BaseCloudManager):
         run_result_timeout_seconds = int(self.timeout) + int(
             _MODAL_RUN_RESULT_TIMEOUT_BUFFER_SECONDS
         )
+        launch_started_at: datetime | None = None
 
         def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
             if job_type not in ("sft", "rl"):
@@ -994,6 +1047,7 @@ class ModalManager(BaseCloudManager):
                     timeout_seconds=20,
                     poll_interval_seconds=1.0,
                     attempt_token=attempt_token,
+                    min_attempt_updated_at=launch_started_at,
                     include_results_payload=False,
                 )
                 del _results_payload
@@ -1017,6 +1071,7 @@ class ModalManager(BaseCloudManager):
                     ),
                     poll_interval_seconds=2.0,
                     attempt_token=attempt_token,
+                    min_attempt_updated_at=launch_started_at,
                 )
             except Exception:
                 return None, False
@@ -1040,6 +1095,7 @@ class ModalManager(BaseCloudManager):
                     ),
                     poll_interval_seconds=2.0,
                     attempt_token=attempt_token,
+                    min_attempt_updated_at=launch_started_at,
                 )
             except Exception:
                 return None
@@ -1054,6 +1110,7 @@ class ModalManager(BaseCloudManager):
             # Run synchronously; on failure return failed JobResult instead of raising.
             launch_handed_off_to_telemetry = False
             try:
+                launch_started_at = datetime.now(timezone.utc)
                 self._run_modal_job_via_launcher(
                     job_type=job_type,
                     config_payload=job.config,
@@ -1159,6 +1216,21 @@ class ModalManager(BaseCloudManager):
                     live_run.run_id == run_name
                     and live_run.phase == job_type
                     and live_run.attempt_token == attempt_token
+                    and (
+                        launch_started_at is None
+                        or (
+                            (
+                                getattr(live_run, "updated_at", None)
+                                or getattr(live_run, "created_at", None)
+                            )
+                            is not None
+                            and (
+                                getattr(live_run, "updated_at", None)
+                                or getattr(live_run, "created_at", None)
+                            )
+                            >= launch_started_at
+                        )
+                    )
                     for live_run in list_live_run_heartbeats(
                         telemetry_client,
                         experiment_id=experiment_id,
@@ -1174,6 +1246,7 @@ class ModalManager(BaseCloudManager):
                     run_id=run_name,
                     phase=job_type,
                     attempt_token=attempt_token,
+                    min_attempt_updated_at=launch_started_at,
                     include_results_payload=False,
                 ) is None:
                     failure_reason = (
@@ -1224,6 +1297,7 @@ class ModalManager(BaseCloudManager):
                     timeout_seconds=run_result_timeout_seconds,
                     poll_interval_seconds=2.0,
                     attempt_token=attempt_token,
+                    min_attempt_updated_at=launch_started_at,
                     include_results_payload=False,
                 )
                 self._forget_active_launch_for_run(

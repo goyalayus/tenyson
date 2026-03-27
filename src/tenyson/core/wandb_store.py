@@ -385,6 +385,7 @@ def fetch_run_url(
     phase: str,
     run_name: str,
     attempt_token: Optional[str] = None,
+    min_attempt_updated_at: Optional[datetime] = None,
 ) -> Optional[str]:
     try:
         run = fetch_run(
@@ -400,6 +401,10 @@ def fetch_run_url(
         summary_token = _summary_get(run, SUMMARY_ATTEMPT_TOKEN)
         if summary_token and str(summary_token) != str(attempt_token):
             return None
+    if min_attempt_updated_at is not None:
+        latest_update = _run_latest_update_at(run)
+        if latest_update is None or latest_update < min_attempt_updated_at:
+            return None
     return getattr(run, "url", None)
 
 
@@ -410,6 +415,7 @@ def fetch_run_result(
     phase: str,
     run_name: str,
     attempt_token: Optional[str] = None,
+    min_attempt_updated_at: Optional[datetime] = None,
     include_results_payload: bool = True,
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     run = None
@@ -445,6 +451,10 @@ def fetch_run_result(
     summary_token = _summary_get(run, SUMMARY_ATTEMPT_TOKEN)
     if attempt_token and str(summary_token or "") != str(attempt_token):
         return None
+    if min_attempt_updated_at is not None:
+        latest_update = _run_latest_update_at(run)
+        if latest_update is None or latest_update < min_attempt_updated_at:
+            return None
 
     job_result_json = _summary_get(run, SUMMARY_JOB_RESULT_JSON)
     if not job_result_json:
@@ -628,7 +638,8 @@ def list_live_runs(
         if not bool(_summary_get(run, SUMMARY_IS_ACTIVE)):
             continue
         heartbeat_at = _parse_datetime(_summary_get(run, SUMMARY_HEARTBEAT_AT))
-        if heartbeat_at is None:
+        latest_update = _run_latest_update_at(run)
+        if heartbeat_at is None or latest_update is None:
             continue
         age_seconds = (now - heartbeat_at).total_seconds()
         if age_seconds > max(1, int(max_age_seconds)):
@@ -644,7 +655,7 @@ def list_live_runs(
                     _summary_get(run, SUMMARY_ATTEMPT_TOKEN)
                 ),
                 "created_at": _parse_datetime(getattr(run, "created_at", None)),
-                "updated_at": heartbeat_at,
+                "updated_at": latest_update,
             }
         )
     rows.sort(
@@ -737,12 +748,23 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
 
 
 def _run_sort_key(run: Any) -> tuple[float, float]:
+    latest = _run_latest_update_at(run)
     heartbeat = _parse_datetime(_summary_get(run, SUMMARY_HEARTBEAT_AT))
     updated = _parse_datetime(getattr(run, "updated_at", None))
     created = _parse_datetime(getattr(run, "created_at", None))
-    primary = heartbeat or updated or created or datetime.fromtimestamp(0, tz=timezone.utc)
+    primary = latest or datetime.fromtimestamp(0, tz=timezone.utc)
     secondary = updated or created or primary
     return primary.timestamp(), secondary.timestamp()
+
+
+def _run_latest_update_at(run: Any) -> Optional[datetime]:
+    heartbeat = _parse_datetime(_summary_get(run, SUMMARY_HEARTBEAT_AT))
+    updated = _parse_datetime(getattr(run, "updated_at", None))
+    created = _parse_datetime(getattr(run, "created_at", None))
+    candidates = [value for value in (heartbeat, updated, created) if value is not None]
+    if not candidates:
+        return None
+    return max(candidates)
 
 
 def _find_latest_matching_run(

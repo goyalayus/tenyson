@@ -723,11 +723,6 @@ class RLJob:
             )
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
 
-        model, tokenizer = self._build_model_and_tokenizer()
-        effective_vllm_cfg = dict(vllm_cfg)
-        # Import helpers that pull in Transformers only after Unsloth has had a
-        # chance to patch the runtime via model construction above.
-        from tenyson.core.hub_push import ensure_hf_repo
         from tenyson.core.telemetry import (
             start_run_heartbeat,
             begin_run_attempt,
@@ -777,6 +772,12 @@ class RLJob:
                 f"continuing training. {exc}",
                 flush=True,
             )
+
+        model, tokenizer = self._build_model_and_tokenizer()
+        effective_vllm_cfg = dict(vllm_cfg)
+        # Import helpers that pull in Transformers only after Unsloth has had a
+        # chance to patch the runtime via model construction above.
+        from tenyson.core.hub_push import ensure_hf_repo
 
         ensure_hf_repo(push_repo_id)
 
