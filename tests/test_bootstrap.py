@@ -169,6 +169,77 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(experiment_id_after_load, "from_shell")
         self.assertEqual(wandb_entity_after_load, "from_file_entity")
 
+    def test_wordle_smoke_identity_uses_isolated_defaults(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            with patch.dict(
+                os.environ,
+                {
+                    "TENYSON_WORDLE_SMOKE": "true",
+                    "TENYSON_EXPERIMENT_ID": "from_file",
+                    "TENYSON_HF_REPO_BASE": "org/wordle-lora",
+                },
+                clear=True,
+            ):
+                module_globals = runpy.run_path(
+                    str(experiment_path),
+                    run_name="__tenyson_wordle_smoke_default_test__",
+                )
+                module_globals["_configure_smoke_identity"](
+                    base_dir=experiment_path.parent,
+                    loaded_env={
+                        "TENYSON_EXPERIMENT_ID": "from_file",
+                        "TENYSON_HF_REPO_BASE": "org/wordle-lora",
+                    },
+                )
+                experiment_id = os.environ["TENYSON_EXPERIMENT_ID"]
+                hf_repo_base = os.environ["TENYSON_HF_REPO_BASE"]
+                report_path = os.environ["TENYSON_WORDLE_REPORT_PATH"]
+
+        self.assertTrue(experiment_id.startswith("wordle_smoke_"))
+        self.assertNotEqual(experiment_id, "from_file")
+        self.assertEqual(hf_repo_base, "org/wordle-lora-smoke")
+        self.assertTrue(report_path.endswith(f"smoke_reports/{experiment_id}.md"))
+
+    def test_wordle_smoke_identity_preserves_explicit_shell_targets(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            with patch.dict(
+                os.environ,
+                {
+                    "TENYSON_WORDLE_SMOKE": "true",
+                    "TENYSON_EXPERIMENT_ID": "from_shell",
+                    "TENYSON_HF_REPO_BASE": "org/custom-smoke",
+                    "TENYSON_WORDLE_REPORT_PATH": "/tmp/custom-smoke-report.md",
+                },
+                clear=True,
+            ):
+                module_globals = runpy.run_path(
+                    str(experiment_path),
+                    run_name="__tenyson_wordle_smoke_shell_test__",
+                )
+                module_globals["_configure_smoke_identity"](
+                    base_dir=experiment_path.parent,
+                    loaded_env={},
+                )
+                experiment_id = os.environ["TENYSON_EXPERIMENT_ID"]
+                hf_repo_base = os.environ["TENYSON_HF_REPO_BASE"]
+                report_path = os.environ["TENYSON_WORDLE_REPORT_PATH"]
+
+        self.assertEqual(experiment_id, "from_shell")
+        self.assertEqual(hf_repo_base, "org/custom-smoke")
+        self.assertEqual(report_path, "/tmp/custom-smoke-report.md")
+
 
 class SharedOverridesTests(unittest.TestCase):
     def test_shared_overrides_from_env(self) -> None:

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sys
@@ -91,6 +92,76 @@ def _wordle_smoke_overrides() -> dict[str, dict] | None:
             }
         },
     }
+
+
+def _smoke_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _append_hf_repo_suffix(repo_base: str, suffix: str) -> str:
+    text = str(repo_base or "").strip().rstrip("/")
+    if not text:
+        return ""
+
+    namespace = ""
+    repo_name = text
+    if "/" in text:
+        namespace, repo_name = text.split("/", 1)
+
+    suffix_text = f"-{suffix}"
+    if not repo_name.endswith(suffix_text):
+        repo_name = f"{repo_name}{suffix_text}"
+    repo_name = repo_name[:96].rstrip("-")
+    if namespace:
+        return f"{namespace}/{repo_name}"
+    return repo_name
+
+
+def _configure_smoke_identity(*, base_dir: Path, loaded_env: dict[str, str]) -> None:
+    if not _is_truthy(os.getenv("TENYSON_WORDLE_SMOKE", "false")):
+        return
+
+    explicit_smoke_experiment_id = str(
+        os.getenv("TENYSON_WORDLE_SMOKE_EXPERIMENT_ID", "")
+    ).strip()
+    explicit_smoke_repo_base = str(
+        os.getenv("TENYSON_WORDLE_SMOKE_HF_REPO_BASE", "")
+    ).strip()
+    explicit_smoke_report_path = str(
+        os.getenv("TENYSON_WORDLE_SMOKE_REPORT_PATH", "")
+    ).strip()
+
+    experiment_id = str(os.getenv("TENYSON_EXPERIMENT_ID", "")).strip()
+    if explicit_smoke_experiment_id:
+        experiment_id = explicit_smoke_experiment_id
+        os.environ["TENYSON_EXPERIMENT_ID"] = experiment_id
+    elif "TENYSON_EXPERIMENT_ID" in loaded_env or not experiment_id:
+        experiment_id = f"wordle_smoke_{_smoke_timestamp()}"
+        os.environ["TENYSON_EXPERIMENT_ID"] = experiment_id
+
+    hf_repo_base = str(os.getenv("TENYSON_HF_REPO_BASE", "")).strip()
+    if explicit_smoke_repo_base:
+        hf_repo_base = explicit_smoke_repo_base
+        os.environ["TENYSON_HF_REPO_BASE"] = hf_repo_base
+    elif hf_repo_base and "TENYSON_HF_REPO_BASE" in loaded_env:
+        hf_repo_base = _append_hf_repo_suffix(hf_repo_base, "smoke")
+        os.environ["TENYSON_HF_REPO_BASE"] = hf_repo_base
+
+    if explicit_smoke_report_path:
+        os.environ["TENYSON_WORDLE_REPORT_PATH"] = explicit_smoke_report_path
+    elif "TENYSON_WORDLE_REPORT_PATH" in loaded_env or not str(
+        os.getenv("TENYSON_WORDLE_REPORT_PATH", "")
+    ).strip():
+        report_path = base_dir / "smoke_reports" / f"{experiment_id}.md"
+        os.environ["TENYSON_WORDLE_REPORT_PATH"] = str(report_path)
+
+    print(
+        "[wordle experiment] Smoke identity "
+        f"(experiment_id={os.getenv('TENYSON_EXPERIMENT_ID', '')}, "
+        f"hf_repo_base={os.getenv('TENYSON_HF_REPO_BASE', 'n/a')}, "
+        f"report_path={os.getenv('TENYSON_WORDLE_REPORT_PATH', '')}).",
+        flush=True,
+    )
 
 
 def _report_output_path(base_dir: Path) -> Path:
@@ -187,7 +258,8 @@ def _rebuild_report_from_telemetry(report: ExperimentReport, task: object) -> No
 
 def main() -> None:
     base_dir = Path(__file__).parent
-    _load_example_env(base_dir / ".env")
+    loaded_env = _load_example_env(base_dir / ".env")
+    _configure_smoke_identity(base_dir=base_dir, loaded_env=loaded_env)
     task = load_task(str(base_dir / "wordle_task.py"))
     report = ExperimentReport(output_path=_report_output_path(base_dir))
     smoke_overrides = _wordle_smoke_overrides() or {}

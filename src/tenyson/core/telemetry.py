@@ -289,23 +289,41 @@ def begin_run_attempt(
         run_name=run_id,
         attempt_token=attempt_token,
     )
-    cleared_stale_stop = wandb_store.fetch_stop_requested(
-        client.db_url,
-        experiment_id=experiment_id,
-        phase=phase_name or "run",
-        run_name=run_id,
-        attempt_token=attempt_token,
-    )
-    wandb_store.set_stop_requested(
-        client.db_url,
-        experiment_id=experiment_id,
-        phase=phase_name or "run",
-        run_name=run_id,
-        requested=False,
-        when_iso=None,
-        create_if_missing=False,
-        attempt_token=attempt_token,
-    )
+    cleared_stale_stop = False
+    existing_result = None
+    try:
+        _results_payload, existing_result = get_run_result(
+            client,
+            experiment_id=experiment_id,
+            run_id=run_id,
+            phase=phase_name or "run",
+            attempt_token=attempt_token,
+            include_results_payload=False,
+        )
+        del _results_payload
+    except Exception:  # noqa: BLE001
+        existing_result = None
+
+    if existing_result is not None:
+        prior_status = str(existing_result.get("status") or "").strip().lower()
+        if prior_status in {"success", "failed", "stopped", "partial"}:
+            cleared_stale_stop = wandb_store.fetch_stop_requested(
+                client.db_url,
+                experiment_id=experiment_id,
+                phase=phase_name or "run",
+                run_name=run_id,
+                attempt_token=attempt_token,
+            )
+            wandb_store.set_stop_requested(
+                client.db_url,
+                experiment_id=experiment_id,
+                phase=phase_name or "run",
+                run_name=run_id,
+                requested=False,
+                when_iso=None,
+                create_if_missing=False,
+                attempt_token=attempt_token,
+            )
     wandb_store.update_run_summary(
         run,
         {

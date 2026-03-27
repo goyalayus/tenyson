@@ -378,6 +378,13 @@ class WandBAttemptTests(unittest.TestCase):
             "ensure_run",
             return_value=SimpleNamespace(url="https://wandb.example/run"),
         ) as ensure_run_mock, patch.object(
+            telemetry_module,
+            "get_run_result",
+            side_effect=LookupError("no prior result"),
+        ), patch.object(
+            telemetry_module.wandb_store,
+            "set_stop_requested",
+        ) as set_stop_requested_mock, patch.object(
             telemetry_module.wandb_store,
             "update_run_summary",
         ) as update_summary_mock:
@@ -390,6 +397,7 @@ class WandBAttemptTests(unittest.TestCase):
             )
 
         self.assertFalse(cleared)
+        set_stop_requested_mock.assert_not_called()
         summary_values = update_summary_mock.call_args.args[1]
         self.assertEqual(
             summary_values[telemetry_module.wandb_store.SUMMARY_STATUS], "running"
@@ -405,6 +413,82 @@ class WandBAttemptTests(unittest.TestCase):
         self.assertEqual(
             ensure_run_mock.call_args.kwargs["attempt_token"],
             "abc123",
+        )
+
+    def test_begin_run_attempt_preserves_fresh_stop_request_without_prior_result(self) -> None:
+        client = SimpleNamespace(backend="wandb", db_url="wandb://ayush/wordle")
+
+        with patch.object(
+            telemetry_module.wandb_store,
+            "ensure_run",
+            return_value=SimpleNamespace(url="https://wandb.example/run"),
+        ), patch.object(
+            telemetry_module,
+            "get_run_result",
+            side_effect=LookupError("no prior result"),
+        ), patch.object(
+            telemetry_module.wandb_store,
+            "fetch_stop_requested",
+        ) as fetch_stop_requested_mock, patch.object(
+            telemetry_module.wandb_store,
+            "set_stop_requested",
+        ) as set_stop_requested_mock, patch.object(
+            telemetry_module.wandb_store,
+            "update_run_summary",
+        ):
+            cleared = begin_run_attempt(
+                client=client,
+                experiment_id="wordle_exp",
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                attempt_token="fresh-attempt",
+            )
+
+        self.assertFalse(cleared)
+        fetch_stop_requested_mock.assert_not_called()
+        set_stop_requested_mock.assert_not_called()
+
+    def test_begin_run_attempt_clears_stop_for_prior_terminal_attempt(self) -> None:
+        client = SimpleNamespace(backend="wandb", db_url="wandb://ayush/wordle")
+
+        with patch.object(
+            telemetry_module.wandb_store,
+            "ensure_run",
+            return_value=SimpleNamespace(url="https://wandb.example/run"),
+        ), patch.object(
+            telemetry_module,
+            "get_run_result",
+            return_value=({}, {"status": "partial", "run_id": "wordle_rl_mixed"}),
+        ), patch.object(
+            telemetry_module.wandb_store,
+            "fetch_stop_requested",
+            return_value=True,
+        ) as fetch_stop_requested_mock, patch.object(
+            telemetry_module.wandb_store,
+            "set_stop_requested",
+        ) as set_stop_requested_mock, patch.object(
+            telemetry_module.wandb_store,
+            "update_run_summary",
+        ):
+            cleared = begin_run_attempt(
+                client=client,
+                experiment_id="wordle_exp",
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                attempt_token="resume-attempt",
+            )
+
+        self.assertTrue(cleared)
+        fetch_stop_requested_mock.assert_called_once()
+        set_stop_requested_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            requested=False,
+            when_iso=None,
+            create_if_missing=False,
+            attempt_token="resume-attempt",
         )
 
 
