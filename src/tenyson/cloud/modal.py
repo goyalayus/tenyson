@@ -90,7 +90,7 @@ _DETACHED_MODAL_APP_RE = re.compile(
 )
 _MODAL_CLOSE_GRACE_SECONDS = 90.0
 _MODAL_APP_STOP_TIMEOUT_SECONDS = 30.0
-_MODAL_DETACHED_LAUNCH_HEALTHCHECK_SECONDS = 90.0
+_MODAL_TELEMETRY_START_TIMEOUT_SECONDS = 180.0
 _MODAL_RUN_RESULT_TIMEOUT_BUFFER_SECONDS = 300.0
 
 
@@ -315,6 +315,58 @@ def _wait_for_modal_function_call(
             return
         except TimeoutError:
             continue
+
+
+def _wait_for_run_start_or_terminal_result(
+    *,
+    client: Any,
+    experiment_id: str,
+    run_id: str,
+    phase: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 2.0,
+    attempt_token: str | None = None,
+) -> Dict[str, Any] | None:
+    from tenyson.core.telemetry import get_run_result, list_live_run_heartbeats
+
+    deadline = time.time() + max(1.0, float(timeout_seconds))
+    max_age_seconds = max(90, int(timeout_seconds) + 30)
+    while True:
+        row = get_run_result(
+            client=client,
+            experiment_id=experiment_id,
+            run_id=run_id,
+            phase=phase,
+            attempt_token=attempt_token,
+            include_results_payload=False,
+        )
+        if row is not None:
+            _results_payload, job_result_payload = row
+            del _results_payload
+            return job_result_payload
+
+        for live_run in list_live_run_heartbeats(
+            client,
+            experiment_id=experiment_id,
+            max_age_seconds=max_age_seconds,
+        ):
+            if live_run.run_id != run_id:
+                continue
+            if live_run.phase != phase:
+                continue
+            if live_run.attempt_token != attempt_token:
+                continue
+            return None
+
+        if time.time() >= deadline:
+            break
+        time.sleep(max(0.1, float(poll_interval_seconds)))
+
+    raise TimeoutError(
+        "Timed out waiting for detached Modal launch to publish a live "
+        f"heartbeat or terminal result (experiment_id={experiment_id}, "
+        f"run_id={run_id}, phase={phase})."
+    )
 
 
 def _build_modal_launcher_command(
@@ -774,31 +826,11 @@ class ModalManager(BaseCloudManager):
                     raise RuntimeError(
                         "Modal job launch did not return a function call id."
                     )
-
-        launch_healthcheck_seconds = min(
-            float(self.timeout),
-            _MODAL_DETACHED_LAUNCH_HEALTHCHECK_SECONDS,
+        print(
+            "[ModalManager] Detached Modal job launched. Terminal status will "
+            "now be tracked via telemetry.",
+            flush=True,
         )
-        poll_timeout_seconds = min(30.0, max(1.0, launch_healthcheck_seconds))
-        try:
-            _wait_for_modal_function_call(
-                function_call_id,
-                poll_timeout_seconds=poll_timeout_seconds,
-                overall_timeout_seconds=launch_healthcheck_seconds,
-            )
-        except TimeoutError:
-            print(
-                "[ModalManager] Detached Modal job is still running after the "
-                "launch healthcheck. Terminal status will now be tracked via telemetry.",
-                flush=True,
-            )
-            return
-        except Exception as exc:  # noqa: BLE001
-            app_hint = f" app_id={app_id}." if app_id else ""
-            raise RuntimeError(
-                "Modal function call failed"
-                f"{app_hint} function_call_id={function_call_id}. {exc}"
-            ) from exc
 
     def _run_modal_job_via_launcher(
         self,
@@ -880,6 +912,8 @@ class ModalManager(BaseCloudManager):
 
         from tenyson.core.telemetry import (
             TelemetryClient,
+            get_run_result,
+            list_live_run_heartbeats,
             record_run_result,
             record_run_summary,
             resolve_required_telemetry_context,
@@ -957,6 +991,29 @@ class ModalManager(BaseCloudManager):
             except Exception:  # noqa: BLE001
                 return None
 
+        def _wait_for_launch_telemetry_signal() -> JobResult | None:
+            try:
+                job_result_payload = _wait_for_run_start_or_terminal_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    timeout_seconds=min(
+                        float(self.timeout),
+                        _MODAL_TELEMETRY_START_TIMEOUT_SECONDS,
+                    ),
+                    poll_interval_seconds=2.0,
+                    attempt_token=attempt_token,
+                )
+            except Exception:
+                return None
+            if job_result_payload is None:
+                return None
+            try:
+                return JobResult.from_dict(job_result_payload)
+            except Exception:  # noqa: BLE001
+                return None
+
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
             try:
@@ -1024,6 +1081,76 @@ class ModalManager(BaseCloudManager):
                     attempt_token=attempt_token,
                 )
                 _red_print(f"[TENYSON] Step failed (Modal): {exc}")
+                return result
+
+            launch_terminal_result = _wait_for_launch_telemetry_signal()
+            if launch_terminal_result is not None:
+                self._forget_active_launch_for_run(
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
+                )
+                return launch_terminal_result
+
+            live_match_seen = any(
+                live_run.run_id == run_name
+                and live_run.phase == job_type
+                and live_run.attempt_token == attempt_token
+                for live_run in list_live_run_heartbeats(
+                    telemetry_client,
+                    experiment_id=experiment_id,
+                    max_age_seconds=max(
+                        90,
+                        int(_MODAL_TELEMETRY_START_TIMEOUT_SECONDS) + 30,
+                    ),
+                )
+            )
+            if not live_match_seen and get_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
+                attempt_token=attempt_token,
+                include_results_payload=False,
+            ) is None:
+                failure_reason = (
+                    "Detached Modal job never published a live telemetry heartbeat "
+                    "or terminal result after launch."
+                )
+                hf_repo_id, hf_revision = _resolve_failed_resume_target()
+                result = JobResult(
+                    run_id=run_name,
+                    status="failed",
+                    total_time_seconds=0.0,
+                    hf_repo_id=hf_repo_id,
+                    hf_revision=hf_revision,
+                    failure_reason=failure_reason,
+                    instance_id=None,
+                    spot_interruption=None,
+                    attempt_token=attempt_token,
+                )
+                record_run_summary(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    result=result,
+                )
+                record_run_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    results_payload=result,
+                    job_result_payload=result,
+                )
+                _finish_local_failed_run_record(
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
+                )
+                _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
                 return result
 
             try:

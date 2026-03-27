@@ -22,6 +22,7 @@ from tenyson.cloud.modal import (
     _resolve_modal_python_version,
     _run_subprocess_with_streaming_logs,
     _wait_for_modal_function_call,
+    _wait_for_run_start_or_terminal_result,
     _write_temp_config_payload,
 )
 from tenyson.cloud.runtime_deps import REMOTE_RUNTIME_PACKAGES, runtime_pip_install_command
@@ -558,7 +559,49 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(attempts[0], 0.25)
 
-    def test_run_modal_job_keeps_app_session_open_while_waiting(self) -> None:
+    def test_wait_for_run_start_or_terminal_result_returns_terminal_result(self) -> None:
+        with patch(
+            "tenyson.core.telemetry.get_run_result",
+            return_value=({}, {"status": "success", "run_id": "mixed_rl"}),
+        ), patch("tenyson.core.telemetry.list_live_run_heartbeats") as live_mock:
+            result = _wait_for_run_start_or_terminal_result(
+                client=object(),
+                experiment_id="wordle_exp",
+                run_id="mixed_rl",
+                phase="rl",
+                timeout_seconds=5.0,
+                attempt_token="attempt-123",
+            )
+
+        self.assertEqual(result, {"status": "success", "run_id": "mixed_rl"})
+        live_mock.assert_not_called()
+
+    def test_wait_for_run_start_or_terminal_result_returns_none_after_live_heartbeat(self) -> None:
+        with patch(
+            "tenyson.core.telemetry.get_run_result",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.list_live_run_heartbeats",
+            return_value=[
+                SimpleNamespace(
+                    run_id="mixed_rl",
+                    phase="rl",
+                    attempt_token="attempt-123",
+                )
+            ],
+        ):
+            result = _wait_for_run_start_or_terminal_result(
+                client=object(),
+                experiment_id="wordle_exp",
+                run_id="mixed_rl",
+                phase="rl",
+                timeout_seconds=5.0,
+                attempt_token="attempt-123",
+            )
+
+        self.assertIsNone(result)
+
+    def test_run_modal_job_returns_after_detached_spawn_without_polling_function_call(self) -> None:
         captured: dict[str, object] = {}
 
         class FakeImageBuilder:
@@ -629,11 +672,6 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         )
         manager = ModalManager(timeout=7200)
 
-        def fake_wait(*args, **kwargs):
-            del args, kwargs
-            captured["wait_saw_run_exit"] = bool(captured.get("run_exited"))
-            raise TimeoutError("still running")
-
         with patch.dict(sys.modules, {"modal": fake_modal}), patch(
             "tenyson.cloud.modal.runtime_pip_install_command",
             return_value="python3 -m pip install unsloth vllm",
@@ -648,10 +686,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
                 clone_url="https://github.com/example/repo.git",
                 commit="abc123",
             ),
-        ), patch(
-            "tenyson.cloud.modal._wait_for_modal_function_call",
-            side_effect=fake_wait,
-        ) as wait_mock:
+        ), patch("tenyson.cloud.modal._wait_for_modal_function_call") as wait_mock:
             manager._run_modal_job(
                 job_type="rl",
                 config_payload={"training": {"steps": 4}},
@@ -661,17 +696,12 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         self.assertTrue(captured["enable_output_entered"])
         self.assertEqual(captured["run_kwargs"], {"detach": True})
         self.assertTrue(captured["run_exited"])
-        self.assertTrue(captured["wait_saw_run_exit"])
         self.assertEqual(
             captured["spawn_args"],
             ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),
         )
         self.assertEqual(captured["python_version"], manager.python_version)
-        wait_mock.assert_called_once_with(
-            "fc-123",
-            poll_timeout_seconds=30.0,
-            overall_timeout_seconds=90.0,
-        )
+        wait_mock.assert_not_called()
 
 
 class RuntimeDependencyTests(unittest.TestCase):
@@ -773,6 +803,18 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch(
             "tenyson.core.telemetry.TelemetryClient",
             return_value=object(),
+        ), patch(
+            "tenyson.core.telemetry.get_run_result",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.list_live_run_heartbeats",
+            return_value=[
+                SimpleNamespace(
+                    run_id="eval_baseline_mixed",
+                    phase="eval",
+                    attempt_token="attempt-123",
+                )
+            ],
         ), patch(
             "tenyson.core.telemetry.wait_for_run_result",
             return_value=(
