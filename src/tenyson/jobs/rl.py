@@ -149,8 +149,12 @@ def _configure_rl_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
         _hide_flashinfer_imports()
         _force_vllm_attention_backend()
-    # Mirror the Unsloth GRPO notebook's standby mode.
-    os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+    standby_mode = vllm_cfg.get("standby_mode")
+    if standby_mode is None:
+        # Mirror the Unsloth GRPO notebook's standby mode unless explicitly
+        # disabled in config for stability experiments.
+        standby_mode = True
+    os.environ["UNSLOTH_VLLM_STANDBY"] = "1" if bool(standby_mode) else "0"
 
 
 def _hide_flashinfer_imports() -> None:

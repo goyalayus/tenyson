@@ -1041,6 +1041,76 @@ class RLFallbackTests(unittest.TestCase):
         self.assertTrue(job._vllm_runtime_enabled)
         normalize_mock.assert_not_called()
 
+    def test_build_model_and_tokenizer_respects_disabled_standby_mode(self) -> None:
+        module_name = "unsloth"
+        original_module = sys.modules.get(module_name)
+        original_standby = os.environ.get("UNSLOTH_VLLM_STANDBY")
+        standby_values = []
+
+        class FakeModel:
+            def train(self):
+                self.mode = "train"
+                return self
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                standby_values.append(os.environ.get("UNSLOTH_VLLM_STANDBY"))
+                raise RuntimeError(
+                    "<function standalone_compile> does not have the attribute 'FakeTensorMode'"
+                )
+
+            @staticmethod
+            def get_peft_model(model, **kwargs):
+                _unused = kwargs
+                return model
+
+        sys.modules[module_name] = SimpleNamespace(FastLanguageModel=FakeFastLanguageModel)
+        try:
+            os.environ.pop("UNSLOTH_VLLM_STANDBY", None)
+            job = RLJob(
+                config={
+                    "training": {"run_name": "rl_test", "seed": 3407},
+                    "model": {
+                        "name": "Qwen/Qwen3-4B",
+                        "load_in_4bit": True,
+                        "fast_inference": True,
+                    },
+                    "lora": {
+                        "r": 16,
+                        "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                        "alpha": 32,
+                        "dropout": 0.0,
+                        "bias": "none",
+                    },
+                    "vllm": {
+                        "enabled": True,
+                        "gpu_memory_utilization": 0.8,
+                        "standby_mode": False,
+                    },
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch(
+                "tenyson.jobs.rl.normalize_tokenizer_special_tokens"
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                "RL requires vLLM and will now abort",
+            ):
+                job._build_model_and_tokenizer()
+        finally:
+            if original_standby is None:
+                os.environ.pop("UNSLOTH_VLLM_STANDBY", None)
+            else:
+                os.environ["UNSLOTH_VLLM_STANDBY"] = original_standby
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
+
+        self.assertEqual(standby_values, ["0"])
+
     def test_destroy_process_group_runs_when_distributed_is_initialized(self) -> None:
         with patch(
             "torch.distributed.is_available",
