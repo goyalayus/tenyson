@@ -16,6 +16,7 @@ import tenyson.core.telemetry as telemetry_module
 from tenyson.core.telemetry import (
     begin_run_attempt,
     LiveRunInfo,
+    ManualStopTelemetryCallback,
     TelemetryClient,
     list_live_run_heartbeats,
 )
@@ -113,6 +114,29 @@ class CtlStopTests(unittest.TestCase):
             run_id="wordle_rl_mixed",
             experiment_id="wordle_exp",
             create_if_missing=False,
+        )
+
+    def test_stop_exits_when_no_active_control_row_exists(self) -> None:
+        args = argparse.Namespace(
+            db_url="wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            run_id="wordle_rl_mixed",
+            max_age_seconds=90,
+        )
+        stderr_buffer = io.StringIO()
+
+        with patch.object(
+            ctl_module,
+            "request_stop",
+            return_value=False,
+        ), contextlib.redirect_stderr(stderr_buffer):
+            with self.assertRaises(SystemExit) as exc_info:
+                ctl_module._cmd_stop(args)
+
+        self.assertEqual(exc_info.exception.code, 1)
+        self.assertIn(
+            "No active run control row found for run_id=wordle_rl_mixed",
+            stderr_buffer.getvalue(),
         )
 
 
@@ -225,6 +249,37 @@ class CtlControllerLifecycleTests(unittest.TestCase):
 
 
 class WandBStopTests(unittest.TestCase):
+    def test_request_stop_with_explicit_phase_and_attempt_token_short_circuits_live_lookup(self) -> None:
+        with patch.object(
+            control_module,
+            "list_live_run_heartbeats",
+            side_effect=AssertionError("live heartbeat lookup should not run"),
+        ), patch.object(
+            control_module.wandb_store,
+            "set_stop_requested",
+            return_value=True,
+        ) as set_stop_requested_mock:
+            stopped = control_module.request_stop(
+                db_url="wandb://ayush/wordle",
+                run_id="wordle_rl_mixed",
+                experiment_id="wordle_exp",
+                phase="rl",
+                create_if_missing=True,
+                attempt_token="attempt-live",
+            )
+
+        self.assertTrue(stopped)
+        set_stop_requested_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            requested=True,
+            when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
+            create_if_missing=True,
+            attempt_token="attempt-live",
+        )
+
     def test_request_stop_with_explicit_phase_short_circuits_live_lookup(self) -> None:
         with patch.object(
             control_module,
@@ -336,6 +391,64 @@ class WandBStopTests(unittest.TestCase):
             when_iso=set_stop_requested_mock.call_args.kwargs["when_iso"],
             create_if_missing=True,
             attempt_token="attempt-live",
+        )
+
+    def test_request_stop_dedupes_duplicate_live_attempt_rows(self) -> None:
+        now = datetime.now(timezone.utc)
+        live_runs = [
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+                attempt_token="attempt-newest",
+            ),
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+                attempt_token="attempt-newest",
+            ),
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+                attempt_token="attempt-older",
+            ),
+        ]
+
+        with patch.object(
+            control_module,
+            "list_live_run_heartbeats",
+            return_value=live_runs,
+        ), patch.object(
+            control_module.wandb_store,
+            "set_stop_requested",
+            return_value=True,
+        ) as set_stop_requested_mock:
+            stopped = control_module.request_stop(
+                db_url="wandb://ayush/wordle",
+                run_id="wordle_rl_mixed",
+                experiment_id="wordle_exp",
+                create_if_missing=False,
+            )
+
+        self.assertTrue(stopped)
+        self.assertEqual(set_stop_requested_mock.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["attempt_token"] for call in set_stop_requested_mock.call_args_list],
+            ["attempt-newest", "attempt-older"],
         )
 
     def test_request_stop_without_phase_does_not_create_guessed_runs(self) -> None:
@@ -490,6 +603,101 @@ class WandBAttemptTests(unittest.TestCase):
             create_if_missing=False,
             attempt_token="resume-attempt",
         )
+
+    def test_begin_run_attempt_keeps_stop_state_for_non_terminal_prior_attempt(self) -> None:
+        client = SimpleNamespace(backend="wandb", db_url="wandb://ayush/wordle")
+
+        with patch.object(
+            telemetry_module.wandb_store,
+            "ensure_run",
+            return_value=SimpleNamespace(url="https://wandb.example/run"),
+        ), patch.object(
+            telemetry_module,
+            "get_run_result",
+            return_value=({}, {"status": "running", "run_id": "wordle_rl_mixed"}),
+        ), patch.object(
+            telemetry_module.wandb_store,
+            "fetch_stop_requested",
+        ) as fetch_stop_requested_mock, patch.object(
+            telemetry_module.wandb_store,
+            "set_stop_requested",
+        ) as set_stop_requested_mock, patch.object(
+            telemetry_module.wandb_store,
+            "update_run_summary",
+        ):
+            cleared = begin_run_attempt(
+                client=client,
+                experiment_id="wordle_exp",
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                attempt_token="active-attempt",
+            )
+
+        self.assertFalse(cleared)
+        fetch_stop_requested_mock.assert_not_called()
+        set_stop_requested_mock.assert_not_called()
+
+
+class ManualStopCallbackTests(unittest.TestCase):
+    def test_manual_stop_callback_sets_stop_and_save_flags(self) -> None:
+        callback = telemetry_module.ManualStopTelemetryCallback(
+            run_id="wordle_rl_mixed",
+            experiment_id="wordle_exp",
+            phase="rl",
+            client=SimpleNamespace(db_url="wandb://ayush/wordle"),
+            attempt_token="attempt-live",
+            check_every_n_steps=2,
+        )
+        state = SimpleNamespace(global_step=4)
+        control = SimpleNamespace(should_training_stop=False, should_save=False)
+
+        with patch.object(
+            telemetry_module,
+            "run_stop_requested",
+            return_value=True,
+        ) as run_stop_requested_mock:
+            returned_control = callback.on_step_end(
+                args=None,
+                state=state,
+                control=control,
+            )
+
+        self.assertIs(returned_control, control)
+        self.assertTrue(control.should_training_stop)
+        self.assertTrue(control.should_save)
+        self.assertTrue(callback.stop_requested)
+        self.assertEqual(callback.stop_step, 4)
+        run_stop_requested_mock.assert_called_once_with(
+            callback.client,
+            experiment_id="wordle_exp",
+            run_id="wordle_rl_mixed",
+            phase="rl",
+            attempt_token="attempt-live",
+        )
+
+
+    def test_callback_ignores_poll_errors_and_keeps_training_running(self) -> None:
+        callback = ManualStopTelemetryCallback(
+            run_id="wordle_sft_main",
+            experiment_id="wordle_exp",
+            phase="sft",
+            client=SimpleNamespace(db_url="wandb://ayush/wordle"),
+        )
+        state = SimpleNamespace(global_step=3)
+        control = SimpleNamespace(should_training_stop=False, should_save=False)
+
+        with patch.object(
+            telemetry_module,
+            "run_stop_requested",
+            side_effect=RuntimeError("wandb unavailable"),
+        ):
+            returned = callback.on_step_end(None, state, control)
+
+        self.assertIs(returned, control)
+        self.assertFalse(callback.stop_requested)
+        self.assertIsNone(callback.stop_step)
+        self.assertFalse(control.should_training_stop)
+        self.assertFalse(control.should_save)
 
 
 if __name__ == "__main__":

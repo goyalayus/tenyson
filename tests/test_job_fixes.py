@@ -6,10 +6,12 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from types import ModuleType
+from unittest.mock import patch
 
 from datasets import Dataset
 import torch
 
+import tenyson.core.telemetry as telemetry_module
 from tenyson.core.telemetry import RLRolloutTracker
 import tenyson.jobs.eval as eval_module
 import tenyson.jobs.rl as rl_module
@@ -295,6 +297,124 @@ class WordleParserTests(unittest.TestCase):
         )
 
         self.assertEqual(resolved, 512)
+
+
+class EvalStopTests(unittest.TestCase):
+    def test_eval_run_stops_early_when_stop_requested(self) -> None:
+        dataset = Dataset.from_list(
+            [
+                {"prompt": "prompt-1"},
+                {"prompt": "prompt-2"},
+            ]
+        )
+
+        class FakeTask:
+            def get_eval_dataset(self, config):
+                return dataset
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                self.last_prompts = list(prompts)
+                self.last_completions = list(completions)
+                self.last_rows = dataset_rows
+                return {"metrics": {"format_accuracy": 1.0}}
+
+        task = FakeTask()
+        job = EvalJob(
+            config={
+                "evaluation": {"run_name": "eval_smoke", "batch_size": 1},
+                "telemetry": {
+                    "backend": "wandb",
+                    "entity": "demo",
+                    "project": "tenyson",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-eval",
+                },
+            },
+            task=task,
+        )
+
+        fake_client = SimpleNamespace(db_url="wandb://demo/tenyson")
+
+        with patch.object(eval_module, "require_gpu_provider_runtime"), patch.object(
+            telemetry_module,
+            "resolve_required_telemetry_context",
+            return_value=("wandb://demo/tenyson", "wordle_exp"),
+        ), patch.object(
+            telemetry_module,
+            "TelemetryClient",
+            return_value=fake_client,
+        ), patch.object(
+            telemetry_module,
+            "ensure_wandb_telemetry_run",
+            return_value=None,
+        ), patch.object(
+            telemetry_module,
+            "begin_run_attempt",
+            return_value=False,
+        ), patch.object(
+            telemetry_module,
+            "start_run_heartbeat",
+        ), patch.object(
+            telemetry_module,
+            "beat_run_heartbeat",
+        ), patch.object(
+            telemetry_module,
+            "run_stop_requested",
+            side_effect=[True],
+        ) as run_stop_requested_mock, patch.object(
+            telemetry_module,
+            "record_run_summary",
+        ) as record_run_summary_mock, patch.object(
+            telemetry_module,
+            "record_run_result",
+        ) as record_run_result_mock, patch.object(
+            job,
+            "_build_model_and_tokenizer",
+            return_value=(object(), object()),
+        ), patch.object(
+            job,
+            "_build_sampling_params",
+            return_value=SimpleNamespace(temperature=0.0),
+        ), patch.object(
+            job,
+            "_extract_prompts",
+            return_value=["prompt-1", "prompt-2"],
+        ), patch.object(
+            job,
+            "_generate_batch",
+            side_effect=[["completion-1"]],
+        ) as generate_batch_mock:
+            result = job.run()
+
+        self.assertEqual(result.status, "partial")
+        self.assertTrue(result.stopped_early)
+        self.assertEqual(result.processed_samples, 1)
+        self.assertEqual(result.expected_samples, 2)
+        self.assertEqual(task.last_prompts, ["prompt-1"])
+        self.assertEqual(task.last_completions, ["completion-1"])
+        self.assertEqual(len(task.last_rows), 1)
+        self.assertEqual(generate_batch_mock.call_count, 1)
+        run_stop_requested_mock.assert_called_once_with(
+            fake_client,
+            experiment_id="wordle_exp",
+            run_id="eval_smoke",
+            phase="eval",
+            attempt_token="attempt-eval",
+        )
+        recorded_summary_result = record_run_summary_mock.call_args.kwargs["result"]
+        recorded_payload = record_run_result_mock.call_args.kwargs["job_result_payload"]
+        self.assertEqual(recorded_summary_result.status, "partial")
+        self.assertTrue(recorded_summary_result.stopped_early)
+        self.assertEqual(recorded_payload.status, "partial")
+        self.assertTrue(recorded_payload.stopped_early)
+
 
 
 class RewardTelemetryCollectorTests(unittest.TestCase):
