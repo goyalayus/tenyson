@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from tenyson.core.execution_policy import require_gpu_provider_runtime
+from tenyson.jobs.result import JobResult
 import tenyson.runner as runner_module
 
 
@@ -28,6 +29,19 @@ class FakeRLJob(_BaseFakeJob):
     instances = []
 
 
+class FakeReturningRLJob(_BaseFakeJob):
+    instances = []
+
+    def run(self):
+        self.run_called = True
+        return JobResult(
+            run_id="rl_test",
+            status="stopped",
+            total_time_seconds=1.0,
+            attempt_token="attempt-rl",
+        )
+
+
 class FakeEvalJob(_BaseFakeJob):
     instances = []
 
@@ -36,6 +50,7 @@ class RunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeSFTJob.instances.clear()
         FakeRLJob.instances.clear()
+        FakeReturningRLJob.instances.clear()
         FakeEvalJob.instances.clear()
 
     def test_resolve_task_uses_file_loader_for_paths(self) -> None:
@@ -149,6 +164,57 @@ class RunnerTests(unittest.TestCase):
         job = FakeEvalJob.instances[0]
         self.assertNotIn("training", job.config)
         self.assertTrue(job.run_called)
+
+    def test_main_fast_exits_after_cloud_rl_job_returns_result(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TENYSON_EXECUTION_MODE": "cloud"},
+            clear=False,
+        ), patch.object(
+            runner_module,
+            "require_gpu_provider_runtime",
+        ), patch.object(
+            runner_module,
+            "load_config",
+            return_value={},
+        ), patch.object(
+            runner_module,
+            "_resolve_task",
+            return_value="task",
+        ), patch.object(
+            runner_module,
+            "SFTJob",
+            FakeSFTJob,
+        ), patch.object(
+            runner_module,
+            "RLJob",
+            FakeReturningRLJob,
+        ), patch.object(
+            runner_module,
+            "EvalJob",
+            FakeEvalJob,
+        ), patch.object(
+            runner_module.os,
+            "_exit",
+            side_effect=SystemExit(0),
+        ) as exit_mock, patch.object(
+            sys,
+            "argv",
+            [
+                "runner",
+                "--job-type",
+                "rl",
+                "--config",
+                "config.yaml",
+                "--task-module",
+                "module.path:Task",
+            ],
+        ), self.assertRaises(SystemExit):
+            runner_module.main()
+
+        self.assertEqual(len(FakeReturningRLJob.instances), 1)
+        self.assertTrue(FakeReturningRLJob.instances[0].run_called)
+        exit_mock.assert_called_once_with(0)
 
 
 class ExecutionPolicyTests(unittest.TestCase):
