@@ -66,6 +66,12 @@ def _configure_eval_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
     if bool(disable_flashinfer):
         # Unsloth expects this before importing its vLLM utilities.
         os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"
+        os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+        attention_backend = str(
+            os.environ.get("VLLM_ATTENTION_BACKEND", "")
+        ).strip().upper()
+        if not attention_backend or attention_backend == "FLASHINFER":
+            os.environ["VLLM_ATTENTION_BACKEND"] = "TORCH_SDPA"
 
 
 class EvalJob:
