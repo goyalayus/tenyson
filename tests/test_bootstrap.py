@@ -447,6 +447,7 @@ class BootstrapTests(unittest.TestCase):
         main_globals["ModalManager"] = FakeModalManager
         main_globals["ExperimentSession"] = FakeSession
         main_globals["_rebuild_report_from_telemetry"] = rebuild_mock
+        main_globals["_wait_for_wordle_live_runs_to_finish"] = lambda report, timeout_seconds: None
 
         with patch.object(main_globals["os"], "_exit", side_effect=SystemExit(0)) as exit_mock:
             with self.assertRaises(SystemExit):
@@ -455,6 +456,40 @@ class BootstrapTests(unittest.TestCase):
         close_mock.assert_called_once_with()
         rebuild_mock.assert_called_once_with(fake_report, fake_task)
         exit_mock.assert_called_once_with(0)
+
+    def test_wordle_forced_stop_wait_exits_when_live_runs_clear(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_wait_live_runs_test__",
+            )
+
+        report = Mock()
+        report.experiment_id = "wordle_exp"
+        report.telemetry_backend_ref = "wandb://demo/tenyson"
+        wait_fn = module_globals["_wait_for_wordle_live_runs_to_finish"]
+
+        live_row = Mock(run_id="sft_main")
+        with patch.dict(
+            module_globals["os"].environ,
+            {"TENYSON_EXPERIMENT_ID": "wordle_exp"},
+            clear=False,
+        ), patch.object(
+            module_globals["time"],
+            "sleep",
+        ) as sleep_mock, patch.dict(
+            wait_fn.__globals__,
+            {"list_live_runs": Mock(side_effect=[[live_row], []])},
+        ):
+            wait_fn(report, timeout_seconds=5.0, poll_interval_seconds=0.1)
+
+        sleep_mock.assert_called_once_with(0.1)
 
 
 class SharedOverridesTests(unittest.TestCase):

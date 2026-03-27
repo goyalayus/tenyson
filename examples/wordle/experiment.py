@@ -4,6 +4,7 @@ from pathlib import Path
 import signal
 import sys
 import threading
+import time
 
 # src-layout convenience for running this file directly from a fresh checkout.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +14,7 @@ if str(_SRC_DIR) not in sys.path:
 
 from tenyson.bootstrap import ensure_local_controller_environment, load_env_file
 from tenyson.cloud.modal import ModalManager
+from tenyson.core.control import list_live_runs
 from tenyson.core.run_config import shared_overrides_from_env
 from tenyson.experiment import ConfigTemplates, ExperimentAborted, ExperimentSession
 from tenyson.loader import load_task
@@ -320,6 +322,53 @@ def _best_effort_rebuild_report_from_telemetry(
         raise error
 
 
+def _wait_for_wordle_live_runs_to_finish(
+    report: ExperimentReport,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 2.0,
+) -> None:
+    experiment_id = str(
+        getattr(report, "experiment_id", None)
+        or os.getenv("TENYSON_EXPERIMENT_ID", "")
+        or ""
+    ).strip()
+    backend_ref = _report_backend_ref(report)
+    if not experiment_id or not backend_ref:
+        return
+
+    tracked_run_ids = set(_canonical_report_stage_order())
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+    max_age_seconds = max(30, int(timeout_seconds) + 30)
+
+    while time.monotonic() < deadline:
+        try:
+            live_rows = list_live_runs(
+                db_url=backend_ref,
+                experiment_id=experiment_id,
+                max_age_seconds=max_age_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[wordle experiment] Warning: failed to poll live runs during "
+                f"forced-stop shutdown: {exc}",
+                flush=True,
+            )
+            return
+
+        tracked_live_rows = [
+            row for row in live_rows if str(row.run_id or "").strip() in tracked_run_ids
+        ]
+        if not tracked_live_rows:
+            return
+        time.sleep(max(0.1, float(poll_interval_seconds)))
+
+    print(
+        "[wordle experiment] Timed out waiting for live runs to finish during forced stop.",
+        flush=True,
+    )
+
+
 def main() -> None:
     _install_graceful_shutdown_handlers()
     base_dir = Path(__file__).parent
@@ -518,6 +567,10 @@ def main() -> None:
     finally:
         session.close()
         if _FORCED_STOP_REQUESTED:
+            _wait_for_wordle_live_runs_to_finish(
+                report,
+                timeout_seconds=60.0,
+            )
             _best_effort_rebuild_report_from_telemetry(
                 report,
                 task,

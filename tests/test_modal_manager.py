@@ -453,6 +453,49 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         stop_app_mock.assert_not_called()
         self.assertEqual(manager._snapshot_active_launches(), [])
 
+    def test_modal_launcher_keeps_active_launch_after_successful_spawn(self) -> None:
+        manager = ModalManager()
+
+        def fake_run_subprocess(*args, **kwargs):
+            kwargs["on_line"](
+                "[ModalManager] Spawned detached Modal app ap-live "
+                "with function call fc-live."
+            )
+            return (0, "")
+
+        with patch(
+            "tenyson.cloud.modal._write_temp_config_payload",
+            return_value="/tmp/fake-job.yaml",
+        ), patch(
+            "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
+            side_effect=fake_run_subprocess,
+        ), patch("tenyson.cloud.modal.os.unlink"):
+            manager._run_modal_job_via_launcher(
+                job_type="eval",
+                config_payload={"evaluation": {"samples": 4}},
+                task_spec="examples/wordle/wordle_task.py",
+                local_project_root="/repo",
+                backend_ref="wandb://demo/tenyson",
+                experiment_id="wordle_exp",
+                run_name="eval_baseline_mixed",
+                attempt_token="attempt-123",
+            )
+
+        self.assertEqual(
+            manager._snapshot_active_launches(),
+            [
+                ActiveModalLaunch(
+                    app_id="ap-live",
+                    function_call_id="fc-live",
+                    backend_ref="wandb://demo/tenyson",
+                    experiment_id="wordle_exp",
+                    phase="eval",
+                    run_name="eval_baseline_mixed",
+                    attempt_token="attempt-123",
+                )
+            ],
+        )
+
     def test_modal_close_hard_stops_app_after_grace_timeout(self) -> None:
         manager = ModalManager()
         manager._remember_active_launch(
@@ -586,6 +629,11 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         )
         manager = ModalManager(timeout=7200)
 
+        def fake_wait(*args, **kwargs):
+            del args, kwargs
+            captured["wait_saw_run_exit"] = bool(captured.get("run_exited"))
+            raise TimeoutError("still running")
+
         with patch.dict(sys.modules, {"modal": fake_modal}), patch(
             "tenyson.cloud.modal.runtime_pip_install_command",
             return_value="python3 -m pip install unsloth vllm",
@@ -601,7 +649,8 @@ class ModalDetachedLaunchTests(unittest.TestCase):
                 commit="abc123",
             ),
         ), patch(
-            "tenyson.cloud.modal._wait_for_modal_function_call"
+            "tenyson.cloud.modal._wait_for_modal_function_call",
+            side_effect=fake_wait,
         ) as wait_mock:
             manager._run_modal_job(
                 job_type="rl",
@@ -611,6 +660,8 @@ class ModalDetachedLaunchTests(unittest.TestCase):
 
         self.assertTrue(captured["enable_output_entered"])
         self.assertEqual(captured["run_kwargs"], {"detach": True})
+        self.assertTrue(captured["run_exited"])
+        self.assertTrue(captured["wait_saw_run_exit"])
         self.assertEqual(
             captured["spawn_args"],
             ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),
@@ -619,7 +670,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         wait_mock.assert_called_once_with(
             "fc-123",
             poll_timeout_seconds=30.0,
-            overall_timeout_seconds=7500.0,
+            overall_timeout_seconds=90.0,
         )
 
 
@@ -681,6 +732,17 @@ class ModalManagerRunTests(unittest.TestCase):
 
     def test_run_waits_for_job_result_without_fetching_results_payload(self) -> None:
         manager = ModalManager()
+        manager._remember_active_launch(
+            ActiveModalLaunch(
+                app_id="ap-live",
+                function_call_id="fc-live",
+                backend_ref="wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="eval",
+                run_name="eval_baseline_mixed",
+                attempt_token="attempt-123",
+            )
+        )
         job = EvalJob(
             {
                 "telemetry": {
@@ -726,10 +788,12 @@ class ModalManagerRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "success")
         self.assertEqual(result.run_id, "eval_baseline_mixed")
+        self.assertEqual(wait_mock.call_args.kwargs["timeout_seconds"], 86700)
         self.assertEqual(
             wait_mock.call_args.kwargs["include_results_payload"],
             False,
         )
+        self.assertEqual(manager._snapshot_active_launches(), [])
 
     def test_run_recovers_terminal_result_after_launcher_teardown_crash(self) -> None:
         manager = ModalManager()

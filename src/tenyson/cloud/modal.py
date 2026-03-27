@@ -90,6 +90,8 @@ _DETACHED_MODAL_APP_RE = re.compile(
 )
 _MODAL_CLOSE_GRACE_SECONDS = 90.0
 _MODAL_APP_STOP_TIMEOUT_SECONDS = 30.0
+_MODAL_DETACHED_LAUNCH_HEALTHCHECK_SECONDS = 90.0
+_MODAL_RUN_RESULT_TIMEOUT_BUFFER_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -587,6 +589,29 @@ class ModalManager(BaseCloudManager):
         with self._active_launch_lock:
             return list(self._active_launches.values())
 
+    def _forget_active_launch_for_run(
+        self,
+        *,
+        experiment_id: str,
+        phase: str,
+        run_name: str,
+        attempt_token: str | None,
+    ) -> None:
+        app_id_to_forget = None
+        with self._active_launch_lock:
+            for app_id, launch in self._active_launches.items():
+                if launch.experiment_id != experiment_id:
+                    continue
+                if launch.phase != phase:
+                    continue
+                if launch.run_name != run_name:
+                    continue
+                if launch.attempt_token != attempt_token:
+                    continue
+                app_id_to_forget = app_id
+                break
+        self._forget_active_launch(app_id_to_forget)
+
     def close(self) -> None:
         launches = self._snapshot_active_launches()
         for launch in launches:
@@ -734,8 +759,8 @@ class ModalManager(BaseCloudManager):
         function_call_id = None
         app_id = None
         with modal.enable_output():
-            # Keep the Modal app alive even if the local launcher process
-            # disconnects while we are still polling the spawned function call.
+            # Launch the worker inside a detached app, then exit the app context
+            # cleanly so the remote job is no longer coupled to local polling.
             with app.run(detach=True):
                 function_call = run_remote.spawn(job_type, config_payload, task_spec)
                 function_call_id = str(function_call.object_id)
@@ -750,20 +775,30 @@ class ModalManager(BaseCloudManager):
                         "Modal job launch did not return a function call id."
                     )
 
-                poll_timeout_seconds = min(30.0, max(1.0, float(self.timeout)))
-                overall_timeout_seconds = float(self.timeout) + 300.0
-                try:
-                    _wait_for_modal_function_call(
-                        function_call_id,
-                        poll_timeout_seconds=poll_timeout_seconds,
-                        overall_timeout_seconds=overall_timeout_seconds,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    app_hint = f" app_id={app_id}." if app_id else ""
-                    raise RuntimeError(
-                        "Modal function call failed"
-                        f"{app_hint} function_call_id={function_call_id}. {exc}"
-                    ) from exc
+        launch_healthcheck_seconds = min(
+            float(self.timeout),
+            _MODAL_DETACHED_LAUNCH_HEALTHCHECK_SECONDS,
+        )
+        poll_timeout_seconds = min(30.0, max(1.0, launch_healthcheck_seconds))
+        try:
+            _wait_for_modal_function_call(
+                function_call_id,
+                poll_timeout_seconds=poll_timeout_seconds,
+                overall_timeout_seconds=launch_healthcheck_seconds,
+            )
+        except TimeoutError:
+            print(
+                "[ModalManager] Detached Modal job is still running after the "
+                "launch healthcheck. Terminal status will now be tracked via telemetry.",
+                flush=True,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            app_hint = f" app_id={app_id}." if app_id else ""
+            raise RuntimeError(
+                "Modal function call failed"
+                f"{app_hint} function_call_id={function_call_id}. {exc}"
+            ) from exc
 
     def _run_modal_job_via_launcher(
         self,
@@ -781,7 +816,6 @@ class ModalManager(BaseCloudManager):
         returncode = -1
         details = ""
         active_launch: ActiveModalLaunch | None = None
-        subprocess_finished = False
         try:
             cmd = _build_modal_launcher_command(
                 python_executable=sys.executable,
@@ -828,10 +862,7 @@ class ModalManager(BaseCloudManager):
                 env=env,
                 on_line=_capture_launch,
             )
-            subprocess_finished = True
         finally:
-            if subprocess_finished and active_launch is not None:
-                self._forget_active_launch(active_launch.app_id)
             try:
                 os.unlink(config_path)
             except FileNotFoundError:
@@ -874,6 +905,9 @@ class ModalManager(BaseCloudManager):
             job.config.get("telemetry", {}).get("attempt_token") or ""
         ).strip() or None
         telemetry_client = TelemetryClient(db_url=backend_ref)
+        run_result_timeout_seconds = int(self.timeout) + int(
+            _MODAL_RUN_RESULT_TIMEOUT_BUFFER_SECONDS
+        )
 
         def _resolve_failed_resume_target() -> tuple[str | None, str | None]:
             if job_type not in ("sft", "rl"):
@@ -944,6 +978,12 @@ class ModalManager(BaseCloudManager):
                 if should_try_recover:
                     recovered_result = _recover_terminal_result_after_launcher_failure()
                     if recovered_result is not None:
+                        self._forget_active_launch_for_run(
+                            experiment_id=experiment_id,
+                            phase=job_type,
+                            run_name=run_name,
+                            attempt_token=attempt_token,
+                        )
                         _red_print(
                             "[TENYSON] Modal launcher failed, but telemetry "
                             "already has a terminal job result. Using recovered "
@@ -992,8 +1032,16 @@ class ModalManager(BaseCloudManager):
                     experiment_id=experiment_id,
                     run_id=run_name,
                     phase=job_type,
+                    timeout_seconds=run_result_timeout_seconds,
+                    poll_interval_seconds=2.0,
                     attempt_token=attempt_token,
                     include_results_payload=False,
+                )
+                self._forget_active_launch_for_run(
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
                 )
                 return JobResult.from_dict(job_result_payload)
             except Exception as exc:  # noqa: BLE001
