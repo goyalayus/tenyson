@@ -149,6 +149,19 @@ def _modal_run_remote(job_type: str, config_payload: Dict[str, Any], task_spec: 
     os.chdir("/workspace")
     os.environ["TENYSON_EXECUTION_MODE"] = "cloud"
     os.environ["TENYSON_GPU_PROVIDER"] = "modal"
+    vllm_cfg = (
+        config_payload.get("vllm", {})
+        if isinstance(config_payload, dict)
+        else {}
+    )
+    vllm_enabled = bool(vllm_cfg.get("enabled", False))
+    disable_flashinfer = vllm_cfg.get("disable_flashinfer")
+    if disable_flashinfer is None:
+        disable_flashinfer = True
+    if vllm_enabled and bool(disable_flashinfer):
+        # Set this before spawning the Python runner so Unsloth sees it before
+        # any vLLM-related imports.
+        os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"
     config_path = os.path.join(
         tempfile.gettempdir(),
         f"tenyson-{job_type}-config.yaml",
