@@ -1041,6 +1041,34 @@ class RLFallbackTests(unittest.TestCase):
         self.assertTrue(job._vllm_runtime_enabled)
         normalize_mock.assert_not_called()
 
+    def test_destroy_process_group_runs_when_distributed_is_initialized(self) -> None:
+        with patch(
+            "torch.distributed.is_available",
+            return_value=True,
+        ), patch(
+            "torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "torch.distributed.destroy_process_group",
+        ) as destroy_mock:
+            rl_module._destroy_torch_process_group_if_initialized()
+
+        destroy_mock.assert_called_once_with()
+
+    def test_destroy_process_group_skips_when_not_initialized(self) -> None:
+        with patch(
+            "torch.distributed.is_available",
+            return_value=True,
+        ), patch(
+            "torch.distributed.is_initialized",
+            return_value=False,
+        ), patch(
+            "torch.distributed.destroy_process_group",
+        ) as destroy_mock:
+            rl_module._destroy_torch_process_group_if_initialized()
+
+        destroy_mock.assert_not_called()
+
     def test_build_model_and_tokenizer_keeps_unsloth_lora_when_loading_init_adapter(
         self,
     ) -> None:

@@ -191,6 +191,28 @@ def _force_vllm_attention_backend() -> None:
     EngineArgs.__init__ = wrapped
 
 
+def _destroy_torch_process_group_if_initialized() -> None:
+    try:
+        import torch.distributed as dist
+    except Exception:  # noqa: BLE001
+        return
+
+    try:
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        dist.destroy_process_group()
+        print(
+            "[RLJob] Destroyed torch.distributed process group before shutdown.",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            "[RLJob] Warning: could not destroy torch.distributed process group. "
+            f"{exc}",
+            flush=True,
+        )
+
+
 def _require_rl_vllm_config(
     model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
@@ -934,10 +956,13 @@ class RLJob:
             print(f"[RLJob] Resuming from checkpoint: {resume_path}", flush=True)
 
         print("[RLJob] Starting GRPO training...", flush=True)
-        if resume_path:
-            train_result = trainer.train(resume_from_checkpoint=resume_path)
-        else:
-            train_result = trainer.train()
+        try:
+            if resume_path:
+                train_result = trainer.train(resume_from_checkpoint=resume_path)
+            else:
+                train_result = trainer.train()
+        finally:
+            _destroy_torch_process_group_if_initialized()
 
         total_time = time.time() - start
 
