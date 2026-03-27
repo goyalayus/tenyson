@@ -16,7 +16,10 @@ from tenyson.loader import load_task
 from tenyson.reporting.fixed import ExperimentReport
 
 ensure_local_controller_environment(anchor_file=__file__)
-load_env_file(Path(__file__).with_name(".env"), override=True)
+
+
+def _load_example_env(path: Path | None = None) -> dict[str, str]:
+    return load_env_file(path or Path(__file__).with_name(".env"))
 
 
 def _is_truthy(value: str) -> bool:
@@ -184,6 +187,7 @@ def _rebuild_report_from_telemetry(report: ExperimentReport, task: object) -> No
 
 def main() -> None:
     base_dir = Path(__file__).parent
+    _load_example_env(base_dir / ".env")
     task = load_task(str(base_dir / "wordle_task.py"))
     report = ExperimentReport(output_path=_report_output_path(base_dir))
     smoke_overrides = _wordle_smoke_overrides() or {}

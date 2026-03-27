@@ -1,4 +1,5 @@
 import os
+import runpy
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,6 +122,52 @@ class BootstrapTests(unittest.TestCase):
 
         self.assertEqual(current, "from_file")
         self.assertEqual(loaded, {"TENYSON_EXPERIMENT_ID": "from_file"})
+
+    def test_wordle_experiment_import_preserves_shell_env(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+        env_path = experiment_path.with_name(".env")
+        original_is_file = Path.is_file
+        original_read_text = Path.read_text
+
+        def fake_is_file(path: Path) -> bool:
+            if path == env_path:
+                return True
+            return original_is_file(path)
+
+        def fake_read_text(path: Path, *args, **kwargs) -> str:
+            if path == env_path:
+                return (
+                    "TENYSON_EXPERIMENT_ID=from_file\n"
+                    "TENYSON_WANDB_ENTITY=from_file_entity\n"
+                )
+            return original_read_text(path, *args, **kwargs)
+
+        patched_env = dict(os.environ)
+        patched_env["TENYSON_EXPERIMENT_ID"] = "from_shell"
+        patched_env.pop("TENYSON_WANDB_ENTITY", None)
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            with patch.object(Path, "is_file", fake_is_file):
+                with patch.object(Path, "read_text", fake_read_text):
+                    with patch.dict(os.environ, patched_env, clear=True):
+                        module_globals = runpy.run_path(
+                            str(experiment_path),
+                            run_name="__tenyson_wordle_env_test__",
+                        )
+                        experiment_id_after_import = os.environ["TENYSON_EXPERIMENT_ID"]
+                        wandb_entity_after_import = os.environ.get("TENYSON_WANDB_ENTITY")
+                        module_globals["_load_example_env"](env_path)
+                        experiment_id_after_load = os.environ["TENYSON_EXPERIMENT_ID"]
+                        wandb_entity_after_load = os.environ["TENYSON_WANDB_ENTITY"]
+
+        self.assertEqual(experiment_id_after_import, "from_shell")
+        self.assertIsNone(wandb_entity_after_import)
+        self.assertEqual(experiment_id_after_load, "from_shell")
+        self.assertEqual(wandb_entity_after_load, "from_file_entity")
 
 
 class SharedOverridesTests(unittest.TestCase):
