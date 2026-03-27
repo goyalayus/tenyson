@@ -704,6 +704,39 @@ class ModalManager(BaseCloudManager):
             except Exception:  # noqa: BLE001
                 return None, None
 
+        def _looks_like_post_run_teardown_crash(error_text: str) -> bool:
+            normalized = str(error_text or "")
+            crash_markers = (
+                "code -11",
+                "code -6",
+                "segmentation fault",
+                "libc10_cuda",
+                "mempool::~mempool",
+                "processgroupnccl",
+            )
+            lowered = normalized.lower()
+            return any(marker in lowered for marker in crash_markers)
+
+        def _recover_terminal_result_after_launcher_failure() -> JobResult | None:
+            try:
+                _results_payload, job_result_payload = wait_for_run_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    timeout_seconds=20,
+                    poll_interval_seconds=1.0,
+                    attempt_token=attempt_token,
+                    include_results_payload=False,
+                )
+                del _results_payload
+            except Exception:  # noqa: BLE001
+                return None
+            try:
+                return JobResult.from_dict(job_result_payload)
+            except Exception:  # noqa: BLE001
+                return None
+
         try:
             # Run synchronously; on failure return failed JobResult instead of raising.
             try:
@@ -714,6 +747,16 @@ class ModalManager(BaseCloudManager):
                     local_project_root=local_project_root,
                 )
             except Exception as exc:  # noqa: BLE001
+                if _looks_like_post_run_teardown_crash(str(exc)):
+                    recovered_result = _recover_terminal_result_after_launcher_failure()
+                    if recovered_result is not None:
+                        _red_print(
+                            "[TENYSON] Modal launcher crashed during teardown, "
+                            "but telemetry already has a terminal job result. "
+                            "Using recovered telemetry result."
+                        )
+                        return recovered_result
+
                 hf_repo_id, hf_revision = _resolve_failed_resume_target()
                 result = JobResult(
                     run_id=run_name,
