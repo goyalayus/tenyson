@@ -238,6 +238,10 @@ def _abort_parallel_stage_runs(
         if not db_url or not experiment_id:
             continue
 
+        attempt_token = str(
+            config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
+
         try:
             request_stop(
                 db_url=db_url,
@@ -245,6 +249,7 @@ def _abort_parallel_stage_runs(
                 experiment_id=experiment_id,
                 phase=_job_type,
                 create_if_missing=True,
+                attempt_token=attempt_token,
             )
             _red_print(
                 f'[TENYSON] Requested stop for parallel sibling "{label}" (run_id={run_id}).'

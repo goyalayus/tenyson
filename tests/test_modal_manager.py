@@ -315,7 +315,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         kwargs = run_subprocess.call_args.kwargs
         self.assertIn("tenyson.cloud.modal_launcher", cmd)
         self.assertIsNone(kwargs["cwd"])
-        self.assertFalse(kwargs["close_fds"])
+        self.assertTrue(kwargs["close_fds"])
         self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
         self.assertEqual(kwargs["env"]["TENYSON_LOCAL_PROJECT_ROOT"], "/repo")
         self.assertTrue(kwargs["env"]["PYTHONPATH"].startswith("/repo/src"))

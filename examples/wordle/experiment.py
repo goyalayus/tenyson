@@ -167,6 +167,7 @@ def _rebuild_report_from_telemetry(report: ExperimentReport, task: object) -> No
             experiment_id=experiment_id,
             environment_name=environment_name,
             run_name_allowlist=_canonical_report_stage_order(),
+            prefer_terminal_results=True,
         )
         print(
             "[wordle experiment] Rebuilt final report from telemetry at "

@@ -227,7 +227,7 @@ class PipelineTests(unittest.TestCase):
         record_summary_mock.assert_called_once()
         record_result_mock.assert_called_once()
 
-    def test_abort_parallel_stage_runs_requests_stop_for_sibling_with_phase(self) -> None:
+    def test_abort_parallel_stage_runs_requests_stop_for_sibling_with_attempt_token(self) -> None:
         branches = [
             (
                 "left_sft",
@@ -252,6 +252,7 @@ class PipelineTests(unittest.TestCase):
                         "entity": "demo",
                         "project": "tenyson",
                         "experiment_id": "wordle_exp",
+                        "attempt_token": "attempt-right",
                     },
                 },
                 RLJob,
@@ -271,6 +272,7 @@ class PipelineTests(unittest.TestCase):
             experiment_id="wordle_exp",
             phase="rl",
             create_if_missing=True,
+            attempt_token="attempt-right",
         )
 
     def test_validate_pipeline_run_names_rejects_duplicates(self) -> None:

@@ -44,6 +44,8 @@ class _TelemetryStageCandidate:
     environment_run: Optional[str]
     has_job_result: bool
     failure_reason: Optional[str]
+    job_result_payload: Dict[str, Any] = field(default_factory=dict)
+    summary_metrics: Dict[str, Any] = field(default_factory=dict)
 
 
 _PHASE_ORDER = {
@@ -188,6 +190,7 @@ class ExperimentReport:
         missing: str = "n/a",
         max_live_age_seconds: int = 90,
         run_name_allowlist: Optional[Sequence[str]] = None,
+        prefer_terminal_results: bool = False,
     ) -> bool:
         resolved_backend_ref = str(
             backend_ref or self.telemetry_backend_ref or ""
@@ -231,6 +234,7 @@ class ExperimentReport:
             selected = _select_candidate(
                 candidates,
                 max_live_age_seconds=max_live_age_seconds,
+                prefer_terminal_results=prefer_terminal_results,
             )
             order_time = _stage_first_seen_at(candidates) or _candidate_sort_time(selected)
             entry = self._entry_from_telemetry_candidate(
@@ -328,6 +332,7 @@ class ExperimentReport:
         results_payload: Dict[str, Any] = {}
         job_result_payload: Dict[str, Any] = {}
         if candidate.has_job_result:
+            job_result_payload = dict(candidate.job_result_payload)
             result_pair = wandb_store.fetch_run_result(
                 backend_ref,
                 experiment_id=experiment_id,
@@ -336,11 +341,14 @@ class ExperimentReport:
                 attempt_token=candidate.attempt_token,
             )
             if result_pair is not None:
-                results_payload, job_result_payload = result_pair
+                results_payload, fetched_job_result_payload = result_pair
+                if fetched_job_result_payload:
+                    job_result_payload = dict(fetched_job_result_payload)
 
         if job_result_payload:
             merged_payload = dict(job_result_payload)
-            merged_metrics = dict(merged_payload.get("metrics") or {})
+            merged_metrics = dict(candidate.summary_metrics)
+            merged_metrics.update(dict(merged_payload.get("metrics") or {}))
             results_metrics = results_payload.get("metrics")
             if isinstance(results_metrics, Mapping):
                 for metric_name, metric_value in results_metrics.items():
@@ -553,6 +561,9 @@ def _candidate_from_run(
     job_result_payload = _maybe_json_dict(
         wandb_store._summary_get(run, wandb_store.SUMMARY_JOB_RESULT_JSON)
     )
+    summary_metrics = _maybe_json_dict(
+        wandb_store._summary_get(run, wandb_store.SUMMARY_METRICS_JSON)
+    )
     status = str(
         wandb_store._summary_get(run, wandb_store.SUMMARY_STATUS)
         or job_result_payload.get("status")
@@ -590,6 +601,8 @@ def _candidate_from_run(
             or ""
         ).strip()
         or None,
+        job_result_payload=job_result_payload,
+        summary_metrics=summary_metrics,
     )
 
 
@@ -597,8 +610,13 @@ def _select_candidate(
     candidates: Iterable[_TelemetryStageCandidate],
     *,
     max_live_age_seconds: int,
+    prefer_terminal_results: bool = False,
 ) -> _TelemetryStageCandidate:
     rows = list(candidates)
+    completed = [candidate for candidate in rows if candidate.has_job_result]
+    if prefer_terminal_results and completed:
+        return max(completed, key=_candidate_sort_key)
+
     fresh_active = [
         candidate
         for candidate in rows
@@ -610,7 +628,6 @@ def _select_candidate(
     if fresh_active:
         return max(fresh_active, key=_candidate_sort_key)
 
-    completed = [candidate for candidate in rows if candidate.has_job_result]
     if completed:
         return max(completed, key=_candidate_sort_key)
 

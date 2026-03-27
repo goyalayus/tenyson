@@ -739,6 +739,48 @@ class ExperimentSession:
         )
         return None
 
+    def _load_stage_result_from_telemetry(self, stage: StageSpec) -> Optional[JobResult]:
+        try:
+            backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        except Exception:
+            return None
+        if not backend_ref or not experiment_id:
+            return None
+
+        attempt_token = str(
+            stage.config.get("telemetry", {}).get("attempt_token") or ""
+        ).strip() or None
+        try:
+            client = TelemetryClient(db_url=str(backend_ref))
+            row = get_run_result(
+                client,
+                experiment_id=str(experiment_id),
+                run_id=_resolve_stage_run_name(stage),
+                phase=_resolve_stage_phase(stage),
+                attempt_token=attempt_token,
+                include_results_payload=False,
+            )
+        except Exception:
+            return None
+        if row is None:
+            return None
+        _results_payload, job_result_payload = row
+        if not isinstance(job_result_payload, dict) or not job_result_payload:
+            return None
+        try:
+            return JobResult.from_dict(job_result_payload)
+        except TypeError:
+            return None
+
+    def _reconcile_stage_report_from_telemetry(self, stage: StageSpec) -> None:
+        if self._report_controller is None:
+            return
+        recovered_result = self._load_stage_result_from_telemetry(stage)
+        if recovered_result is not None:
+            self._report_controller.record_stage_result(stage, recovered_result)
+            return
+        self._report_controller.stop_stage(stage.id)
+
     def run_branches(
         self,
         branches: Mapping[str, Callable[[ExperimentBranch], None]],
@@ -888,6 +930,8 @@ class ExperimentSession:
                     matched_result = result
                     break
             if matched_result is None:
+                matched_result = self._load_stage_result_from_telemetry(stage)
+            if matched_result is None:
                 returned_run_ids = [result.run_id for result in results]
                 raise RuntimeError(
                     f'Stage "{stage.id}" expected run_id "{run_id}" but no exact result was returned. '
@@ -896,7 +940,7 @@ class ExperimentSession:
         finally:
             self._abort_controller.unregister_run(active_run_id)
             if matched_result is None and self._report_controller is not None:
-                self._report_controller.stop_stage(stage.id)
+                self._reconcile_stage_report_from_telemetry(stage)
 
         if self._report_controller is not None:
             self._report_controller.finish_stage(stage.id, matched_result)
@@ -963,7 +1007,7 @@ class ExperimentSession:
                 self._abort_controller.unregister_run(active_run_id)
             if results is None and self._report_controller is not None:
                 for stage in stages_to_run:
-                    self._report_controller.stop_stage(stage.id)
+                    self._reconcile_stage_report_from_telemetry(stage)
 
         try:
             for stage in stages_to_run:
@@ -973,6 +1017,8 @@ class ExperimentSession:
                     if result.run_id == run_id:
                         matched_result = result
                         break
+                if matched_result is None:
+                    matched_result = self._load_stage_result_from_telemetry(stage)
                 if matched_result is None:
                     returned_run_ids = [result.run_id for result in results]
                     raise RuntimeError(
@@ -985,7 +1031,7 @@ class ExperimentSession:
         except Exception:
             if self._report_controller is not None:
                 for stage in stages_to_run:
-                    self._report_controller.stop_stage(stage.id)
+                    self._reconcile_stage_report_from_telemetry(stage)
             raise
 
         for stage in stages_to_run:

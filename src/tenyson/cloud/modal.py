@@ -67,8 +67,15 @@ def _drain_subprocess_stream(
             writer.write(line)
             writer.flush()
             recent_lines.append(line.rstrip("\n"))
+    except (OSError, ValueError):
+        # The parent can close the pipe after the child exits to avoid hanging
+        # forever on inherited file descriptors from grandchildren.
+        return
     finally:
-        stream.close()
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _run_subprocess_with_streaming_logs(
@@ -120,8 +127,15 @@ def _run_subprocess_with_streaming_logs(
         worker.start()
 
     returncode = process.wait()
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
     for worker in workers:
-        worker.join()
+        worker.join(timeout=5.0)
 
     detail_lines = list(stderr_tail) or list(stdout_tail)
     details = "\n".join(detail_lines).strip()
@@ -597,7 +611,7 @@ class ModalManager(BaseCloudManager):
             returncode, details = _run_subprocess_with_streaming_logs(
                 cmd,
                 cwd=None,
-                close_fds=False,
+                close_fds=True,
                 env=env,
             )
         finally:

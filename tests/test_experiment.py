@@ -724,6 +724,125 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertEqual(results["eval_turn3"].status, "success")
         run_pipeline_mock.assert_called_once()
 
+    def test_run_stage_uses_telemetry_result_when_pipeline_result_is_missing(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+        )
+        stage = session.sft("sft_main", run_name="wordle_sft_main")
+        recovered = _result(
+            "wordle_sft_main",
+            status="success",
+            wandb_url="https://wandb.example/recovered",
+            hf_repo_id="repo/id",
+            hf_revision="sha123",
+        )
+
+        def fake_get_run_result(
+            client,
+            experiment_id,
+            run_id,
+            phase,
+            *,
+            attempt_token=None,
+            include_results_payload=True,
+        ):
+            del client, experiment_id, phase, attempt_token, include_results_payload
+            if run_id == "wordle_sft_main":
+                return ({}, dict(recovered.__dict__))
+            return None
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            side_effect=fake_get_run_result,
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            return_value=[_result("wrong_run", status="failed")],
+        ):
+            result = session.run_stage(stage, cloud=object())
+
+        self.assertEqual(result.run_id, "wordle_sft_main")
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.hf_revision, "sha123")
+
+    def test_run_parallel_uses_telemetry_result_when_pipeline_omits_one_branch_result(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+        )
+        adapter = AdapterRef(repo_id="repo/id", revision="sha123")
+        left_stage = session.eval(
+            "eval_turn2",
+            adapter=adapter,
+            run_name="wordle_eval_turn2",
+        )
+        right_stage = session.eval(
+            "eval_turn3",
+            adapter=adapter,
+            run_name="wordle_eval_turn3",
+        )
+        recovered_left = _result(
+            "wordle_eval_turn2",
+            status="success",
+            processed_samples=25,
+            expected_samples=25,
+        )
+
+        def fake_get_run_result(
+            client,
+            experiment_id,
+            run_id,
+            phase,
+            *,
+            attempt_token=None,
+            include_results_payload=True,
+        ):
+            del client, experiment_id, phase, attempt_token, include_results_payload
+            if run_id == "wordle_eval_turn2":
+                return ({}, dict(recovered_left.__dict__))
+            return None
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            side_effect=fake_get_run_result,
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            return_value=[
+                _result(
+                    "wordle_eval_turn3",
+                    status="success",
+                    processed_samples=25,
+                    expected_samples=25,
+                )
+            ],
+        ):
+            results = session.run_parallel(
+                "eval_pair",
+                [left_stage, right_stage],
+                cloud=object(),
+            )
+
+        self.assertEqual(results["eval_turn2"].status, "success")
+        self.assertEqual(results["eval_turn2"].processed_samples, 25)
+        self.assertEqual(results["eval_turn3"].status, "success")
+        self.assertEqual(results["eval_turn3"].processed_samples, 25)
+
     def test_recovery_experiment_id_must_match_stage_telemetry_experiment_id(self) -> None:
         session = ExperimentSession(
             task=object(),

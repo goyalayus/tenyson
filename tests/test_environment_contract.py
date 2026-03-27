@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -511,6 +512,244 @@ class ExperimentReportTests(unittest.TestCase):
         self.assertIn("### 6. curr_eval_after_t2_turn2", content)
         self.assertIn("- Metric `rollout_batches`: `525`", content)
         self.assertIn("- Metric `total_samples`: `2100`", content)
+
+
+    def test_fixed_report_rebuild_prefers_terminal_results_for_final_snapshot(self) -> None:
+        class _FakeRun:
+            def __init__(
+                self,
+                *,
+                name: str,
+                job_type: str,
+                group: str,
+                summary: dict,
+                config: dict,
+                url: str,
+                created_at: str,
+                updated_at: str,
+            ) -> None:
+                self.name = name
+                self.job_type = job_type
+                self.group = group
+                self.summary = summary
+                self.config = config
+                self.url = url
+                self.created_at = created_at
+                self.updated_at = updated_at
+
+        def _summary(
+            *,
+            experiment_id: str,
+            phase: str,
+            run_name: str,
+            status: str,
+            attempt_token: str,
+            heartbeat_at: str,
+            wandb_url: str,
+            job_result_payload: dict | None = None,
+            metrics_payload: dict | None = None,
+            is_active: bool = False,
+        ) -> dict:
+            return {
+                "tenyson/experiment_id": experiment_id,
+                "tenyson/phase": phase,
+                "tenyson/run_name": run_name,
+                "tenyson/status": status,
+                "tenyson/attempt_token": attempt_token,
+                "tenyson/heartbeat_at": heartbeat_at,
+                "tenyson/is_active": is_active,
+                "tenyson/wandb_url": wandb_url,
+                "tenyson/job_result_json": (
+                    json.dumps(job_result_payload) if job_result_payload else None
+                ),
+                "tenyson/metrics_json": (
+                    json.dumps(metrics_payload) if metrics_payload else None
+                ),
+            }
+
+        experiment_id = "wordle_exp"
+        backend_ref = "wandb://ayush/wordle"
+        now = datetime.now(timezone.utc)
+        completed_result = {
+            "run_id": "mixed_rl",
+            "status": "stopped",
+            "total_time_seconds": 512.0,
+            "attempt_token": "mixed-done",
+            "metrics": {"global_step": 64},
+            "wandb_url": "https://wandb.example/runs/mixed_rl_done",
+            "failure_reason": "Manual stop requested at step 64.",
+            "stopped_early": True,
+        }
+        fake_runs = [
+            _FakeRun(
+                name="mixed_rl",
+                job_type="rl",
+                group=experiment_id,
+                summary=_summary(
+                    experiment_id=experiment_id,
+                    phase="rl",
+                    run_name="mixed_rl",
+                    status="stopped",
+                    attempt_token="mixed-done",
+                    heartbeat_at=(now - timedelta(minutes=5)).isoformat(),
+                    wandb_url="https://wandb.example/runs/mixed_rl_done",
+                    job_result_payload=completed_result,
+                    metrics_payload={"global_step": 64},
+                ),
+                config={"_tenyson": {"environment_run": "wordle_rl_mixed"}},
+                url="https://wandb.example/runs/mixed_rl_done",
+                created_at=(now - timedelta(minutes=10)).isoformat(),
+                updated_at=(now - timedelta(minutes=5)).isoformat(),
+            ),
+            _FakeRun(
+                name="mixed_rl",
+                job_type="rl",
+                group=experiment_id,
+                summary=_summary(
+                    experiment_id=experiment_id,
+                    phase="rl",
+                    run_name="mixed_rl",
+                    status="running",
+                    attempt_token="mixed-live",
+                    heartbeat_at=now.isoformat(),
+                    wandb_url="https://wandb.example/runs/mixed_rl_live",
+                    is_active=True,
+                ),
+                config={"_tenyson": {"environment_run": "wordle_rl_mixed"}},
+                url="https://wandb.example/runs/mixed_rl_live",
+                created_at=(now - timedelta(minutes=1)).isoformat(),
+                updated_at=now.isoformat(),
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "final_report.md"
+            report = ExperimentReport(output_path=report_path)
+
+            with patch(
+                "tenyson.reporting.fixed._project_runs_for_backend",
+                return_value=fake_runs,
+            ), patch(
+                "tenyson.reporting.fixed.wandb_store.fetch_run_result",
+                return_value=({"metrics": {"rollout_batches": 42}}, completed_result),
+            ):
+                rebuilt = report.rebuild_from_telemetry(
+                    backend_ref=backend_ref,
+                    experiment_id=experiment_id,
+                    environment_name="wordle",
+                    prefer_terminal_results=True,
+                )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(report._stages["mixed_rl"].status, "stopped")
+        self.assertEqual(report._stages["mixed_rl"].metrics["rollout_batches"], "42")
+        self.assertEqual(report._stages["mixed_rl"].wandb_url, "https://wandb.example/runs/mixed_rl_done")
+
+    def test_fixed_report_rebuild_uses_candidate_payload_when_fetch_misses(self) -> None:
+        class _FakeRun:
+            def __init__(
+                self,
+                *,
+                name: str,
+                job_type: str,
+                group: str,
+                summary: dict,
+                config: dict,
+                url: str,
+                created_at: str,
+                updated_at: str,
+            ) -> None:
+                self.name = name
+                self.job_type = job_type
+                self.group = group
+                self.summary = summary
+                self.config = config
+                self.url = url
+                self.created_at = created_at
+                self.updated_at = updated_at
+
+        def _summary(
+            *,
+            experiment_id: str,
+            phase: str,
+            run_name: str,
+            status: str,
+            attempt_token: str,
+            heartbeat_at: str,
+            wandb_url: str,
+            job_result_payload: dict,
+            metrics_payload: dict,
+        ) -> dict:
+            return {
+                "tenyson/experiment_id": experiment_id,
+                "tenyson/phase": phase,
+                "tenyson/run_name": run_name,
+                "tenyson/status": status,
+                "tenyson/attempt_token": attempt_token,
+                "tenyson/heartbeat_at": heartbeat_at,
+                "tenyson/is_active": False,
+                "tenyson/wandb_url": wandb_url,
+                "tenyson/job_result_json": json.dumps(job_result_payload),
+                "tenyson/metrics_json": json.dumps(metrics_payload),
+            }
+
+        experiment_id = "wordle_exp"
+        backend_ref = "wandb://ayush/wordle"
+        now = datetime.now(timezone.utc)
+        job_result_payload = {
+            "run_id": "eval_baseline_mixed",
+            "status": "success",
+            "total_time_seconds": 12.34,
+            "attempt_token": "eval-a",
+            "metrics": {"format_accuracy": 0.62, "dict_accuracy": 0.52},
+            "wandb_url": "https://wandb.example/runs/eval_baseline_mixed",
+            "processed_samples": 100,
+            "expected_samples": 100,
+        }
+        fake_run = _FakeRun(
+            name="eval_baseline_mixed",
+            job_type="eval",
+            group=experiment_id,
+            summary=_summary(
+                experiment_id=experiment_id,
+                phase="eval",
+                run_name="eval_baseline_mixed",
+                status="success",
+                attempt_token="eval-a",
+                heartbeat_at=now.isoformat(),
+                wandb_url="https://wandb.example/runs/eval_baseline_mixed",
+                job_result_payload=job_result_payload,
+                metrics_payload={"format_accuracy": 0.62, "dict_accuracy": 0.52},
+            ),
+            config={"_tenyson": {"environment_run": "wordle_eval_mixed"}},
+            url="https://wandb.example/runs/eval_baseline_mixed",
+            created_at=now.isoformat(),
+            updated_at=now.isoformat(),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "final_report.md"
+            report = ExperimentReport(output_path=report_path)
+
+            with patch(
+                "tenyson.reporting.fixed._project_runs_for_backend",
+                return_value=[fake_run],
+            ), patch(
+                "tenyson.reporting.fixed.wandb_store.fetch_run_result",
+                return_value=None,
+            ):
+                rebuilt = report.rebuild_from_telemetry(
+                    backend_ref=backend_ref,
+                    experiment_id=experiment_id,
+                    environment_name="wordle",
+                    prefer_terminal_results=True,
+                )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(report._stages["eval_baseline_mixed"].status, "success")
+        self.assertEqual(report._stages["eval_baseline_mixed"].metrics["format_accuracy"], "0.6200")
+        self.assertEqual(report._stages["eval_baseline_mixed"].metrics["dict_accuracy"], "0.5200")
+
 
 
 if __name__ == "__main__":
