@@ -24,6 +24,7 @@ class FakeRun:
         job_type: str | None = None,
         created_at=None,
         updated_at=None,
+        state: str | None = None,
     ):
         self.id = run_id
         self.url = url or f"https://wandb.example/runs/{run_id}"
@@ -34,6 +35,7 @@ class FakeRun:
         self.job_type = job_type or ""
         self.created_at = created_at
         self.updated_at = updated_at
+        self.state = state
 
     def log_artifact(self, artifact):
         self.logged_artifacts.append(artifact)
@@ -324,6 +326,76 @@ class WandBStoreTests(unittest.TestCase):
             )
 
         self.assertIs(resolved, valid)
+
+    def test_list_live_runs_excludes_terminal_wandb_states(self) -> None:
+        now = wandb_store._parse_datetime("2026-03-27T12:00:00+00:00")
+        stale = FakeRun(
+            "failed-run",
+            name="wordle_eval_main",
+            group="wordle_exp",
+            job_type="eval",
+            updated_at="2026-03-27T12:00:00+00:00",
+            state="failed",
+        )
+        stale.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "eval",
+                wandb_store.SUMMARY_RUN_NAME: "wordle_eval_main",
+                wandb_store.SUMMARY_STATUS: "running",
+                wandb_store.SUMMARY_IS_ACTIVE: True,
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-27T12:00:00+00:00",
+            }
+        )
+        live = FakeRun(
+            "running-run",
+            name="wordle_rl_main",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-27T11:59:45+00:00",
+            state="running",
+        )
+        live.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "wordle_rl_main",
+                wandb_store.SUMMARY_STATUS: "running",
+                wandb_store.SUMMARY_IS_ACTIVE: True,
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-27T11:59:45+00:00",
+                wandb_store.SUMMARY_PROVIDER: "modal",
+                wandb_store.SUMMARY_ATTEMPT_TOKEN: "attempt-live",
+            }
+        )
+        fake_wandb = build_fake_wandb_module()
+        fake_wandb.api_runs = [stale, live]
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}), patch.object(
+            wandb_store,
+            "_utc_now",
+            return_value=now,
+        ):
+            rows = wandb_store.list_live_runs(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                max_age_seconds=90,
+            )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "run_id": "wordle_rl_main",
+                    "phase": "rl",
+                    "provider": "modal",
+                    "status": "running",
+                    "is_active": True,
+                    "attempt_token": "attempt-live",
+                    "created_at": None,
+                    "updated_at": wandb_store._parse_datetime("2026-03-27T11:59:45+00:00"),
+                }
+            ],
+        )
 
     def test_fetch_run_result_prefers_latest_completed_attempt_over_newer_active_one(self) -> None:
         completed = FakeRun(

@@ -42,6 +42,7 @@ SUMMARY_CONTROL_TARGET_RUN_NAME = f"{SUMMARY_PREFIX}control_target_run_name"
 CONTROL_EXPERIMENT_PREFIX = "__tenyson_control__:"
 CONTROL_PHASE = "__control__"
 CONTROL_RUN_NAME_PREFIX = "__manual_stop__:"
+TERMINAL_WANDB_RUN_STATES = frozenset({"finished", "failed", "crashed", "killed"})
 
 
 _LOCAL_WANDB_RUN_LOCK = threading.RLock()
@@ -620,6 +621,10 @@ def list_live_runs(
         effective_run_name = summary_run_name or actual_run_name
         if not effective_run_name:
             continue
+        # Local heartbeats can stay stale after an abnormal controller exit. If W&B
+        # has already marked the run terminal, do not surface it as live.
+        if _run_has_terminal_wandb_state(run):
+            continue
         if not bool(_summary_get(run, SUMMARY_IS_ACTIVE)):
             continue
         heartbeat_at = _parse_datetime(_summary_get(run, SUMMARY_HEARTBEAT_AT))
@@ -786,6 +791,11 @@ def _query_matching_runs(
         per_page=100,
         lazy=True,
     )
+
+
+def _run_has_terminal_wandb_state(run: Any) -> bool:
+    state = str(getattr(run, "state", "") or "").strip().lower()
+    return state in TERMINAL_WANDB_RUN_STATES
 
 
 def _run_has_result_payload(run: Any) -> bool:
