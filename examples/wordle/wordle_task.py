@@ -562,18 +562,39 @@ def _load_sft_train_eval_split(
 ) -> Tuple[Dataset, Optional[Dataset]]:
     from datasets import load_dataset
 
-    dataset_name = config.get("task", {}).get(
+    task_cfg = config.get("task", {})
+    dataset_name = task_cfg.get(
         "sft_dataset", "goyalayus/wordle-reasoning-sft-prefix-keep-think"
     )
     ds = load_dataset(dataset_name, split="train")
+    train_sample_limit_raw = task_cfg.get("sft_train_samples")
+    train_sample_limit = (
+        max(1, int(train_sample_limit_raw))
+        if train_sample_limit_raw is not None
+        else None
+    )
 
     val_size = config.get("training", {}).get("val_size", 0)
+    if train_sample_limit is not None and len(ds) > train_sample_limit + max(0, int(val_size)):
+        ds = ds.select(range(train_sample_limit + max(0, int(val_size))))
+
     if val_size <= 0:
+        if train_sample_limit is not None and len(ds) > train_sample_limit:
+            ds = ds.select(range(train_sample_limit))
         return ds, None
 
+    if len(ds) <= 1:
+        if train_sample_limit is not None and len(ds) > train_sample_limit:
+            ds = ds.select(range(train_sample_limit))
+        return ds, None
+
+    val_size = min(int(val_size), max(1, len(ds) - 1))
     split_seed = int(config.get("training", {}).get("seed", 3407))
     split = ds.train_test_split(test_size=val_size, seed=split_seed)
-    return split["train"], split["test"]
+    train_ds = split["train"]
+    if train_sample_limit is not None and len(train_ds) > train_sample_limit:
+        train_ds = train_ds.select(range(train_sample_limit))
+    return train_ds, split["test"]
 
 
 # ==============================================================================

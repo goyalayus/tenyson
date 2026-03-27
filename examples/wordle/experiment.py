@@ -61,6 +61,9 @@ def _wordle_smoke_overrides() -> dict[str, dict] | None:
         return None
 
     sft_steps = max(1, _int_env("TENYSON_WORDLE_SMOKE_SFT_STEPS", 30))
+    sft_train_samples = max(
+        1, _int_env("TENYSON_WORDLE_SMOKE_SFT_TRAIN_SAMPLES", 128)
+    )
     rl_steps = max(1, _int_env("TENYSON_WORDLE_SMOKE_RL_STEPS", 20))
     rl_samples = max(1, _int_env("TENYSON_WORDLE_SMOKE_RL_SAMPLES", 64))
     eval_samples = max(1, _int_env("TENYSON_WORDLE_SMOKE_EVAL_SAMPLES", 25))
@@ -75,13 +78,17 @@ def _wordle_smoke_overrides() -> dict[str, dict] | None:
 
     print(
         "[wordle experiment] Smoke mode enabled "
-        f"(sft_steps={sft_steps}, rl_steps={rl_steps}, rl_samples={rl_samples}, "
+        f"(sft_steps={sft_steps}, sft_train_samples={sft_train_samples}, "
+        f"rl_steps={rl_steps}, rl_samples={rl_samples}, "
         f"eval_samples={eval_samples}, rl_vllm_gpu_util={rl_vllm_gpu_util}).",
         flush=True,
     )
 
     return {
         "sft": {
+            "task": {
+                "sft_train_samples": sft_train_samples,
+            },
             "training": {
                 "max_steps": sft_steps,
                 "val_size": sft_val_size,

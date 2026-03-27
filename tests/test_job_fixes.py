@@ -112,6 +112,34 @@ class WordleParserTests(unittest.TestCase):
         self.assertEqual(solutions, ["apple", "zebra"])
         self.assertEqual(allowed, ["apple", "zebra"])
 
+    def test_sft_dataset_limit_trims_train_split_for_smoke_runs(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        dataset = Dataset.from_dict(
+            {
+                "messages": [
+                    [{"role": "user", "content": f"prompt-{idx}"}]
+                    for idx in range(20)
+                ]
+            }
+        )
+
+        with patch("datasets.load_dataset", return_value=dataset):
+            train_ds, eval_ds = wordle_task._load_sft_train_eval_split(
+                {
+                    "task": {
+                        "sft_train_samples": 5,
+                    },
+                    "training": {
+                        "val_size": 2,
+                        "seed": 123,
+                    },
+                }
+            )
+
+        self.assertEqual(len(train_ds), 5)
+        self.assertIsNotNone(eval_ds)
+        self.assertEqual(len(eval_ds), 2)
+
 
     def test_fixed_turn_eval_named_run_matches_prompt_turn_number(self) -> None:
         wordle_task = _load_wordle_task_module()
