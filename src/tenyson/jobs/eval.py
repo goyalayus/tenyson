@@ -65,7 +65,7 @@ def _configure_eval_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
         disable_flashinfer = True
     if bool(disable_flashinfer):
         # Unsloth expects this before importing its vLLM utilities.
-        os.environ.setdefault("UNSLOTH_VLLM_NO_FLASHINFER", "1")
+        os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"
 
 
 class EvalJob:
