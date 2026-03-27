@@ -630,6 +630,62 @@ class ModalManagerRunTests(unittest.TestCase):
         record_summary_mock.assert_not_called()
         record_result_mock.assert_not_called()
 
+    def test_run_recovers_terminal_result_when_attempt_token_matches(self) -> None:
+        manager = ModalManager()
+        job = EvalJob(
+            {
+                "telemetry": {
+                    "entity": "ayush",
+                    "project": "wordle",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-123",
+                },
+                "evaluation": {
+                    "run_name": "eval_baseline_mixed",
+                },
+            },
+            task=SimpleNamespace(),
+        )
+
+        with patch.object(
+            manager,
+            "_resolve_local_project_root",
+            return_value="/repo",
+        ), patch.object(
+            manager,
+            "_resolve_task_spec",
+            return_value="examples/wordle/wordle_task.py",
+        ), patch.object(
+            manager,
+            "_run_modal_job_via_launcher",
+            side_effect=RuntimeError("Modal launcher subprocess failed with code 1."),
+        ), patch(
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ), patch(
+            "tenyson.core.telemetry.wait_for_run_result",
+            return_value=(
+                {},
+                {
+                    "run_id": "eval_baseline_mixed",
+                    "status": "success",
+                    "total_time_seconds": 4.0,
+                    "attempt_token": "attempt-123",
+                },
+            ),
+        ) as wait_mock, patch(
+            "tenyson.core.telemetry.record_run_summary"
+        ) as record_summary_mock, patch(
+            "tenyson.core.telemetry.record_run_result"
+        ) as record_result_mock:
+            result = manager.run(job)
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(wait_mock.call_count, 1)
+        self.assertEqual(wait_mock.call_args.kwargs["attempt_token"], "attempt-123")
+        record_summary_mock.assert_not_called()
+        record_result_mock.assert_not_called()
+
     def test_run_records_failure_when_teardown_crash_has_no_recoverable_result(self) -> None:
         manager = ModalManager()
         job = EvalJob(

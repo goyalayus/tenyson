@@ -747,13 +747,17 @@ class ModalManager(BaseCloudManager):
                     local_project_root=local_project_root,
                 )
             except Exception as exc:  # noqa: BLE001
-                if _looks_like_post_run_teardown_crash(str(exc)):
+                should_try_recover = (
+                    attempt_token is not None
+                    or _looks_like_post_run_teardown_crash(str(exc))
+                )
+                if should_try_recover:
                     recovered_result = _recover_terminal_result_after_launcher_failure()
                     if recovered_result is not None:
                         _red_print(
-                            "[TENYSON] Modal launcher crashed during teardown, "
-                            "but telemetry already has a terminal job result. "
-                            "Using recovered telemetry result."
+                            "[TENYSON] Modal launcher failed, but telemetry "
+                            "already has a terminal job result. Using recovered "
+                            "telemetry result."
                         )
                         return recovered_result
 
