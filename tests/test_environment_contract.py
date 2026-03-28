@@ -152,6 +152,59 @@ class ExperimentReportTests(unittest.TestCase):
         self.assertIn("- Metric `constraint_accuracy`: `0.8750`", content)
         self.assertIn("- Metric `total_samples`: `100`", content)
 
+    def test_fixed_report_marks_live_stage_url_as_resolving_until_polled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "final_report.md"
+            report = ExperimentReport(output_path=report_path)
+            report.set_context(
+                environment_name="wordle",
+                experiment_id="wordle_exp",
+                telemetry_backend_ref="wandb://ayush/wordle",
+            )
+            report.register_stage(
+                stage_id="sft_main",
+                run_type="sft",
+                run_name="sft_main",
+                variant="wordle_sft_main",
+            )
+            report.mark_stage_running("sft_main")
+
+            content = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("- Status: `running`", content)
+        self.assertIn("- W&B run: resolving...", content)
+        self.assertIn("- Metrics: pending terminal result", content)
+
+    def test_fixed_report_keeps_live_url_but_marks_metrics_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "final_report.md"
+            report = ExperimentReport(output_path=report_path)
+            report.set_context(
+                environment_name="wordle",
+                experiment_id="wordle_exp",
+                telemetry_backend_ref="wandb://ayush/wordle",
+            )
+            report.register_stage(
+                stage_id="eval_baseline_mixed",
+                run_type="eval",
+                run_name="eval_baseline_mixed",
+                variant="wordle_eval_mixed",
+            )
+            report.mark_stage_running("eval_baseline_mixed")
+            report.update_wandb_link(
+                "eval_baseline_mixed",
+                "https://wandb.example/ayush/wordle/runs/run456",
+            )
+
+            content = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("- Status: `running`", content)
+        self.assertIn(
+            "- W&B run: [open run](https://wandb.example/ayush/wordle/runs/run456)",
+            content,
+        )
+        self.assertIn("- Metrics: pending terminal result", content)
+
     def test_fixed_report_rebuilds_from_telemetry_and_ignores_stale_active_rows(self) -> None:
         class _FakeRun:
             def __init__(

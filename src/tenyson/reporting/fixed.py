@@ -472,6 +472,7 @@ class ExperimentReport:
         return "\n".join(lines).rstrip() + "\n"
 
     def _render_stage(self, index: int, entry: StageReportEntry) -> list[str]:
+        is_live_stage = str(entry.status or "").strip().lower() == "running"
         lines = [
             f"### {index}. {entry.stage_id}",
             "",
@@ -482,7 +483,11 @@ class ExperimentReport:
             (
                 f"- W&B run: [open run]({entry.wandb_url})"
                 if entry.wandb_url
-                else "- W&B run: n/a"
+                else (
+                    "- W&B run: resolving..."
+                    if is_live_stage
+                    else "- W&B run: n/a"
+                )
             ),
         ]
         if entry.hf_repo_id:
@@ -507,7 +512,11 @@ class ExperimentReport:
             for metric_name in sorted(entry.metrics):
                 lines.append(f"- Metric `{metric_name}`: `{entry.metrics[metric_name]}`")
         else:
-            lines.append("- Metrics: n/a")
+            lines.append(
+                "- Metrics: pending terminal result"
+                if is_live_stage
+                else "- Metrics: n/a"
+            )
         lines.append("")
         return lines
 
