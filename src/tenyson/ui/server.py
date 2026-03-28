@@ -20,6 +20,8 @@ from tenyson.core import wandb_store
 
 _DEFAULT_HISTORY_LIMIT = 240
 _DEFAULT_CACHE_TTL_SECONDS = 5.0
+_DEFAULT_PROJECT_RUN_SCAN_LIMIT = 400
+_DEFAULT_EXPERIMENT_RUN_LIMIT = 200
 _INTERNAL_HISTORY_KEYS = {"_step", "_runtime", "_timestamp"}
 _PHASE_ORDER = {"sft": 0, "eval": 1, "rl": 2}
 _PREFERRED_HISTORY_KEYS = {
@@ -262,6 +264,15 @@ def _downsample_rows(rows: List[Dict[str, Any]], max_points: int) -> List[Dict[s
     return selected
 
 
+def _collect_limited_runs(runs: Iterable[Any], *, limit: int) -> List[Any]:
+    collected: List[Any] = []
+    for run in runs:
+        collected.append(run)
+        if len(collected) >= max(1, int(limit)):
+            break
+    return collected
+
+
 def _sort_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     def _sort_key(run: Dict[str, Any]) -> tuple[Any, ...]:
         created_at = _parse_iso_timestamp(run.get("created_at"))
@@ -317,25 +328,70 @@ class DashboardDataService:
         self.history_limit = max(10, int(history_limit))
         self._cache_lock = threading.Lock()
         self._project_runs_cache: tuple[float, List[Any]] | None = None
+        self._experiment_runs_cache: Dict[str, tuple[float, List[Any]]] = {}
         self._run_detail_cache: Dict[tuple[str, str, str], tuple[float, Dict[str, Any]]] = {}
 
     def project_url(self) -> str:
         return self.target.project_url
 
-    def _project_runs(self) -> List[Any]:
+    def _cached_project_runs(self) -> Optional[List[Any]]:
         now = time.monotonic()
         with self._cache_lock:
             if self._project_runs_cache is not None:
                 cached_at, cached_runs = self._project_runs_cache
                 if (now - cached_at) <= self.cache_ttl_seconds:
                     return cached_runs
+        return None
+
+    def _project_runs(self) -> List[Any]:
+        cached_runs = self._cached_project_runs()
+        if cached_runs is not None:
+            return cached_runs
 
         import wandb
 
         api = wandb.Api()
-        runs = list(api.runs(path=f"{self.target.entity}/{self.target.project}"))
+        runs = _collect_limited_runs(
+            api.runs(
+                path=f"{self.target.entity}/{self.target.project}",
+                order="-created_at",
+                per_page=100,
+                lazy=True,
+            ),
+            limit=_DEFAULT_PROJECT_RUN_SCAN_LIMIT,
+        )
+        cached_at = time.monotonic()
         with self._cache_lock:
-            self._project_runs_cache = (now, runs)
+            self._project_runs_cache = (cached_at, runs)
+        return runs
+
+    def _experiment_runs(self, experiment_id: str) -> List[Any]:
+        normalized_experiment_id = str(experiment_id or "").strip()
+        if not normalized_experiment_id:
+            return []
+
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._experiment_runs_cache.get(normalized_experiment_id)
+            if cached is not None and (now - cached[0]) <= self.cache_ttl_seconds:
+                return cached[1]
+
+        import wandb
+
+        api = wandb.Api()
+        runs = _collect_limited_runs(
+            api.runs(
+                path=f"{self.target.entity}/{self.target.project}",
+                filters={"group": normalized_experiment_id},
+                order="-created_at",
+                per_page=100,
+                lazy=True,
+            ),
+            limit=_DEFAULT_EXPERIMENT_RUN_LIMIT,
+        )
+        cached_at = time.monotonic()
+        with self._cache_lock:
+            self._experiment_runs_cache[normalized_experiment_id] = (cached_at, runs)
         return runs
 
     def _match_experiment_id(self, run: Any) -> Optional[str]:
@@ -355,6 +411,42 @@ class DashboardDataService:
             and summary.get("phase") == phase
             and summary.get("run_name") == run_name
         )
+
+    def _add_experiment_runs(
+        self,
+        grouped: Dict[str, Dict[str, Any]],
+        runs: Iterable[Any],
+    ) -> None:
+        for run in runs:
+            experiment_id = self._match_experiment_id(run)
+            if not experiment_id:
+                continue
+            summary = self._normalize_run_summary(run)
+            bucket = grouped.setdefault(
+                experiment_id,
+                {
+                    "experiment_id": experiment_id,
+                    "run_count": 0,
+                    "active_run_count": 0,
+                    "phase_counts": {},
+                    "status_counts": {},
+                    "latest_activity_at": None,
+                    "project_url": summary.get("project_url") or self.project_url(),
+                },
+            )
+            bucket["run_count"] += 1
+            if summary.get("is_active"):
+                bucket["active_run_count"] += 1
+            phase = str(summary.get("phase") or "unknown")
+            bucket["phase_counts"][phase] = bucket["phase_counts"].get(phase, 0) + 1
+            status = str(summary.get("status") or "unknown")
+            bucket["status_counts"][status] = bucket["status_counts"].get(status, 0) + 1
+            latest = _parse_iso_timestamp(summary.get("heartbeat_at")) or _parse_iso_timestamp(
+                summary.get("created_at")
+            )
+            previous = _parse_iso_timestamp(bucket.get("latest_activity_at"))
+            if latest is not None and (previous is None or latest > previous):
+                bucket["latest_activity_at"] = latest.isoformat()
 
     def _normalize_run_summary(self, run: Any) -> Dict[str, Any]:
         metrics = _maybe_json_dict(_safe_summary_get(run, wandb_store.SUMMARY_METRICS_JSON))
@@ -423,36 +515,16 @@ class DashboardDataService:
 
     def list_experiments(self) -> List[Dict[str, Any]]:
         grouped: Dict[str, Dict[str, Any]] = {}
-        for run in self._project_runs():
-            experiment_id = self._match_experiment_id(run)
-            if not experiment_id:
-                continue
-            summary = self._normalize_run_summary(run)
-            bucket = grouped.setdefault(
-                experiment_id,
-                {
-                    "experiment_id": experiment_id,
-                    "run_count": 0,
-                    "active_run_count": 0,
-                    "phase_counts": {},
-                    "status_counts": {},
-                    "latest_activity_at": None,
-                    "project_url": summary.get("project_url") or self.project_url(),
-                },
+        default_experiment_id = self.default_experiment_id
+        if default_experiment_id:
+            self._add_experiment_runs(
+                grouped,
+                self._experiment_runs(default_experiment_id),
             )
-            bucket["run_count"] += 1
-            if summary.get("is_active"):
-                bucket["active_run_count"] += 1
-            phase = str(summary.get("phase") or "unknown")
-            bucket["phase_counts"][phase] = bucket["phase_counts"].get(phase, 0) + 1
-            status = str(summary.get("status") or "unknown")
-            bucket["status_counts"][status] = bucket["status_counts"].get(status, 0) + 1
-            latest = _parse_iso_timestamp(summary.get("heartbeat_at")) or _parse_iso_timestamp(
-                summary.get("created_at")
-            )
-            previous = _parse_iso_timestamp(bucket.get("latest_activity_at"))
-            if latest is not None and (previous is None or latest > previous):
-                bucket["latest_activity_at"] = latest.isoformat()
+            project_runs = self._cached_project_runs() or []
+        else:
+            project_runs = self._project_runs()
+        self._add_experiment_runs(grouped, project_runs)
 
         return sorted(
             grouped.values(),
@@ -468,7 +540,7 @@ class DashboardDataService:
 
         runs = [
             self._normalize_run_summary(run)
-            for run in self._project_runs()
+            for run in self._experiment_runs(experiment_id)
             if self._match_experiment_id(run) == experiment_id
         ]
         runs = _sort_runs(runs)
@@ -556,7 +628,7 @@ class DashboardDataService:
     def _find_run(self, *, experiment_id: str, phase: str, run_name: str) -> Any:
         matches = [
             run
-            for run in self._project_runs()
+            for run in self._experiment_runs(experiment_id)
             if self._match_run(
                 run,
                 experiment_id=experiment_id,

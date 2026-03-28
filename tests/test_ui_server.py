@@ -55,6 +55,8 @@ class FakeApi:
         self._module = module
 
     def runs(self, path, filters=None, order=None, per_page=None, lazy=None):  # noqa: ARG002
+        if filters is None and self._module.fail_unfiltered:
+            raise AssertionError("unexpected unfiltered project scan")
         self._module.last_runs_call = {
             "path": path,
             "filters": filters,
@@ -62,19 +64,43 @@ class FakeApi:
             "per_page": per_page,
             "lazy": lazy,
         }
-        return list(self._module.api_runs)
+        return [
+            run
+            for run in self._module.api_runs
+            if _matches_fake_filters(run, filters)
+        ]
 
     def run(self, path):
         run_id = str(path).split("/")[-1]
         return self._module.api_runs_by_id[run_id]
 
 
-def build_fake_wandb_module(runs: list[FakeRun]) -> ModuleType:
+def _matches_fake_filters(run: FakeRun, filters: dict | None) -> bool:
+    if not filters:
+        return True
+    if "$and" in filters:
+        return all(_matches_fake_filters(run, part) for part in filters["$and"])
+    for key, value in filters.items():
+        if key == "group" and run.group != value:
+            return False
+        if key == "jobType" and run.job_type != value:
+            return False
+        if key == "displayName" and run.name != value:
+            return False
+    return True
+
+
+def build_fake_wandb_module(
+    runs: list[FakeRun],
+    *,
+    fail_unfiltered: bool = False,
+) -> ModuleType:
     module = ModuleType("wandb")
     module.api_runs = list(runs)
     module.api_runs_by_id = {run.id: run for run in runs}
     module.last_runs_call = None
-    module.Api = lambda: FakeApi(module)
+    module.fail_unfiltered = fail_unfiltered
+    module.Api = lambda *args, **kwargs: FakeApi(module)
     return module
 
 
@@ -273,6 +299,80 @@ class DashboardDataServiceTests(unittest.TestCase):
         self.assertEqual(detail["history"]["default_keys"][0], "constraint_accuracy")
         self.assertEqual(detail["history"]["rows"][-1]["total_samples"], 40.0)
         self.assertEqual(detail["config"]["eval"]["max_new_tokens"], 96)
+
+    def test_list_experiments_uses_default_experiment_query(self) -> None:
+        now = datetime.now(timezone.utc)
+        default_run = make_run(
+            experiment_id="wordle_exp",
+            phase="eval",
+            run_name="wordle_eval_mixed",
+            created_at=now - timedelta(minutes=10),
+            heartbeat_at=now - timedelta(minutes=1),
+            status="running",
+            is_active=True,
+            metrics={"constraint_accuracy": 0.9},
+        )
+        other_run = make_run(
+            experiment_id="other_exp",
+            phase="sft",
+            run_name="other_sft_main",
+            created_at=now - timedelta(hours=2),
+            heartbeat_at=now - timedelta(hours=2),
+            status="success",
+        )
+        fake_wandb = build_fake_wandb_module(
+            [default_run, other_run],
+            fail_unfiltered=True,
+        )
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            service = ui_server.DashboardDataService(
+                backend_ref="wandb://ayush/wordle",
+                default_experiment_id="wordle_exp",
+                cache_ttl_seconds=0.0,
+            )
+            experiments = service.list_experiments()
+
+        self.assertEqual([item["experiment_id"] for item in experiments], ["wordle_exp"])
+        self.assertEqual(fake_wandb.last_runs_call["filters"], {"group": "wordle_exp"})
+
+    def test_snapshot_and_run_detail_do_not_require_project_scan(self) -> None:
+        now = datetime.now(timezone.utc)
+        eval_run = make_run(
+            experiment_id="wordle_exp",
+            phase="eval",
+            run_name="wordle_eval_mixed",
+            created_at=now - timedelta(minutes=20),
+            heartbeat_at=now - timedelta(minutes=2),
+            status="success",
+            metrics={"constraint_accuracy": 0.875},
+            results_payload={"metrics": {"constraint_accuracy": 0.875}},
+        )
+        fake_wandb = build_fake_wandb_module(
+            [eval_run],
+            fail_unfiltered=True,
+        )
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            service = ui_server.DashboardDataService(
+                backend_ref="wandb://ayush/wordle",
+                default_experiment_id="wordle_exp",
+                cache_ttl_seconds=0.0,
+            )
+            snapshot = service.get_experiment_snapshot("wordle_exp")
+            detail = service.get_run_detail(
+                experiment_id="wordle_exp",
+                phase="eval",
+                run_name="wordle_eval_mixed",
+            )
+
+        self.assertEqual(snapshot["experiment"]["run_count"], 1)
+        self.assertEqual(snapshot["runs"][0]["run_name"], "wordle_eval_mixed")
+        self.assertEqual(detail["summary"]["run_name"], "wordle_eval_mixed")
+        self.assertEqual(
+            detail["result_payload"]["metrics"]["constraint_accuracy"],
+            0.875,
+        )
 
     def test_get_run_detail_preserves_rl_rollout_reward_components(self) -> None:
         now = datetime.now(timezone.utc)
