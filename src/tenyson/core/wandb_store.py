@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import tempfile
 import threading
+import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 
@@ -101,6 +102,54 @@ def _wandb_api() -> Any:
 def _normalize_attempt_token(value: Optional[str]) -> Optional[str]:
     normalized = str(value or "").strip()
     return normalized or None
+
+
+def _stop_attempt_discovery_wait_seconds() -> float:
+    raw = str(
+        os.getenv("TENYSON_STOP_ATTEMPT_DISCOVERY_WAIT_SECONDS", "5")
+    ).strip()
+    try:
+        wait_seconds = float(raw)
+    except Exception:  # noqa: BLE001
+        wait_seconds = 5.0
+    return max(0.0, min(wait_seconds, 30.0))
+
+
+def _discover_live_attempt_token(
+    backend_ref: str,
+    *,
+    experiment_id: str,
+    phase: str,
+    run_name: str,
+    live_run: Any,
+) -> Optional[str]:
+    attempt_token = _normalize_attempt_token(
+        _summary_get(live_run, SUMMARY_ATTEMPT_TOKEN)
+    )
+    if attempt_token is not None:
+        return attempt_token
+
+    deadline = time.monotonic() + _stop_attempt_discovery_wait_seconds()
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        time.sleep(min(0.5, max(0.0, remaining)))
+        try:
+            refreshed_run = resolve_run(
+                backend_ref,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=run_name,
+                create_if_missing=False,
+                attempt_token=None,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        attempt_token = _normalize_attempt_token(
+            _summary_get(refreshed_run, SUMMARY_ATTEMPT_TOKEN)
+        )
+        if attempt_token is not None:
+            return attempt_token
+    return None
 
 
 def _stop_control_experiment_id(experiment_id: str) -> str:
@@ -512,6 +561,7 @@ def fetch_stop_request_state(
         phase=phase,
         run_name=run_name,
     )
+    run = None
     try:
         run = fetch_run(
             backend_ref,
@@ -522,6 +572,17 @@ def fetch_stop_request_state(
         )
     except Exception:  # noqa: BLE001
         run = None
+    if run is None and attempt_token is not None:
+        try:
+            run = fetch_run(
+                backend_ref,
+                experiment_id=control_experiment_id,
+                phase=control_phase,
+                run_name=control_run_name,
+                attempt_token=None,
+            )
+        except Exception:  # noqa: BLE001
+            run = None
     if run is not None:
         return (
             bool(_summary_get(run, SUMMARY_STOP_REQUESTED)),
@@ -587,11 +648,15 @@ def set_stop_requested(
             )
         except Exception:  # noqa: BLE001
             return False
-        live_attempt = _normalize_attempt_token(
-            _summary_get(live_run, SUMMARY_ATTEMPT_TOKEN)
+        live_attempt = _discover_live_attempt_token(
+            backend_ref,
+            experiment_id=experiment_id,
+            phase=phase,
+            run_name=run_name,
+            live_run=live_run,
         )
         control_attempt = control_attempt or live_attempt
-        if control_attempt is not None:
+        try:
             run = resolve_run(
                 backend_ref,
                 experiment_id=control_experiment_id,
@@ -600,7 +665,7 @@ def set_stop_requested(
                 create_if_missing=True,
                 attempt_token=control_attempt,
             )
-        else:
+        except Exception:  # noqa: BLE001
             run = live_run
             using_legacy_live_run = True
     if using_legacy_live_run:
