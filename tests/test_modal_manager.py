@@ -325,6 +325,49 @@ class ModalGitSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "git-backed only"):
                 manager._resolve_git_source("/repo")
 
+    def test_resolve_git_source_allows_ignorable_tracked_docs_changes(self) -> None:
+        manager = ModalManager()
+
+        def fake_git(repo_root: str, *args: str) -> str:
+            mapping = {
+                ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
+                (
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ): " M README.md\n M examples/wordle/smoke_reports/probe.md",
+                ("rev-parse", "HEAD"): "abc123",
+            }
+            return mapping[args]
+
+        with patch("tenyson.cloud.modal._run_git_command", side_effect=fake_git), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            source = manager._resolve_git_source("/repo")
+
+        self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
+        self.assertEqual(source.commit, "abc123")
+
+    def test_resolve_git_source_still_rejects_non_ignorable_changes_mixed_with_docs(self) -> None:
+        manager = ModalManager()
+
+        def fake_git(repo_root: str, *args: str) -> str:
+            mapping = {
+                ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
+                (
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ): " M README.md\n M src/tenyson/cloud/modal.py",
+            }
+            return mapping[args]
+
+        with patch("tenyson.cloud.modal._run_git_command", side_effect=fake_git), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "src/tenyson/cloud/modal.py"):
+                manager._resolve_git_source("/repo")
+
     def test_resolve_git_source_uses_frozen_env_snapshot_without_git_commands(self) -> None:
         manager = ModalManager()
         env = {

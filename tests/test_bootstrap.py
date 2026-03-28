@@ -322,6 +322,75 @@ class BootstrapTests(unittest.TestCase):
         close_mock.assert_called_once_with()
         rebuild_mock.assert_called_once_with(fake_report, fake_task)
 
+    def test_wordle_experiment_main_does_not_eagerly_create_cloud(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
+
+        with patch(
+            "tenyson.bootstrap.ensure_local_controller_environment",
+            return_value=[],
+        ):
+            module_globals = runpy.run_path(
+                str(experiment_path),
+                run_name="__tenyson_wordle_lazy_cloud_test__",
+            )
+
+        close_mock = Mock()
+        fake_task = object()
+        fake_report = Mock()
+        fake_branch = Mock()
+        fake_branch.sft.return_value = "fake-sft-stage"
+        fake_branch.run.side_effect = KeyboardInterrupt
+        branch_clouds: list[object | None] = []
+        create_cloud_mock = Mock(
+            side_effect=AssertionError("create_cloud should not run before stage execution")
+        )
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+
+            def create_cloud(self):
+                return create_cloud_mock()
+
+            def branch(self, cloud=None):
+                branch_clouds.append(cloud)
+                return fake_branch
+
+            def close(self):
+                close_mock()
+
+        class FakeConfigTemplates:
+            @staticmethod
+            def from_directory(*args, **kwargs):
+                del args, kwargs
+                return object()
+
+        class FakeModalManager:
+            @staticmethod
+            def factory_from_env(**kwargs):
+                del kwargs
+                return lambda: object()
+
+        main_fn = module_globals["main"]
+        main_globals = main_fn.__globals__
+        main_globals["_install_graceful_shutdown_handlers"] = lambda: None
+        main_globals["_load_example_env"] = lambda path=None: {}
+        main_globals["load_task"] = lambda path: fake_task
+        main_globals["ExperimentReport"] = lambda output_path: fake_report
+        main_globals["_wordle_smoke_overrides"] = lambda: {}
+        main_globals["shared_overrides_from_env"] = lambda: None
+        main_globals["ConfigTemplates"] = FakeConfigTemplates
+        main_globals["ModalManager"] = FakeModalManager
+        main_globals["ExperimentSession"] = FakeSession
+        main_globals["_rebuild_report_from_telemetry"] = lambda report, task: None
+
+        main_fn()
+
+        close_mock.assert_called_once_with()
+        create_cloud_mock.assert_not_called()
+        self.assertEqual(branch_clouds, [None])
+
     def test_wordle_experiment_main_uses_env_on_failure_policy(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         experiment_path = repo_root / "examples" / "wordle" / "experiment.py"

@@ -94,6 +94,15 @@ _MODAL_CLOSE_GRACE_SECONDS = 90.0
 _MODAL_APP_STOP_TIMEOUT_SECONDS = 30.0
 _MODAL_TELEMETRY_START_TIMEOUT_SECONDS = 180.0
 _MODAL_RUN_RESULT_TIMEOUT_BUFFER_SECONDS = 300.0
+_IGNORABLE_TRACKED_GIT_PATH_PREFIXES = (
+    ".tenyson_runs/",
+    "examples/wordle/smoke_reports/",
+)
+_IGNORABLE_TRACKED_GIT_PATH_SUFFIXES = (
+    ".md",
+    ".rst",
+    ".txt",
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +143,42 @@ def _drain_subprocess_stream(
             stream.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _tracked_git_status_paths(status_output: str) -> List[str]:
+    paths: List[str] = []
+    for raw_line in str(status_output or "").splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        path_text = line[3:] if len(line) > 3 else line
+        if " -> " in path_text:
+            path_text = path_text.split(" -> ", 1)[1]
+        normalized_path = path_text.strip().strip('"').replace("\\", "/")
+        if normalized_path.startswith("./"):
+            normalized_path = normalized_path[2:]
+        if normalized_path:
+            paths.append(normalized_path)
+    return paths
+
+
+def _is_ignorable_tracked_git_path(path: str) -> bool:
+    normalized_path = str(path or "").strip().replace("\\", "/")
+    if normalized_path.startswith("./"):
+        normalized_path = normalized_path[2:]
+    if not normalized_path:
+        return False
+    if normalized_path.startswith(_IGNORABLE_TRACKED_GIT_PATH_PREFIXES):
+        return True
+    return normalized_path.endswith(_IGNORABLE_TRACKED_GIT_PATH_SUFFIXES)
+
+
+def _blocking_tracked_git_paths(status_output: str) -> List[str]:
+    return [
+        path
+        for path in _tracked_git_status_paths(status_output)
+        if not _is_ignorable_tracked_git_path(path)
+    ]
 
 
 def _run_subprocess_with_streaming_logs(
@@ -684,10 +729,15 @@ class ModalManager(BaseCloudManager):
             "--porcelain",
             "--untracked-files=no",
         )
-        if tracked_status:
+        blocking_paths = _blocking_tracked_git_paths(tracked_status)
+        if blocking_paths:
+            path_summary = ", ".join(blocking_paths[:5])
+            if len(blocking_paths) > 5:
+                path_summary = f"{path_summary}, +{len(blocking_paths) - 5} more"
             raise RuntimeError(
                 "Modal execution is git-backed only. Commit tracked changes before launching "
-                "so the remote worker can run the exact pushed code."
+                "so the remote worker can run the exact pushed code. "
+                f"Blocking tracked changes: {path_summary}"
             )
 
         commit = str(os.getenv("TENYSON_GIT_COMMIT") or "").strip() or _run_git_command(

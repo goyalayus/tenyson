@@ -422,7 +422,7 @@ def main() -> None:
         recovery_experiment_id=recovery_experiment_id,
         recovery_restart_stages=recovery_restart_stages,
     )
-    primary_branch = session.branch(cloud=session.create_cloud())
+    primary_branch = session.branch()
 
     try:
         primary_branch.run(
