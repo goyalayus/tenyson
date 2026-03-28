@@ -535,7 +535,7 @@
       const bottom = document.createElement("div");
       bottom.className = "run-card-bottom";
       bottom.appendChild(
-        createText("span", "", pickRunPreview(run) || "No metrics logged yet")
+        createText("span", "", pickRunPreview(run) || runPreviewFallbackText(run))
       );
       bottom.appendChild(
         createText(
@@ -615,7 +615,9 @@
       metaItem("Provider", summary.provider || "n/a"),
       metaItem(
         "W&B run",
-        summary.wandb_url ? buildLink("Open run", summary.wandb_url) : "n/a"
+        summary.wandb_url
+          ? buildLink("Open run", summary.wandb_url)
+          : pendingRunUrlLabel(summary)
       ),
       metaItem(
         "HF adapter",
@@ -661,7 +663,7 @@
     ]);
 
     if (!Object.keys(metrics).length) {
-      appendEmptyState(elements.detailMetrics, "No summary metrics were logged for this run.");
+      appendEmptyState(elements.detailMetrics, detailMetricsEmptyState(summary, metrics));
     } else {
       renderMetricCards(elements.detailMetrics, metrics);
     }
@@ -1049,11 +1051,42 @@
     return "";
   }
 
+  function runPreviewFallbackText(run) {
+    if (hasPendingTerminalMetrics(run, run.metrics)) {
+      return "Live run; final metrics pending";
+    }
+    return "No metrics logged yet";
+  }
+
+  function pendingRunUrlLabel(run) {
+    return hasPendingRunUrl(run) ? "resolving..." : "n/a";
+  }
+
+  function detailMetricsEmptyState(summary, metrics) {
+    if (hasPendingTerminalMetrics(summary, metrics)) {
+      return "This run is still live. Final summary metrics are not available yet.";
+    }
+    return "No summary metrics were logged for this run.";
+  }
+
   function collectMetrics(detail) {
     const summary = asObject(detail.summary);
     const summaryMetrics = asObject(summary.metrics);
     const resultMetrics = asObject(asObject(detail.result_payload).metrics);
     return Object.assign({}, resultMetrics, summaryMetrics);
+  }
+
+  function hasPendingRunUrl(run) {
+    const summary = asObject(run);
+    return Boolean(summary.is_active) && !String(summary.wandb_url || "").trim();
+  }
+
+  function hasPendingTerminalMetrics(run, metrics) {
+    const summary = asObject(run);
+    if (!summary.is_active || summary.job_result_present) {
+      return false;
+    }
+    return !Object.keys(asObject(metrics)).length;
   }
 
   function orderedMetricEntries(metrics, phaseOverride) {

@@ -116,6 +116,7 @@ def make_run(
     metrics: dict | None = None,
     results_payload: dict | None = None,
     job_result_payload: dict | None = None,
+    include_job_result: bool = True,
     history_rows: list[dict] | None = None,
     config: dict | None = None,
     provider: str = "modal",
@@ -138,9 +139,10 @@ def make_run(
         wandb_store.SUMMARY_PROVIDER: provider,
         wandb_store.SUMMARY_HEARTBEAT_AT: (heartbeat_at or created_at).isoformat(),
         wandb_store.SUMMARY_METRICS_JSON: json.dumps(metrics_payload),
-        wandb_store.SUMMARY_JOB_RESULT_JSON: json.dumps(job_payload),
         wandb_store.SUMMARY_PROJECT_URL: "https://wandb.example/ayush/wordle",
     }
+    if include_job_result:
+        summary[wandb_store.SUMMARY_JOB_RESULT_JSON] = json.dumps(job_payload)
     if results_payload is not None:
         summary[wandb_store.SUMMARY_RESULTS_JSON] = json.dumps(results_payload)
 
@@ -374,6 +376,53 @@ class DashboardDataServiceTests(unittest.TestCase):
             0.875,
         )
 
+    def test_active_run_without_terminal_result_stays_pending_for_ui(self) -> None:
+        now = datetime.now(timezone.utc)
+        live_run = make_run(
+            experiment_id="wordle_exp",
+            phase="sft",
+            run_name="wordle_sft_main",
+            created_at=now - timedelta(minutes=15),
+            heartbeat_at=now - timedelta(seconds=20),
+            status="running",
+            is_active=True,
+            metrics={},
+            include_job_result=False,
+            history_rows=[
+                {"_step": 1, "train/loss": 1.4, "train/global_step": 8},
+                {"_step": 2, "train/loss": 1.1, "train/global_step": 16},
+            ],
+        )
+        live_run.summary[wandb_store.SUMMARY_WANDB_URL] = ""
+        live_run.url = ""
+        fake_wandb = build_fake_wandb_module([live_run])
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            service = ui_server.DashboardDataService(
+                backend_ref="wandb://ayush/wordle",
+                default_experiment_id="wordle_exp",
+                cache_ttl_seconds=0.0,
+            )
+            snapshot = service.get_experiment_snapshot("wordle_exp")
+            detail = service.get_run_detail(
+                experiment_id="wordle_exp",
+                phase="sft",
+                run_name="wordle_sft_main",
+            )
+
+        self.assertEqual(snapshot["experiment"]["active_run_count"], 1)
+        self.assertEqual(snapshot["runs"][0]["status"], "running")
+        self.assertTrue(snapshot["runs"][0]["is_active"])
+        self.assertFalse(snapshot["runs"][0]["job_result_present"])
+        self.assertIsNone(snapshot["runs"][0]["wandb_url"])
+        self.assertEqual(snapshot["runs"][0]["metrics"], {})
+        self.assertEqual(detail["summary"]["status"], "running")
+        self.assertTrue(detail["summary"]["is_active"])
+        self.assertFalse(detail["summary"]["job_result_present"])
+        self.assertIsNone(detail["summary"]["wandb_url"])
+        self.assertEqual(detail["summary"]["metrics"], {})
+        self.assertEqual(detail["history"]["rows"][-1]["train/loss"], 1.1)
+
     def test_get_run_detail_preserves_rl_rollout_reward_components(self) -> None:
         now = datetime.now(timezone.utc)
         rl_run = make_run(
@@ -496,6 +545,9 @@ class DashboardRequestHandlerTests(unittest.TestCase):
         self.assertEqual(run_payload["summary"]["run_name"], "wordle_eval_mixed")
         self.assertEqual(run_payload["result_payload"]["metrics"]["constraint_accuracy"], 0.9)
         self.assertIn("Tenyson Dashboard", app_js)
+        self.assertIn("Live run; final metrics pending", app_js)
+        self.assertIn("This run is still live. Final summary metrics are not available yet.", app_js)
+        self.assertIn("resolving...", app_js)
 
 
 if __name__ == "__main__":
