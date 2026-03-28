@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import tenyson.ctl as ctl_module
 import tenyson.core.control as control_module
+import tenyson.core.controller_runtime as controller_runtime_module
 import tenyson.core.telemetry as telemetry_module
 from tenyson.core.telemetry import (
     begin_run_attempt,
@@ -116,6 +117,82 @@ class CtlStopTests(unittest.TestCase):
             create_if_missing=False,
         )
 
+    def test_stop_interactive_cancel_exits_without_requesting_stop(self) -> None:
+        args = argparse.Namespace(
+            db_url="wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            run_id=None,
+            max_age_seconds=90,
+        )
+        candidates = [
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        ]
+        stderr_buffer = io.StringIO()
+
+        with patch.object(
+            ctl_module,
+            "list_live_runs",
+            return_value=candidates,
+        ), patch(
+            "builtins.input",
+            return_value="q",
+        ), patch.object(
+            ctl_module,
+            "request_stop",
+        ) as request_stop_mock, contextlib.redirect_stderr(stderr_buffer):
+            with self.assertRaises(SystemExit) as exc_info:
+                ctl_module._cmd_stop(args)
+
+        self.assertEqual(exc_info.exception.code, 1)
+        self.assertIn("Cancelled.", stderr_buffer.getvalue())
+        request_stop_mock.assert_not_called()
+
+    def test_stop_interactive_eof_exits_without_requesting_stop(self) -> None:
+        args = argparse.Namespace(
+            db_url="wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            run_id=None,
+            max_age_seconds=90,
+        )
+        candidates = [
+            LiveRunInfo(
+                run_id="wordle_rl_mixed",
+                phase="rl",
+                provider="modal",
+                status="running",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        ]
+        stderr_buffer = io.StringIO()
+
+        with patch.object(
+            ctl_module,
+            "list_live_runs",
+            return_value=candidates,
+        ), patch(
+            "builtins.input",
+            side_effect=EOFError,
+        ), patch.object(
+            ctl_module,
+            "request_stop",
+        ) as request_stop_mock, contextlib.redirect_stderr(stderr_buffer):
+            with self.assertRaises(SystemExit) as exc_info:
+                ctl_module._cmd_stop(args)
+
+        self.assertEqual(exc_info.exception.code, 1)
+        self.assertIn("Interactive selection cancelled.", stderr_buffer.getvalue())
+        request_stop_mock.assert_not_called()
+
     def test_stop_exits_when_no_active_control_row_exists(self) -> None:
         args = argparse.Namespace(
             db_url="wandb://ayush/wordle",
@@ -136,6 +213,52 @@ class CtlStopTests(unittest.TestCase):
         self.assertEqual(exc_info.exception.code, 1)
         self.assertIn(
             "No active run control row found for run_id=wordle_rl_mixed",
+            stderr_buffer.getvalue(),
+        )
+
+    def test_stop_exits_when_run_id_is_wrong(self) -> None:
+        args = argparse.Namespace(
+            db_url="wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            run_id="missing_rl",
+            max_age_seconds=90,
+        )
+        stderr_buffer = io.StringIO()
+
+        with patch.object(
+            ctl_module,
+            "request_stop",
+            return_value=False,
+        ), contextlib.redirect_stderr(stderr_buffer):
+            with self.assertRaises(SystemExit) as exc_info:
+                ctl_module._cmd_stop(args)
+
+        self.assertEqual(exc_info.exception.code, 1)
+        self.assertIn(
+            "No active run control row found for run_id=missing_rl experiment_id=wordle_exp.",
+            stderr_buffer.getvalue(),
+        )
+
+    def test_stop_exits_when_experiment_id_is_wrong(self) -> None:
+        args = argparse.Namespace(
+            db_url="wandb://ayush/wordle",
+            experiment_id="other_exp",
+            run_id="wordle_rl_mixed",
+            max_age_seconds=90,
+        )
+        stderr_buffer = io.StringIO()
+
+        with patch.object(
+            ctl_module,
+            "request_stop",
+            return_value=False,
+        ), contextlib.redirect_stderr(stderr_buffer):
+            with self.assertRaises(SystemExit) as exc_info:
+                ctl_module._cmd_stop(args)
+
+        self.assertEqual(exc_info.exception.code, 1)
+        self.assertIn(
+            "No active run control row found for run_id=wordle_rl_mixed experiment_id=other_exp.",
             stderr_buffer.getvalue(),
         )
 
@@ -172,6 +295,13 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(metadata["cwd"], "/repo")
             self.assertEqual(metadata["log_path"], str(log_path))
+            self.assertEqual(
+                metadata[controller_runtime_module.RUNTIME_STATE_KEY],
+                "starting",
+            )
+            self.assertFalse(
+                metadata[controller_runtime_module.STOP_AT_BOUNDARY_REQUESTED_KEY]
+            )
             self.assertTrue(log_path.exists())
             log_contents = log_path.read_text(encoding="utf-8")
             self.assertIn("[tenyson.ctl] Launching controller 'Wordle Controller'", log_contents)
@@ -190,6 +320,12 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(popen_mock.call_args.kwargs["stderr"], ctl_module.subprocess.STDOUT)
             self.assertEqual(popen_mock.call_args.kwargs["env"]["FOO"], "bar")
+            self.assertEqual(
+                popen_mock.call_args.kwargs["env"][
+                    controller_runtime_module.TENYSON_CONTROLLER_METADATA_PATH
+                ],
+                str(metadata_path),
+            )
 
     def test_launch_rejects_existing_live_controller(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -221,6 +357,14 @@ class CtlControllerLifecycleTests(unittest.TestCase):
                         "cwd": "/repo",
                         "log_path": str(base.with_suffix(".log")),
                         "launched_at": "2026-03-24T00:00:00+00:00",
+                        controller_runtime_module.RUNTIME_STATE_KEY: "between-stages",
+                        controller_runtime_module.RUNTIME_LAST_COMPLETED_STAGE_IDS_KEY: [
+                            "eval_baseline_mixed"
+                        ],
+                        controller_runtime_module.STOP_AT_BOUNDARY_REQUESTED_KEY: True,
+                        controller_runtime_module.STOP_AT_BOUNDARY_REQUESTED_AT_KEY: (
+                            "2026-03-24T00:01:00+00:00"
+                        ),
                     }
                 ),
                 encoding="utf-8",
@@ -237,11 +381,21 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             self.assertIn("status: running", output)
             self.assertIn("pid: 456", output)
             self.assertIn("python3 examples/wordle/experiment.py", output)
+            self.assertIn("state: between-stages", output)
+            self.assertIn("last_completed_stages: eval_baseline_mixed", output)
+            self.assertIn(
+                "stop_at_boundary_requested_at: 2026-03-24T00:01:00+00:00",
+                output,
+            )
 
     def test_stop_controller_sends_sigterm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             (Path(tmpdir) / "wordle.pid").write_text("789\n", encoding="utf-8")
-            args = argparse.Namespace(name="wordle", controller_dir=tmpdir)
+            args = argparse.Namespace(
+                name="wordle",
+                controller_dir=tmpdir,
+                at_next_boundary=False,
+            )
 
             with patch.object(ctl_module, "_is_process_alive", return_value=True), patch.object(
                 ctl_module.os,
@@ -250,6 +404,40 @@ class CtlControllerLifecycleTests(unittest.TestCase):
                 ctl_module._cmd_stop_controller(args)
 
             kill_mock.assert_called_once_with(789, ctl_module.signal.SIGTERM)
+
+    def test_stop_controller_can_request_boundary_stop_without_sigterm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = Path(tmpdir) / "wordle.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "name": "wordle",
+                        "pid": 789,
+                        controller_runtime_module.STOP_AT_BOUNDARY_REQUESTED_KEY: False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (Path(tmpdir) / "wordle.pid").write_text("789\n", encoding="utf-8")
+            args = argparse.Namespace(
+                name="wordle",
+                controller_dir=tmpdir,
+                at_next_boundary=True,
+            )
+
+            with patch.object(ctl_module, "_is_process_alive", return_value=True), patch.object(
+                ctl_module.os,
+                "kill",
+            ) as kill_mock:
+                ctl_module._cmd_stop_controller(args)
+
+            kill_mock.assert_not_called()
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertTrue(metadata[controller_runtime_module.STOP_AT_BOUNDARY_REQUESTED_KEY])
+            self.assertIsInstance(
+                metadata[controller_runtime_module.STOP_AT_BOUNDARY_REQUESTED_AT_KEY],
+                str,
+            )
 
 
 class WandBStopTests(unittest.TestCase):
@@ -483,6 +671,32 @@ class WandBStopTests(unittest.TestCase):
                 call.kwargs["create_if_missing"] is False
                 for call in set_stop_requested_mock.call_args_list
             )
+        )
+
+    def test_prime_stop_target_creates_canonical_control_row(self) -> None:
+        with patch.object(
+            control_module.wandb_store,
+            "set_stop_requested",
+            return_value=True,
+        ) as set_stop_requested_mock:
+            primed = control_module.prime_stop_target(
+                db_url="wandb://ayush/wordle",
+                run_id="wordle_eval_turn2",
+                experiment_id="wordle_exp",
+                phase="eval",
+                attempt_token="attempt-123",
+            )
+
+        self.assertTrue(primed)
+        set_stop_requested_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="eval",
+            run_name="wordle_eval_turn2",
+            requested=False,
+            when_iso=None,
+            create_if_missing=True,
+            attempt_token="attempt-123",
         )
 
 

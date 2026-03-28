@@ -160,7 +160,7 @@ def _prompt_failure_action(
     run_id = str(getattr(last_result, "run_id", "") or "").strip() or "unknown"
     status = str(getattr(last_result, "status", "") or "").strip().lower()
     can_resume = job_type in ("sft", "rl") and bool(hf_repo_id and hf_revision)
-    can_continue = status == "stopped" and can_resume
+    can_continue = status == "stopped" and (job_type == "eval" or can_resume)
 
     with _FAILURE_PROMPT_LOCK:
         while True:

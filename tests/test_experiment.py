@@ -79,6 +79,50 @@ class ExperimentSessionTests(unittest.TestCase):
 
         self.assertEqual(action, "restart")
 
+    def test_prompt_recovery_action_continue_accepts_stopped_eval_without_checkpoint(self) -> None:
+        last_result = JobResult(
+            run_id="eval_baseline_mixed",
+            status="stopped",
+            total_time_seconds=0.0,
+        )
+
+        with patch.object(sys, "stdin", io.StringIO("continue\n")), patch.object(
+            sys,
+            "stderr",
+            io.StringIO(),
+        ):
+            action = experiment_module._prompt_recovery_action(
+                step_label="eval_baseline_mixed",
+                run_id="eval_baseline_mixed",
+                job_type="eval",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "continue")
+
+    def test_prompt_recovery_action_rejects_continue_for_stopped_sft_without_checkpoint(self) -> None:
+        last_result = JobResult(
+            run_id="wordle_sft_main",
+            status="stopped",
+            total_time_seconds=0.0,
+        )
+
+        stderr = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO("continue\nrestart\n")), patch.object(
+            sys,
+            "stderr",
+            stderr,
+        ):
+            action = experiment_module._prompt_recovery_action(
+                step_label="sft_main",
+                run_id="wordle_sft_main",
+                job_type="sft",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "restart")
+        self.assertIn("Invalid choice", stderr.getvalue())
+
     def test_recovery_controller_lock_refuses_busy_lock(self) -> None:
         if experiment_module.fcntl is None:
             self.skipTest("fcntl is unavailable on this platform")
@@ -157,6 +201,39 @@ class ExperimentSessionTests(unittest.TestCase):
             },
         )
         self.assertEqual(templates.clone("rl"), base_rl_template)
+
+    def test_branch_run_honors_boundary_stop_request_after_stage_finishes(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+        )
+        branch = session.branch()
+        stage = branch.sft("sft_main", run_name="wordle_sft_main")
+
+        with patch.object(
+            experiment_module,
+            "boundary_stop_requested",
+            side_effect=[False, True],
+        ), patch.object(
+            experiment_module,
+            "clear_stop_at_boundary_request",
+        ) as clear_stop_mock, patch.object(
+            experiment_module,
+            "prime_stop_target",
+        ), patch.object(
+            experiment_module,
+            "update_controller_runtime_state",
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            return_value=[_result("wordle_sft_main", status="success")],
+        ):
+            with self.assertRaises(ExperimentAborted):
+                branch.run(stage)
+
+        clear_stop_mock.assert_called_once()
 
     def test_config_templates_from_directory_uses_default_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -681,6 +758,64 @@ class ExperimentSessionTests(unittest.TestCase):
             hf_revision="sha123",
             failure_reason="Manual stop requested at step 12.",
             stopped_early=True,
+        )
+
+        def promote_partial(result, *, config, job_type):
+            del config, job_type
+            result.status = "partial"
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[],
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=({}, dict(recovered.__dict__)),
+        ), patch.object(
+            experiment_module,
+            "_prompt_recovery_action",
+            return_value="continue",
+        ) as prompt_mock, patch.object(
+            experiment_module,
+            "_accept_stopped_result",
+            side_effect=promote_partial,
+        ) as accept_mock, patch.object(
+            experiment_module,
+            "run_pipeline",
+        ) as run_pipeline_mock:
+            result = session.run_stage(stage, cloud=object())
+
+        self.assertEqual(result.status, "partial")
+        self.assertTrue(result.stopped_early)
+        prompt_mock.assert_called_once()
+        accept_mock.assert_called_once()
+        run_pipeline_mock.assert_not_called()
+
+    def test_run_stage_recovery_continue_skips_rerun_for_stopped_eval(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        stage = session.eval(
+            "eval_baseline_mixed",
+            adapter=AdapterRef(repo_id="repo/id", revision="sha123"),
+            run_name="eval_baseline_mixed",
+        )
+        recovered = _result(
+            "eval_baseline_mixed",
+            status="stopped",
+            processed_samples=32,
+            expected_samples=33,
+            stopped_early=True,
+            failure_reason="Manual stop requested after processing 32 / 33 prompts.",
         )
 
         def promote_partial(result, *, config, job_type):

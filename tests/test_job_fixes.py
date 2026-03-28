@@ -395,7 +395,7 @@ class EvalStopTests(unittest.TestCase):
         ), patch.object(
             telemetry_module,
             "run_stop_requested",
-            side_effect=[True],
+            side_effect=[False, True],
         ) as run_stop_requested_mock, patch.object(
             telemetry_module,
             "record_run_summary",
@@ -421,15 +421,17 @@ class EvalStopTests(unittest.TestCase):
         ) as generate_batch_mock:
             result = job.run()
 
-        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.status, "stopped")
         self.assertTrue(result.stopped_early)
         self.assertEqual(result.processed_samples, 1)
         self.assertEqual(result.expected_samples, 2)
+        self.assertIn("Manual stop requested", result.failure_reason or "")
         self.assertEqual(task.last_prompts, ["prompt-1"])
         self.assertEqual(task.last_completions, ["completion-1"])
         self.assertEqual(len(task.last_rows), 1)
         self.assertEqual(generate_batch_mock.call_count, 1)
-        run_stop_requested_mock.assert_called_once_with(
+        self.assertEqual(run_stop_requested_mock.call_count, 2)
+        run_stop_requested_mock.assert_called_with(
             fake_client,
             experiment_id="wordle_exp",
             run_id="eval_smoke",
@@ -438,9 +440,9 @@ class EvalStopTests(unittest.TestCase):
         )
         recorded_summary_result = record_run_summary_mock.call_args.kwargs["result"]
         recorded_payload = record_run_result_mock.call_args.kwargs["job_result_payload"]
-        self.assertEqual(recorded_summary_result.status, "partial")
+        self.assertEqual(recorded_summary_result.status, "stopped")
         self.assertTrue(recorded_summary_result.stopped_early)
-        self.assertEqual(recorded_payload.status, "partial")
+        self.assertEqual(recorded_payload.status, "stopped")
         self.assertTrue(recorded_payload.stopped_early)
 
 

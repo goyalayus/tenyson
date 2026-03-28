@@ -8,6 +8,16 @@ import subprocess
 import sys
 from typing import Any, Dict, List
 
+from tenyson.core.controller_runtime import (
+    RUNTIME_ACTIVE_STAGE_IDS_KEY,
+    RUNTIME_LAST_COMPLETED_STAGE_IDS_KEY,
+    RUNTIME_STATE_KEY,
+    STOP_AT_BOUNDARY_REQUESTED_AT_KEY,
+    STOP_AT_BOUNDARY_REQUESTED_KEY,
+    TENYSON_CONTROLLER_METADATA_PATH,
+    load_controller_metadata,
+    request_stop_at_boundary,
+)
 from tenyson.core.control import list_live_runs, request_stop
 
 
@@ -89,12 +99,7 @@ def _is_process_alive(pid: int) -> bool:
 
 
 def _load_controller_metadata(metadata_path: Path) -> Dict[str, Any]:
-    if not metadata_path.exists():
-        return {}
-    try:
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return load_controller_metadata(metadata_path)
 
 
 def _normalize_launch_command(command: List[str]) -> List[str]:
@@ -141,6 +146,7 @@ def _cmd_launch(args: argparse.Namespace) -> None:
 
     cwd = os.path.abspath(str(args.cwd or "."))
     launch_time = datetime.now(timezone.utc).isoformat()
+    env[TENYSON_CONTROLLER_METADATA_PATH] = str(metadata_path)
     with open(log_path, "w", encoding="utf-8") as log_handle:
         log_handle.write(
             f"[tenyson.ctl] Launching controller '{args.name}' at {launch_time}\n"
@@ -165,6 +171,11 @@ def _cmd_launch(args: argparse.Namespace) -> None:
         "cwd": cwd,
         "log_path": str(log_path),
         "launched_at": launch_time,
+        RUNTIME_STATE_KEY: "starting",
+        RUNTIME_ACTIVE_STAGE_IDS_KEY: [],
+        RUNTIME_LAST_COMPLETED_STAGE_IDS_KEY: [],
+        STOP_AT_BOUNDARY_REQUESTED_KEY: False,
+        STOP_AT_BOUNDARY_REQUESTED_AT_KEY: None,
     }
     metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=True, indent=2) + "\n",
@@ -199,6 +210,21 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print(f"  cwd: {metadata['cwd']}", flush=True)
     if metadata.get("command"):
         print(f"  command: {' '.join(metadata['command'])}", flush=True)
+    runtime_state = str(metadata.get(RUNTIME_STATE_KEY) or "").strip()
+    if runtime_state:
+        print(f"  state: {runtime_state}", flush=True)
+    active_stage_ids = metadata.get(RUNTIME_ACTIVE_STAGE_IDS_KEY) or []
+    if active_stage_ids:
+        print(f"  active_stages: {', '.join(str(value) for value in active_stage_ids)}", flush=True)
+    last_completed_stage_ids = metadata.get(RUNTIME_LAST_COMPLETED_STAGE_IDS_KEY) or []
+    if last_completed_stage_ids:
+        print(
+            f"  last_completed_stages: {', '.join(str(value) for value in last_completed_stage_ids)}",
+            flush=True,
+        )
+    if metadata.get(STOP_AT_BOUNDARY_REQUESTED_KEY):
+        requested_at = metadata.get(STOP_AT_BOUNDARY_REQUESTED_AT_KEY) or "unknown"
+        print(f"  stop_at_boundary_requested_at: {requested_at}", flush=True)
     print(f"  log: {log_path}", flush=True)
 
     if not alive:
@@ -210,7 +236,7 @@ def _cmd_stop_controller(args: argparse.Namespace) -> None:
         controller_dir=str(args.controller_dir),
         name=str(args.name),
     )
-    del log_path, metadata_path
+    del log_path
     pid = _read_pidfile(pid_path)
     if pid is None or not _is_process_alive(pid):
         print(
@@ -218,6 +244,17 @@ def _cmd_stop_controller(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if bool(getattr(args, "at_next_boundary", False)):
+        request_stop_at_boundary(metadata_path)
+        print(
+            (
+                f"[tenyson.ctl] Requested controller '{args.name}' to stop at the "
+                "next stage boundary."
+            ),
+            flush=True,
+        )
+        return
 
     os.kill(pid, signal.SIGTERM)
     print(
@@ -376,6 +413,14 @@ def main() -> None:
         "--controller-dir",
         default=".tenyson_runs/controllers",
         help="Directory for controller pid/log/metadata files.",
+    )
+    stop_controller_parser.add_argument(
+        "--at-next-boundary",
+        action="store_true",
+        help=(
+            "Do not interrupt the current stage. Ask the controller to stop "
+            "cleanly before launching the next stage."
+        ),
     )
     stop_controller_parser.set_defaults(func=_cmd_stop_controller)
 

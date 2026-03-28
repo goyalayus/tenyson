@@ -357,6 +357,7 @@ class EvalJob:
 
             processed_prompts: List[str] = []
             processed_completions: List[str] = []
+            stop_requested = False
             last_heartbeat_at = 0.0
             heartbeat_warned = False
 
@@ -400,6 +401,14 @@ class EvalJob:
             )
             _heartbeat(force=True)
             for start_idx in range(0, len(all_prompts), batch_size):
+                if _should_stop():
+                    stop_requested = True
+                    print(
+                        "[EvalJob] Manual stop requested before the next eval batch; "
+                        "stopping early.",
+                        flush=True,
+                    )
+                    break
                 end_idx = min(start_idx + batch_size, len(all_prompts))
                 batch_prompts = list(all_prompts[start_idx:end_idx])
 
@@ -414,6 +423,7 @@ class EvalJob:
                 _heartbeat(force=False)
 
                 if _should_stop():
+                    stop_requested = True
                     print(
                         f"[EvalJob] Manual stop requested after processing {len(processed_prompts)} prompts; stopping early.",
                         flush=True,
@@ -433,28 +443,40 @@ class EvalJob:
                 self.config,
                 tokenizer,
             )
-            stopped_early = processed_samples < expected_samples
+            stopped_early = stop_requested or processed_samples < expected_samples
             results.setdefault("metadata", {})
             results["metadata"]["processed_samples"] = processed_samples
             results["metadata"]["expected_samples"] = expected_samples
             if stopped_early:
-                # Flag partial evaluations so downstream tooling can recognise them.
+                # Preserve the partial/stopped shape so downstream tooling can
+                # recognise that this eval did not consume the full dataset.
                 results["metadata"]["stopped_early"] = True
+            if stop_requested:
+                results["metadata"]["manual_stop_requested"] = True
 
             metrics = results.get("metrics", {})
             for key, value in metrics.items():
                 print(f"[EvalJob] {key}: {value}", flush=True)
 
             total_time = time.time() - start
+            failure_reason = None
+            if stop_requested:
+                failure_reason = (
+                    "Manual stop requested after processing "
+                    f"{processed_samples} / {expected_samples} prompts."
+                )
 
             result = JobResult(
                 run_id=run_name,
-                status="partial" if stopped_early else "success",
+                status="stopped"
+                if stop_requested
+                else ("partial" if stopped_early else "success"),
                 total_time_seconds=total_time,
                 metrics=metrics,
                 stopped_early=stopped_early,
                 processed_samples=processed_samples,
                 expected_samples=expected_samples,
+                failure_reason=failure_reason,
                 wandb_url=getattr(wandb_run, "url", None)
                 if wandb_run is not None
                 else None,

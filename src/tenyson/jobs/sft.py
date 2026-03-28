@@ -187,6 +187,7 @@ class SFTJob:
             record_run_summary,
             resolve_required_telemetry_context,
             RunHeartbeatTelemetryCallback,
+            run_stop_requested,
             SFTTelemetryCallback,
             TelemetryClient,
             WandBUrlTelemetryCallback,
@@ -235,6 +236,57 @@ class SFTJob:
                 flush=True,
             )
 
+        def _wandb_url() -> Any:
+            try:
+                import wandb  # type: ignore[import-not-found]
+
+                run = getattr(wandb, "run", None)
+                if run is not None:
+                    return getattr(run, "url", None)
+            except Exception:  # noqa: BLE001
+                return None
+            return None
+
+        def _finalize_result(result: JobResult) -> JobResult:
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase="sft",
+                result=result,
+            )
+            record_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase="sft",
+                results_payload=result,
+                job_result_payload=result,
+            )
+            try:
+                import wandb  # type: ignore[import-not-found]
+
+                wandb.finish()
+            except Exception:  # noqa: BLE001
+                pass
+            return result
+
+        def _stop_requested_now() -> bool:
+            try:
+                return run_stop_requested(
+                    telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase="sft",
+                    attempt_token=attempt_token,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    "[SFTJob] Warning: startup stop polling failed; continuing "
+                    f"training startup. {exc}",
+                    flush=True,
+                )
+                return False
+
         hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
         if not hf_repo_base:
             raise ValueError(
@@ -255,7 +307,38 @@ class SFTJob:
                 "training.hf_push_every_steps must be >= 1 when HF push is enabled."
             )
 
+        if _stop_requested_now():
+            return _finalize_result(
+                JobResult(
+                    run_id=run_name,
+                    status="stopped",
+                    total_time_seconds=time.time() - start,
+                    metrics={},
+                    stopped_early=True,
+                    wandb_url=_wandb_url(),
+                    hf_repo_id=push_repo_id or None,
+                    hf_revision=None,
+                    failure_reason="Manual stop requested before SFT model load.",
+                    attempt_token=attempt_token,
+                )
+            )
+
         model, tokenizer, seq_len = self._build_model_and_tokenizer()
+        if _stop_requested_now():
+            return _finalize_result(
+                JobResult(
+                    run_id=run_name,
+                    status="stopped",
+                    total_time_seconds=time.time() - start,
+                    metrics={},
+                    stopped_early=True,
+                    wandb_url=_wandb_url(),
+                    hf_repo_id=push_repo_id or None,
+                    hf_revision=None,
+                    failure_reason="Manual stop requested after SFT model load.",
+                    attempt_token=attempt_token,
+                )
+            )
         # Import TRL/Transformers only after Unsloth has patched the runtime.
         from transformers import EarlyStoppingCallback
         from trl import SFTConfig, SFTTrainer
@@ -280,6 +363,21 @@ class SFTJob:
             raise ValueError("Training dataset is empty.")
 
         print(f"[SFTJob] Train size: {len(train_dataset)}", flush=True)
+        if _stop_requested_now():
+            return _finalize_result(
+                JobResult(
+                    run_id=run_name,
+                    status="stopped",
+                    total_time_seconds=time.time() - start,
+                    metrics={},
+                    stopped_early=True,
+                    wandb_url=_wandb_url(),
+                    hf_repo_id=push_repo_id or None,
+                    hf_revision=None,
+                    failure_reason="Manual stop requested before SFT training started.",
+                    attempt_token=attempt_token,
+                )
+            )
 
         formatting_func = self.task.get_sft_formatting_func(self.config, tokenizer)
         report_to = normalize_report_to(
@@ -489,15 +587,7 @@ class SFTJob:
             )
 
         # Best-effort capture of the active WandB run URL, if any.
-        wandb_url = None
-        try:
-            import wandb  # type: ignore[import-not-found]
-
-            run = getattr(wandb, "run", None)
-            if run is not None:
-                wandb_url = getattr(run, "url", None)
-        except Exception:  # noqa: BLE001
-            wandb_url = None
+        wandb_url = _wandb_url()
 
         if stop_requested:
             try:
@@ -530,24 +620,4 @@ class SFTJob:
             failure_reason=failure_reason,
             attempt_token=attempt_token,
         )
-        record_run_summary(
-            client=telemetry_client,
-            experiment_id=experiment_id,
-            phase="sft",
-            result=result,
-        )
-        record_run_result(
-            client=telemetry_client,
-            experiment_id=experiment_id,
-            run_id=run_name,
-            phase="sft",
-            results_payload=result,
-            job_result_payload=result,
-        )
-        try:
-            import wandb  # type: ignore[import-not-found]
-
-            wandb.finish()
-        except Exception:  # noqa: BLE001
-            pass
-        return result
+        return _finalize_result(result)

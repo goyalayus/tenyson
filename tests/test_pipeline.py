@@ -150,6 +150,32 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("resume_from_checkpoint", config["training"])
         self.assertIn("[continue]", stderr.getvalue())
 
+    def test_prompt_failure_action_continue_accepts_stopped_eval_without_checkpoint(self) -> None:
+        config = {"training": {"resume_from_checkpoint": "repo:old"}}
+        last_result = JobResult(
+            run_id="eval_baseline_mixed",
+            status="stopped",
+            total_time_seconds=0.0,
+        )
+
+        stderr = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO("continue\n")), patch.object(
+            sys,
+            "stderr",
+            stderr,
+        ):
+            action = pipeline_module._prompt_failure_action(
+                step_label="eval_baseline_mixed",
+                config=config,
+                job_type="eval",
+                on_failure="wait",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "continue")
+        self.assertNotIn("resume_from_checkpoint", config["training"])
+        self.assertIn("[continue]", stderr.getvalue())
+
     def test_prompt_failure_action_abort_policy_returns_abort(self) -> None:
         config = {"training": {"resume_from_checkpoint": "repo:old"}}
         last_result = JobResult(
@@ -180,6 +206,32 @@ class PipelineTests(unittest.TestCase):
             total_time_seconds=0.0,
             hf_repo_id="repo",
             hf_revision="rev",
+        )
+
+        stderr = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO("continue\nabort\n")), patch.object(
+            sys,
+            "stderr",
+            stderr,
+        ):
+            action = pipeline_module._prompt_failure_action(
+                step_label="sft_main",
+                config=config,
+                job_type="sft",
+                on_failure="wait",
+                last_result=last_result,
+            )
+
+        self.assertEqual(action, "abort")
+        self.assertNotIn("[continue]", stderr.getvalue())
+        self.assertIn("Invalid choice", stderr.getvalue())
+
+    def test_prompt_failure_action_rejects_continue_for_stopped_sft_without_checkpoint(self) -> None:
+        config = {"training": {}}
+        last_result = JobResult(
+            run_id="wordle_sft_main",
+            status="stopped",
+            total_time_seconds=0.0,
         )
 
         stderr = io.StringIO()

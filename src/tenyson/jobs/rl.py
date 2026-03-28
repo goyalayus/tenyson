@@ -733,6 +733,7 @@ class RLJob:
             record_run_summary,
             resolve_required_telemetry_context,
             RunHeartbeatTelemetryCallback,
+            run_stop_requested,
             TelemetryClient,
             WandBUrlTelemetryCallback,
         )
@@ -773,7 +774,88 @@ class RLJob:
                 flush=True,
             )
 
+        def _wandb_url() -> Any:
+            try:
+                import wandb  # type: ignore[import-not-found]
+
+                run = getattr(wandb, "run", None)
+                if run is not None:
+                    return getattr(run, "url", None)
+            except Exception:  # noqa: BLE001
+                return None
+            return None
+
+        def _finalize_result(result: JobResult, *, results_payload: Any | None = None) -> JobResult:
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase="rl",
+                result=result,
+            )
+            record_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase="rl",
+                results_payload=result if results_payload is None else results_payload,
+                job_result_payload=result,
+            )
+            try:
+                import wandb  # type: ignore[import-not-found]
+
+                wandb.finish()
+            except Exception:  # noqa: BLE001
+                pass
+            return result
+
+        def _stop_requested_now() -> bool:
+            try:
+                return run_stop_requested(
+                    telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase="rl",
+                    attempt_token=attempt_token,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    "[RLJob] Warning: startup stop polling failed; continuing "
+                    f"training startup. {exc}",
+                    flush=True,
+                )
+                return False
+
+        if _stop_requested_now():
+            return _finalize_result(
+                JobResult(
+                    run_id=run_name,
+                    status="stopped",
+                    total_time_seconds=time.time() - start,
+                    metrics={},
+                    stopped_early=True,
+                    wandb_url=_wandb_url(),
+                    hf_repo_id=push_repo_id or None,
+                    hf_revision=None,
+                    failure_reason="Manual stop requested before RL model load.",
+                    attempt_token=attempt_token,
+                )
+            )
         model, tokenizer = self._build_model_and_tokenizer()
+        if _stop_requested_now():
+            return _finalize_result(
+                JobResult(
+                    run_id=run_name,
+                    status="stopped",
+                    total_time_seconds=time.time() - start,
+                    metrics={},
+                    stopped_early=True,
+                    wandb_url=_wandb_url(),
+                    hf_repo_id=push_repo_id or None,
+                    hf_revision=None,
+                    failure_reason="Manual stop requested after RL model load.",
+                    attempt_token=attempt_token,
+                )
+            )
         effective_vllm_cfg = dict(vllm_cfg)
         # Import helpers that pull in Transformers only after Unsloth has had a
         # chance to patch the runtime via model construction above.
@@ -790,6 +872,21 @@ class RLJob:
         print("[RLJob] Loading RL dataset via TaskPlugin...", flush=True)
         dataset = self.task.get_rl_dataset(self.config)
         print(f"[RLJob] Loaded {len(dataset)} examples.", flush=True)
+        if _stop_requested_now():
+            return _finalize_result(
+                JobResult(
+                    run_id=run_name,
+                    status="stopped",
+                    total_time_seconds=time.time() - start,
+                    metrics={},
+                    stopped_early=True,
+                    wandb_url=_wandb_url(),
+                    hf_repo_id=push_repo_id or None,
+                    hf_revision=None,
+                    failure_reason="Manual stop requested before RL training started.",
+                    attempt_token=attempt_token,
+                )
+            )
 
         print("[RLJob] Loading reward functions via TaskPlugin...", flush=True)
         reward_funcs = self.task.get_reward_funcs(self.config, tokenizer)
@@ -983,15 +1080,7 @@ class RLJob:
             )
 
         # Best-effort capture of the active WandB run URL, if any.
-        wandb_url = None
-        try:
-            import wandb  # type: ignore[import-not-found]
-
-            run = getattr(wandb, "run", None)
-            if run is not None:
-                wandb_url = getattr(run, "url", None)
-        except Exception:  # noqa: BLE001
-            wandb_url = None
+        wandb_url = _wandb_url()
 
         stop_requested = bool(getattr(manual_stop_callback, "stop_requested", False))
         stop_step = getattr(manual_stop_callback, "stop_step", None)
@@ -1026,27 +1115,7 @@ class RLJob:
             failure_reason=failure_reason,
             attempt_token=attempt_token,
         )
-        record_run_summary(
-            client=telemetry_client,
-            experiment_id=experiment_id,
-            phase="rl",
-            result=result,
-        )
         results_payload: Any = result
         if reward_telemetry_collector is not None:
             results_payload = reward_telemetry_collector.build_results_payload()
-        record_run_result(
-            client=telemetry_client,
-            experiment_id=experiment_id,
-            run_id=run_name,
-            phase="rl",
-            results_payload=results_payload,
-            job_result_payload=result,
-        )
-        try:
-            import wandb  # type: ignore[import-not-found]
-
-            wandb.finish()
-        except Exception:  # noqa: BLE001
-            pass
-        return result
+        return _finalize_result(result, results_payload=results_payload)

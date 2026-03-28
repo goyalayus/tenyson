@@ -120,6 +120,41 @@ def request_stop(
     return False
 
 
+def prime_stop_target(
+    db_url: str,
+    run_id: str,
+    *,
+    experiment_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    attempt_token: Optional[str] = None,
+) -> bool:
+    """
+    Ensure the canonical manual-stop control row exists before a worker has
+    published a live heartbeat or W&B URL.
+    """
+    experiment_id = str(experiment_id or "").strip()
+    if not experiment_id:
+        raise ValueError(
+            "experiment_id is required to prime stop control. "
+            "Provide --experiment-id or set TENYSON_EXPERIMENT_ID."
+        )
+
+    phase_name = str(phase or "").strip().lower()
+    if not phase_name:
+        raise ValueError("phase is required to prime stop control.")
+
+    return wandb_store.set_stop_requested(
+        db_url,
+        experiment_id=experiment_id,
+        phase=phase_name,
+        run_name=str(run_id),
+        requested=False,
+        when_iso=None,
+        create_if_missing=True,
+        attempt_token=str(attempt_token or "").strip() or None,
+    )
+
+
 def list_live_runs(
     db_url: str,
     experiment_id: str,

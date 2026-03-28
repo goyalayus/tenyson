@@ -17,8 +17,14 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None
 
 from tenyson.cloud.base import _red_print
+from tenyson.core.controller_runtime import (
+    boundary_stop_requested,
+    clear_stop_at_boundary_request,
+    controller_metadata_path_from_env,
+    update_controller_runtime_state,
+)
 from tenyson.core.environment import bind_environment_run
-from tenyson.core.control import list_live_runs, request_stop
+from tenyson.core.control import list_live_runs, prime_stop_target, request_stop
 from tenyson.core.telemetry import (
     TelemetryClient,
     get_run_result,
@@ -122,7 +128,10 @@ def _prompt_recovery_action(
     hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
     hf_revision = str(getattr(last_result, "hf_revision", "") or "").strip()
     can_resume = job_type in ("sft", "rl") and bool(hf_repo_id and hf_revision)
-    can_continue = str(getattr(last_result, "status", "") or "").strip().lower() == "stopped"
+    can_continue = (
+        str(getattr(last_result, "status", "") or "").strip().lower() == "stopped"
+        and (job_type == "eval" or can_resume)
+    )
     choices = []
     if can_resume:
         choices.append("resume")
@@ -223,7 +232,10 @@ class _ExperimentAbortController:
         run_id = _resolve_stage_run_name(stage)
         if not run_id:
             return None
-        backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        try:
+            backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        except Exception:
+            backend_ref, experiment_id = None, None
         with self._lock:
             self._active_runs[run_id] = _ActiveRun(
                 run_id=run_id,
@@ -341,7 +353,10 @@ class _ExperimentReportController:
 
     def start_stage(self, stage: StageSpec) -> None:
         stage_id = str(stage.id)
-        backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        try:
+            backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        except Exception:
+            backend_ref, experiment_id = None, None
         self._sync_report_context(stage, backend_ref=backend_ref, experiment_id=experiment_id)
         self._register_stage(stage)
         if hasattr(self.report, "mark_stage_running"):
@@ -486,7 +501,10 @@ class _ExperimentReportController:
         )
 
     def record_stage_result(self, stage: StageSpec, result: JobResult) -> None:
-        backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        try:
+            backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        except Exception:
+            backend_ref, experiment_id = None, None
         self._sync_report_context(
             stage,
             backend_ref=backend_ref,
@@ -625,6 +643,11 @@ class ExperimentSession:
         self._recovery_launch_preflight_done = False
         self._recovery_lock_key: Optional[str] = None
         self._acquire_recovery_controller_lock()
+        update_controller_runtime_state(
+            state="starting",
+            active_stage_ids=[],
+            last_completed_stage_ids=[],
+        )
 
     @property
     def aborted(self) -> bool:
@@ -644,6 +667,12 @@ class ExperimentSession:
         return ExperimentBranch(self, cloud=cloud)
 
     def raise_if_aborted(self) -> None:
+        if boundary_stop_requested():
+            clear_stop_at_boundary_request()
+            self._abort_controller.request_abort(
+                source_run_id=None,
+                source_label="controller boundary stop",
+            )
         if self.aborted:
             raise ExperimentAborted(self.abort_message)
 
@@ -664,6 +693,11 @@ class ExperimentSession:
         if self._report_controller is not None:
             self._report_controller.close()
         self._release_recovery_controller_lock()
+        update_controller_runtime_state(
+            state="closed",
+            active_stage_ids=[],
+            last_completed_stage_ids=[],
+        )
 
     def _register_cloud(self, cloud: Any) -> None:
         cloud_id = id(cloud)
@@ -902,6 +936,52 @@ class ExperimentSession:
         )
         return None
 
+    def _prime_stage_stop_target(self, stage: StageSpec) -> None:
+        if self._report_controller is None and controller_metadata_path_from_env() is None:
+            return
+        try:
+            backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        except Exception as exc:  # noqa: BLE001
+            _red_print(
+                f'[TENYSON] Warning: failed to resolve telemetry while priming '
+                f'stop control for stage "{stage.id}": {exc}'
+            )
+            return
+        if not backend_ref or not experiment_id:
+            return
+        try:
+            prime_stop_target(
+                db_url=str(backend_ref),
+                run_id=_resolve_stage_run_name(stage),
+                experiment_id=str(experiment_id),
+                phase=_resolve_stage_phase(stage),
+                attempt_token=str(
+                    stage.config.get("telemetry", {}).get("attempt_token") or ""
+                ).strip()
+                or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _red_print(
+                f'[TENYSON] Warning: failed to pre-arm stop control for stage '
+                f'"{stage.id}": {exc}'
+            )
+
+    @staticmethod
+    def _mark_controller_running(stages: Sequence[StageSpec]) -> None:
+        update_controller_runtime_state(
+            state="running",
+            active_stage_ids=[stage.id for stage in stages],
+            last_completed_stage_ids=[],
+        )
+
+    @staticmethod
+    def _mark_controller_between_stages(stage_ids: Sequence[str]) -> None:
+        update_controller_runtime_state(
+            state="between-stages",
+            active_stage_ids=[],
+            last_completed_stage_ids=list(stage_ids),
+        )
+
     def _load_stage_result_from_telemetry(self, stage: StageSpec) -> Optional[JobResult]:
         try:
             backend_ref, experiment_id = resolve_telemetry_context(stage.config)
@@ -1077,6 +1157,8 @@ class ExperimentSession:
         self._ensure_recovery_launch_preflight(stage)
         run_id = _resolve_stage_run_name(stage)
         _ensure_stage_attempt_token(stage)
+        self._prime_stage_stop_target(stage)
+        self._mark_controller_running([stage])
         active_run_id = self._abort_controller.register_stage(stage)
         matched_result = None
         if self._report_controller is not None:
@@ -1103,6 +1185,7 @@ class ExperimentSession:
                 )
         finally:
             self._abort_controller.unregister_run(active_run_id)
+            self._mark_controller_between_stages([stage.id])
             if matched_result is None and self._report_controller is not None:
                 self._reconcile_stage_report_from_telemetry(stage)
 
@@ -1144,6 +1227,8 @@ class ExperimentSession:
         self._ensure_recovery_launch_preflight(stages_to_run[0])
         for stage in stages_to_run:
             _ensure_stage_attempt_token(stage)
+            self._prime_stage_stop_target(stage)
+        self._mark_controller_running(stages_to_run)
         active_run_ids = [
             active_run_id
             for active_run_id in (
@@ -1170,6 +1255,7 @@ class ExperimentSession:
         finally:
             for active_run_id in active_run_ids:
                 self._abort_controller.unregister_run(active_run_id)
+            self._mark_controller_between_stages([stage.id for stage in stages_to_run])
             if results is None and self._report_controller is not None:
                 for stage in stages_to_run:
                     self._reconcile_stage_report_from_telemetry(stage)
