@@ -797,7 +797,7 @@ class ExperimentSession:
                 )
                 raise RuntimeError(
                     f'Stage "{stage.id}" cannot start recovery for experiment_id '
-                    f'"{experiment_id}" because it still has live runs: '
+                    f'"{experiment_id}" because live runs are still active: '
                     f"{formatted_rows}. Stop or let them finish before starting "
                     "another recovery controller."
                 )

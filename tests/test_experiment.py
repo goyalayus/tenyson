@@ -537,7 +537,7 @@ class ExperimentSessionTests(unittest.TestCase):
         ) as run_pipeline_mock:
             with self.assertRaisesRegex(
                 RuntimeError,
-                r'it still has live runs: mixed_rl \(phase=rl\)',
+                r'live runs are still active: mixed_rl \(phase=rl\)',
             ):
                 session.run_stage(stage, cloud=object())
 
@@ -974,7 +974,7 @@ class ExperimentSessionTests(unittest.TestCase):
         ) as run_pipeline_mock:
             with self.assertRaisesRegex(
                 RuntimeError,
-                r'it still has live runs: curr_rl_t3 \(phase=rl\)',
+                r'live runs are still active: curr_rl_t3 \(phase=rl\)',
             ):
                 session.run_parallel(
                     "eval_pair",
