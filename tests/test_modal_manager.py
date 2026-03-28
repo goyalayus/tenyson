@@ -13,6 +13,7 @@ from unittest.mock import patch
 from tenyson.cloud.manager import CloudManager
 from tenyson.cloud.modal import (
     ActiveModalLaunch,
+    GitRepoSource,
     ModalManager,
     _bind_modal_run_remote,
     _build_modal_launcher_command,
@@ -117,6 +118,40 @@ class ModalManagerEnvTests(unittest.TestCase):
     def test_normalize_modal_python_version_rejects_invalid_shape(self) -> None:
         with self.assertRaisesRegex(ValueError, "Modal Python version"):
             _normalize_modal_python_version("3")
+
+    def test_factory_from_env_freezes_git_source_across_managers(self) -> None:
+        status_calls = 0
+
+        def fake_git(repo_root: str, *args: str) -> str:
+            nonlocal status_calls
+            mapping = {
+                ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
+                ("rev-parse", "HEAD"): "abc123",
+            }
+            if args == ("status", "--porcelain", "--untracked-files=no"):
+                status_calls += 1
+                if status_calls > 1:
+                    return " M README.md"
+                return ""
+            return mapping[args]
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            ModalManager,
+            "_resolve_local_project_root",
+            return_value="/repo",
+        ), patch(
+            "tenyson.cloud.modal._run_git_command",
+            side_effect=fake_git,
+        ):
+            factory = ModalManager.factory_from_env()
+            manager_one = factory()
+            manager_two = factory()
+            source_one = manager_one._resolve_git_source("/repo")
+            source_two = manager_two._resolve_git_source("/repo")
+
+        self.assertEqual(status_calls, 1)
+        self.assertEqual(source_one, GitRepoSource("https://github.com/goyalayus/tenyson.git", "abc123"))
+        self.assertEqual(source_two, source_one)
 
 
 class CloudManagerDefaultTests(unittest.TestCase):
@@ -274,6 +309,23 @@ class ModalGitSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "git-backed only"):
                 manager._resolve_git_source("/repo")
 
+    def test_resolve_git_source_uses_frozen_env_snapshot_without_git_commands(self) -> None:
+        manager = ModalManager()
+        env = {
+            "TENYSON_GIT_SOURCE_FROZEN": "1",
+            "TENYSON_GIT_REPO_URL": "git@github.com:goyalayus/tenyson.git",
+            "TENYSON_GIT_COMMIT": "abc123",
+        }
+
+        with patch.dict(os.environ, env, clear=True), patch(
+            "tenyson.cloud.modal._run_git_command",
+            side_effect=AssertionError("git should not be queried"),
+        ):
+            source = manager._resolve_git_source("/repo")
+
+        self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
+        self.assertEqual(source.commit, "abc123")
+
 
 class ModalSubprocessStreamingTests(unittest.TestCase):
     def test_streaming_helper_forwards_output_and_keeps_error_tail(self) -> None:
@@ -333,7 +385,16 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         ), patch(
             "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
             return_value=(0, ""),
-        ) as run_subprocess, patch("tenyson.cloud.modal.os.unlink") as unlink:
+        ) as run_subprocess, patch(
+            "tenyson.cloud.modal.os.unlink"
+        ) as unlink, patch.object(
+            manager,
+            "_resolve_git_source",
+            return_value=GitRepoSource(
+                clone_url="https://github.com/example/repo.git",
+                commit="abc123",
+            ),
+        ):
             manager._run_modal_job_via_launcher(
                 job_type="rl",
                 config_payload={"training": {"steps": 4}},
@@ -353,11 +414,21 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         self.assertTrue(kwargs["close_fds"])
         self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
         self.assertEqual(kwargs["env"]["TENYSON_LOCAL_PROJECT_ROOT"], "/repo")
+        self.assertEqual(
+            kwargs["env"]["TENYSON_GIT_REPO_URL"],
+            "https://github.com/example/repo.git",
+        )
+        self.assertEqual(kwargs["env"]["TENYSON_GIT_COMMIT"], "abc123")
+        self.assertEqual(kwargs["env"]["TENYSON_GIT_SOURCE_FROZEN"], "1")
         self.assertTrue(kwargs["env"]["PYTHONPATH"].startswith("/repo/src"))
         unlink.assert_called_once_with("/tmp/fake-job.yaml")
 
     def test_modal_launcher_raises_with_subprocess_tail(self) -> None:
         manager = ModalManager()
+        git_source = GitRepoSource(
+            clone_url="https://github.com/example/repo.git",
+            commit="abc123",
+        )
 
         with patch(
             "tenyson.cloud.modal._write_temp_config_payload",
@@ -365,7 +436,11 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         ), patch(
             "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
             return_value=(1, "boom"),
-        ), patch("tenyson.cloud.modal.os.unlink"):
+        ), patch("tenyson.cloud.modal.os.unlink"), patch.object(
+            manager,
+            "_resolve_git_source",
+            return_value=git_source,
+        ):
             with self.assertRaisesRegex(
                 RuntimeError,
                 "Modal launcher subprocess failed with code 1. boom",
@@ -383,6 +458,10 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
 
     def test_modal_launcher_keeps_active_launch_on_interrupt_and_close_requests_stop(self) -> None:
         manager = ModalManager()
+        git_source = GitRepoSource(
+            clone_url="https://github.com/example/repo.git",
+            commit="abc123",
+        )
 
         def fake_run_subprocess(*args, **kwargs):
             kwargs["on_line"](
@@ -397,7 +476,11 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         ), patch(
             "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
             side_effect=fake_run_subprocess,
-        ), patch("tenyson.cloud.modal.os.unlink"):
+        ), patch("tenyson.cloud.modal.os.unlink"), patch.object(
+            manager,
+            "_resolve_git_source",
+            return_value=git_source,
+        ):
             with self.assertRaises(KeyboardInterrupt):
                 manager._run_modal_job_via_launcher(
                     job_type="sft",
@@ -456,6 +539,10 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
 
     def test_modal_launcher_keeps_active_launch_after_successful_spawn(self) -> None:
         manager = ModalManager()
+        git_source = GitRepoSource(
+            clone_url="https://github.com/example/repo.git",
+            commit="abc123",
+        )
 
         def fake_run_subprocess(*args, **kwargs):
             kwargs["on_line"](
@@ -470,7 +557,11 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
         ), patch(
             "tenyson.cloud.modal._run_subprocess_with_streaming_logs",
             side_effect=fake_run_subprocess,
-        ), patch("tenyson.cloud.modal.os.unlink"):
+        ), patch("tenyson.cloud.modal.os.unlink"), patch.object(
+            manager,
+            "_resolve_git_source",
+            return_value=git_source,
+        ):
             manager._run_modal_job_via_launcher(
                 job_type="eval",
                 config_payload={"evaluation": {"samples": 4}},

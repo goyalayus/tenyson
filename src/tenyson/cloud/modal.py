@@ -505,12 +505,15 @@ class ModalManager(BaseCloudManager):
         auto_terminate: bool = True,
         serialized: bool = False,
         python_version: str | None = None,
+        git_source: GitRepoSource | None = None,
     ):
         super().__init__(auto_terminate=auto_terminate)
         self.gpu = gpu
         self.timeout = timeout
         self.serialized = serialized
         self.python_version = _resolve_modal_python_version(python_version)
+        self._git_source = git_source
+        self._git_source_lock = threading.Lock()
         self._active_launches: dict[str, ActiveModalLaunch] = {}
         self._active_launch_lock = threading.Lock()
 
@@ -556,7 +559,28 @@ class ModalManager(BaseCloudManager):
 
     @classmethod
     def factory_from_env(cls, **overrides: Any) -> Callable[[], "ModalManager"]:
-        return lambda: cls.from_env(**overrides)
+        cached_git_source: GitRepoSource | None = None
+        cached_git_source_lock = threading.Lock()
+        base_overrides = {
+            key: value for key, value in overrides.items() if value is not None
+        }
+
+        def _resolve_cached_git_source() -> GitRepoSource:
+            nonlocal cached_git_source
+            with cached_git_source_lock:
+                if cached_git_source is not None:
+                    return cached_git_source
+                probe_manager = cls.from_env(**base_overrides)
+                repo_root = probe_manager._resolve_local_project_root()
+                cached_git_source = probe_manager._resolve_git_source(repo_root)
+                return cached_git_source
+
+        def _build_manager() -> "ModalManager":
+            manager_overrides = dict(base_overrides)
+            manager_overrides.setdefault("git_source", _resolve_cached_git_source())
+            return cls.from_env(**manager_overrides)
+
+        return _build_manager
 
     def _resolve_modal_gpu_request(self) -> str:
         gpu_name = str(self.gpu or "").strip().upper()
@@ -627,7 +651,22 @@ class ModalManager(BaseCloudManager):
             pass
         return f"{module_path}:{class_name}"
 
-    def _resolve_git_source(self, repo_root: str) -> GitRepoSource:
+    def _resolve_frozen_git_source_from_env(self) -> GitRepoSource | None:
+        if not _is_truthy_env(os.getenv("TENYSON_GIT_SOURCE_FROZEN", "false")):
+            return None
+        clone_url = str(os.getenv("TENYSON_GIT_REPO_URL") or "").strip()
+        commit = str(os.getenv("TENYSON_GIT_COMMIT") or "").strip()
+        if not clone_url or not commit:
+            return None
+        normalized_clone_url = _normalize_git_clone_url(clone_url)
+        if not normalized_clone_url.startswith(("https://", "http://")):
+            raise ValueError(
+                "Modal git-backed execution requires an HTTP(S) clone URL. "
+                "Set TENYSON_GIT_REPO_URL if your git remote uses an unsupported format."
+            )
+        return GitRepoSource(clone_url=normalized_clone_url, commit=commit)
+
+    def _resolve_git_source_from_repo(self, repo_root: str) -> GitRepoSource:
         remote_name = str(os.getenv("TENYSON_GIT_REMOTE", "origin")).strip() or "origin"
         override_url = str(os.getenv("TENYSON_GIT_REPO_URL") or "").strip()
         raw_url = override_url or _run_git_command(repo_root, "remote", "get-url", remote_name)
@@ -654,6 +693,17 @@ class ModalManager(BaseCloudManager):
             repo_root, "rev-parse", "HEAD"
         )
         return GitRepoSource(clone_url=clone_url, commit=commit)
+
+    def _resolve_git_source(self, repo_root: str) -> GitRepoSource:
+        with self._git_source_lock:
+            if self._git_source is not None:
+                return self._git_source
+            frozen_source = self._resolve_frozen_git_source_from_env()
+            if frozen_source is not None:
+                self._git_source = frozen_source
+                return frozen_source
+            self._git_source = self._resolve_git_source_from_repo(repo_root)
+            return self._git_source
 
     def _remember_active_launch(self, launch: ActiveModalLaunch) -> None:
         with self._active_launch_lock:
@@ -919,6 +969,10 @@ class ModalManager(BaseCloudManager):
                 if not existing_pythonpath
                 else os.pathsep.join([src_path, existing_pythonpath])
             )
+            git_source = self._resolve_git_source(local_project_root)
+            env["TENYSON_GIT_REPO_URL"] = git_source.clone_url
+            env["TENYSON_GIT_COMMIT"] = git_source.commit
+            env["TENYSON_GIT_SOURCE_FROZEN"] = "1"
 
             def _capture_launch(line: str) -> None:
                 nonlocal active_launch
