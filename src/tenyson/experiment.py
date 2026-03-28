@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from tenyson.cloud.base import _red_print
 from tenyson.core.environment import bind_environment_run
-from tenyson.core.control import request_stop
+from tenyson.core.control import list_live_runs, request_stop
 from tenyson.core.telemetry import (
     TelemetryClient,
     get_run_result,
@@ -37,6 +37,7 @@ _DEFAULT_ABORT_MESSAGE = (
     "[TENYSON] Experiment aborted. Skipping remaining stages and final outputs."
 )
 _RECOVERY_PROMPT_LOCK = threading.Lock()
+_RECOVERY_LIVE_RUN_MAX_AGE_SECONDS = 180
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
@@ -599,6 +600,8 @@ class ExperimentSession:
         self._owned_clouds: list[Any] = []
         self._owned_cloud_ids: set[int] = set()
         self._owned_cloud_lock = threading.Lock()
+        self._recovery_launch_preflight_lock = threading.Lock()
+        self._recovery_launch_preflight_done = False
 
     @property
     def aborted(self) -> bool:
@@ -667,6 +670,33 @@ class ExperimentSession:
                 f'but recovery_experiment_id is "{recovery_experiment_id}".'
             )
         return str(backend_ref), recovery_experiment_id
+
+    def _ensure_recovery_launch_preflight(self, stage: StageSpec) -> None:
+        if self.recovery_experiment_id is None:
+            return
+        recovery_context = self._resolve_recovery_context(stage)
+        if recovery_context is None:
+            return
+        backend_ref, experiment_id = recovery_context
+        with self._recovery_launch_preflight_lock:
+            if self._recovery_launch_preflight_done:
+                return
+            live_rows = list_live_runs(
+                db_url=backend_ref,
+                experiment_id=experiment_id,
+                max_age_seconds=_RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
+            )
+            if live_rows:
+                formatted_rows = ", ".join(
+                    f"{row.run_id} (phase={row.phase})" for row in live_rows
+                )
+                raise RuntimeError(
+                    f'Stage "{stage.id}" cannot start recovery for experiment_id '
+                    f'"{experiment_id}" because it still has live runs: '
+                    f"{formatted_rows}. Stop or let them finish before starting "
+                    "another recovery controller."
+                )
+            self._recovery_launch_preflight_done = True
 
     def _load_recovered_result(self, stage: StageSpec) -> Optional[JobResult]:
         recovery_context = self._resolve_recovery_context(stage)
@@ -939,6 +969,7 @@ class ExperimentSession:
             if self._report_controller is not None:
                 self._report_controller.record_stage_result(stage, recovered_result)
             return recovered_result
+        self._ensure_recovery_launch_preflight(stage)
         run_id = _resolve_stage_run_name(stage)
         _ensure_stage_attempt_token(stage)
         active_run_id = self._abort_controller.register_stage(stage)
@@ -1005,6 +1036,7 @@ class ExperimentSession:
         if not stages_to_run:
             return {stage.id: output[stage.id] for stage in stages}
 
+        self._ensure_recovery_launch_preflight(stages_to_run[0])
         for stage in stages_to_run:
             _ensure_stage_attempt_token(stage)
         active_run_ids = [

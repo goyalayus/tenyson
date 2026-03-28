@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 import io
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from tenyson.experiment import (
     ExperimentAborted,
     ExperimentSession,
 )
+from tenyson.core.telemetry import LiveRunInfo
 from tenyson.jobs.result import JobResult
 from tenyson.reporting.builder import ReportBuilder
 
@@ -437,6 +439,10 @@ class ExperimentSessionTests(unittest.TestCase):
                 return_value=object(),
             ), patch.object(
                 experiment_module,
+                "list_live_runs",
+                return_value=[],
+            ), patch.object(
+                experiment_module,
                 "get_run_result",
                 return_value=({}, dict(recovered.__dict__)),
             ), patch.object(
@@ -453,6 +459,91 @@ class ExperimentSessionTests(unittest.TestCase):
         run_pipeline_mock.assert_not_called()
         self.assertIn("status=success", content)
         self.assertIn("wandb=[run](https://wandb.example/recovered)", content)
+
+    def test_run_stage_recovery_refuses_when_live_runs_exist(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        stage = session.sft("sft_main", run_name="wordle_sft_main")
+        live_row = LiveRunInfo(
+            run_id="mixed_rl",
+            phase="rl",
+            provider="modal",
+            status="running",
+            is_active=True,
+            created_at=None,
+            updated_at=datetime.now(timezone.utc),
+            attempt_token="attempt-1",
+        )
+
+        with patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[live_row],
+        ) as list_live_runs_mock, patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=None,
+        ) as get_run_result_mock, patch.object(
+            experiment_module,
+            "run_pipeline",
+        ) as run_pipeline_mock:
+            with self.assertRaisesRegex(RuntimeError, "still has live runs"):
+                session.run_stage(stage, cloud=object())
+
+        list_live_runs_mock.assert_called_once_with(
+            db_url="wandb://demo/tenyson",
+            experiment_id="wordle_exp",
+            max_age_seconds=experiment_module._RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
+        )
+        get_run_result_mock.assert_called_once()
+        run_pipeline_mock.assert_not_called()
+
+    def test_run_stage_recovery_live_run_check_only_happens_once_per_session(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        first_stage = session.sft("sft_main", run_name="wordle_sft_main")
+        second_stage = session.sft("sft_retry", run_name="wordle_sft_retry")
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            del cloud, on_failure
+            _label, config, _job_class, _task = steps[0]
+            run_id = config["training"]["run_name"]
+            return [_result(run_id, status="success")]
+
+        with patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[],
+        ) as list_live_runs_mock, patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=None,
+        ), patch.object(
+            experiment_module,
+            "run_pipeline",
+            side_effect=fake_run_pipeline,
+        ) as run_pipeline_mock:
+            first_result = session.run_stage(first_stage, cloud=object())
+            second_result = session.run_stage(second_stage, cloud=object())
+
+        self.assertEqual(first_result.status, "success")
+        self.assertEqual(second_result.status, "success")
+        list_live_runs_mock.assert_called_once_with(
+            db_url="wandb://demo/tenyson",
+            experiment_id="wordle_exp",
+            max_age_seconds=experiment_module._RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
+        )
+        self.assertEqual(run_pipeline_mock.call_count, 2)
 
     def test_run_stage_recovery_resume_sets_resume_checkpoint(self) -> None:
         session = ExperimentSession(
@@ -489,6 +580,10 @@ class ExperimentSessionTests(unittest.TestCase):
             experiment_module,
             "TelemetryClient",
             return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[],
         ), patch.object(
             experiment_module,
             "get_run_result",
@@ -544,6 +639,10 @@ class ExperimentSessionTests(unittest.TestCase):
             return_value=object(),
         ), patch.object(
             experiment_module,
+            "list_live_runs",
+            return_value=[],
+        ), patch.object(
+            experiment_module,
             "get_run_result",
             return_value=({}, dict(recovered.__dict__)),
         ), patch.object(
@@ -593,6 +692,10 @@ class ExperimentSessionTests(unittest.TestCase):
             experiment_module,
             "TelemetryClient",
             return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[],
         ), patch.object(
             experiment_module,
             "get_run_result",
@@ -650,6 +753,10 @@ class ExperimentSessionTests(unittest.TestCase):
             experiment_module,
             "TelemetryClient",
             return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[],
         ), patch.object(
             experiment_module,
             "get_run_result",
@@ -722,6 +829,10 @@ class ExperimentSessionTests(unittest.TestCase):
             experiment_module,
             "TelemetryClient",
             return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[],
         ), patch.object(
             experiment_module,
             "get_run_result",
