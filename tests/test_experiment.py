@@ -1,6 +1,7 @@
 import copy
 from datetime import datetime, timezone
 import io
+import os
 import sys
 import tempfile
 import time
@@ -77,6 +78,31 @@ class ExperimentSessionTests(unittest.TestCase):
             )
 
         self.assertEqual(action, "restart")
+
+    def test_recovery_controller_lock_refuses_busy_lock(self) -> None:
+        if experiment_module.fcntl is None:
+            self.skipTest("fcntl is unavailable on this platform")
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"TENYSON_RECOVERY_LOCK_DIR": tmpdir},
+            clear=False,
+        ), patch.object(
+            experiment_module.fcntl,
+            "flock",
+            side_effect=BlockingIOError,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                'Recovery controller for experiment_id "wordle_busy_lock" is already running.',
+            ):
+                ExperimentSession(
+                    task=object(),
+                    templates=_templates(),
+                    cloud_factory=lambda: object(),
+                    shared_overrides=_telemetry_shared_overrides(),
+                    recovery_experiment_id="wordle_busy_lock",
+                )
 
     def test_stage_building_clones_templates_and_injects_adapter(self) -> None:
         base_rl_template = {
@@ -511,7 +537,7 @@ class ExperimentSessionTests(unittest.TestCase):
         ) as run_pipeline_mock:
             with self.assertRaisesRegex(
                 RuntimeError,
-                r'live runs are still active: mixed_rl \(phase=rl\)',
+                r'it still has live runs: mixed_rl \(phase=rl\)',
             ):
                 session.run_stage(stage, cloud=object())
 
@@ -948,7 +974,7 @@ class ExperimentSessionTests(unittest.TestCase):
         ) as run_pipeline_mock:
             with self.assertRaisesRegex(
                 RuntimeError,
-                r'live runs are still active: curr_rl_t3 \(phase=rl\)',
+                r'it still has live runs: curr_rl_t3 \(phase=rl\)',
             ):
                 session.run_parallel(
                     "eval_pair",
