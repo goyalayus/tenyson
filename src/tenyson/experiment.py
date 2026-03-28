@@ -4,11 +4,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import sys
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 from tenyson.cloud.base import _red_print
 from tenyson.core.environment import bind_environment_run
@@ -38,6 +44,8 @@ _DEFAULT_ABORT_MESSAGE = (
 )
 _RECOVERY_PROMPT_LOCK = threading.Lock()
 _RECOVERY_LIVE_RUN_MAX_AGE_SECONDS = 180
+_RECOVERY_FILE_LOCKS: Dict[str, Tuple[Any, int]] = {}
+_RECOVERY_FILE_LOCKS_LOCK = threading.Lock()
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
@@ -54,6 +62,19 @@ def _is_retryable_failure(result: JobResult) -> bool:
         "success",
         "partial",
     }
+
+
+def _safe_recovery_lock_name(experiment_id: str) -> str:
+    text = str(experiment_id or "").strip().lower()
+    if not text:
+        return "recovery"
+    cleaned = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "-"
+        for char in text
+    )
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-") or "recovery"
 
 
 class ExperimentAborted(RuntimeError):
@@ -602,6 +623,8 @@ class ExperimentSession:
         self._owned_cloud_lock = threading.Lock()
         self._recovery_launch_preflight_lock = threading.Lock()
         self._recovery_launch_preflight_done = False
+        self._recovery_lock_key: Optional[str] = None
+        self._acquire_recovery_controller_lock()
 
     @property
     def aborted(self) -> bool:
@@ -640,6 +663,7 @@ class ExperimentSession:
                 )
         if self._report_controller is not None:
             self._report_controller.close()
+        self._release_recovery_controller_lock()
 
     def _register_cloud(self, cloud: Any) -> None:
         cloud_id = id(cloud)
@@ -648,6 +672,87 @@ class ExperimentSession:
                 return
             self._owned_cloud_ids.add(cloud_id)
             self._owned_clouds.append(cloud)
+
+    def _recovery_lock_path(self) -> Optional[Path]:
+        if self.recovery_experiment_id is None:
+            return None
+        configured_root = str(
+            os.getenv("TENYSON_RECOVERY_LOCK_DIR", ".tenyson_runs/recovery_locks")
+        ).strip()
+        lock_root = Path(configured_root or ".tenyson_runs/recovery_locks").expanduser()
+        safe_name = _safe_recovery_lock_name(self.recovery_experiment_id)
+        return (lock_root / f"{safe_name}.lock").resolve()
+
+    def _acquire_recovery_controller_lock(self) -> None:
+        lock_path = self._recovery_lock_path()
+        if lock_path is None or fcntl is None or self._recovery_lock_key is not None:
+            return
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_key = str(lock_path)
+        with _RECOVERY_FILE_LOCKS_LOCK:
+            existing = _RECOVERY_FILE_LOCKS.get(lock_key)
+            if existing is not None:
+                handle, refcount = existing
+                _RECOVERY_FILE_LOCKS[lock_key] = (handle, refcount + 1)
+                self._recovery_lock_key = lock_key
+                return
+
+            handle = lock_path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                handle.seek(0)
+                owner = handle.read().strip()
+                handle.close()
+                owner_suffix = f" Holder: {owner}" if owner else ""
+                raise RuntimeError(
+                    f'Recovery controller for experiment_id "{self.recovery_experiment_id}" '
+                    f"is already running.{owner_suffix} Wait for it to finish or stop "
+                    "it before starting another recovery controller."
+                ) from exc
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                f"pid={os.getpid()} started_at={datetime.now(timezone.utc).isoformat()}\n"
+            )
+            handle.flush()
+            _RECOVERY_FILE_LOCKS[lock_key] = (handle, 1)
+            self._recovery_lock_key = lock_key
+
+    def _release_recovery_controller_lock(self) -> None:
+        lock_key = self._recovery_lock_key
+        if lock_key is None or fcntl is None:
+            self._recovery_lock_key = None
+            return
+
+        handle = None
+        with _RECOVERY_FILE_LOCKS_LOCK:
+            existing = _RECOVERY_FILE_LOCKS.get(lock_key)
+            if existing is None:
+                self._recovery_lock_key = None
+                return
+            handle, refcount = existing
+            if refcount > 1:
+                _RECOVERY_FILE_LOCKS[lock_key] = (handle, refcount - 1)
+                self._recovery_lock_key = None
+                return
+            _RECOVERY_FILE_LOCKS.pop(lock_key, None)
+            self._recovery_lock_key = None
+
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.flush()
+        except Exception:
+            pass
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            handle.close()
+        except Exception:
+            pass
 
     def _resolve_recovery_context(self, stage: StageSpec) -> Optional[Tuple[str, str]]:
         recovery_experiment_id = self.recovery_experiment_id
