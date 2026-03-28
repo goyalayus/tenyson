@@ -153,6 +153,22 @@ class ModalManagerEnvTests(unittest.TestCase):
         self.assertEqual(source_one, GitRepoSource("https://github.com/goyalayus/tenyson.git", "abc123"))
         self.assertEqual(source_two, source_one)
 
+    def test_factory_from_env_uses_explicit_git_source_without_repo_probe(self) -> None:
+        explicit_source = GitRepoSource(
+            clone_url="https://github.com/example/repo.git",
+            commit="abc123",
+        )
+
+        with patch.object(
+            ModalManager,
+            "_resolve_local_project_root",
+            side_effect=AssertionError("should not probe repo root"),
+        ):
+            factory = ModalManager.factory_from_env(git_source=explicit_source)
+            manager = factory()
+
+        self.assertEqual(manager._resolve_git_source("/repo"), explicit_source)
+
 
 class CloudManagerDefaultTests(unittest.TestCase):
     def test_cloud_manager_defaults_to_modal(self) -> None:

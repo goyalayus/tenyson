@@ -577,7 +577,8 @@ class ModalManager(BaseCloudManager):
 
         def _build_manager() -> "ModalManager":
             manager_overrides = dict(base_overrides)
-            manager_overrides.setdefault("git_source", _resolve_cached_git_source())
+            if "git_source" not in manager_overrides:
+                manager_overrides["git_source"] = _resolve_cached_git_source()
             return cls.from_env(**manager_overrides)
 
         return _build_manager
