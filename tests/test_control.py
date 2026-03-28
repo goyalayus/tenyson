@@ -500,6 +500,10 @@ class WandBAttemptTests(unittest.TestCase):
             side_effect=LookupError("no prior result"),
         ), patch.object(
             telemetry_module.wandb_store,
+            "fetch_stop_request_state",
+            return_value=(False, None),
+        ), patch.object(
+            telemetry_module.wandb_store,
             "set_stop_requested",
         ) as set_stop_requested_mock, patch.object(
             telemetry_module.wandb_store,
@@ -545,14 +549,15 @@ class WandBAttemptTests(unittest.TestCase):
             side_effect=LookupError("no prior result"),
         ), patch.object(
             telemetry_module.wandb_store,
-            "fetch_stop_requested",
-        ) as fetch_stop_requested_mock, patch.object(
+            "fetch_stop_request_state",
+            return_value=(True, "2026-03-28T08:38:50+00:00"),
+        ) as fetch_stop_request_state_mock, patch.object(
             telemetry_module.wandb_store,
             "set_stop_requested",
         ) as set_stop_requested_mock, patch.object(
             telemetry_module.wandb_store,
             "update_run_summary",
-        ):
+        ) as update_summary_mock:
             cleared = begin_run_attempt(
                 client=client,
                 experiment_id="wordle_exp",
@@ -562,8 +567,22 @@ class WandBAttemptTests(unittest.TestCase):
             )
 
         self.assertFalse(cleared)
-        fetch_stop_requested_mock.assert_not_called()
+        fetch_stop_request_state_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            attempt_token="fresh-attempt",
+        )
         set_stop_requested_mock.assert_not_called()
+        summary_values = update_summary_mock.call_args.args[1]
+        self.assertTrue(
+            summary_values[telemetry_module.wandb_store.SUMMARY_STOP_REQUESTED]
+        )
+        self.assertEqual(
+            summary_values[telemetry_module.wandb_store.SUMMARY_STOP_REQUESTED_AT],
+            "2026-03-28T08:38:50+00:00",
+        )
 
     def test_begin_run_attempt_clears_stop_for_prior_terminal_attempt(self) -> None:
         client = SimpleNamespace(backend="wandb", db_url="wandb://ayush/wordle")
@@ -578,15 +597,15 @@ class WandBAttemptTests(unittest.TestCase):
             return_value=({}, {"status": "partial", "run_id": "wordle_rl_mixed"}),
         ), patch.object(
             telemetry_module.wandb_store,
-            "fetch_stop_requested",
-            return_value=True,
-        ) as fetch_stop_requested_mock, patch.object(
+            "fetch_stop_request_state",
+            return_value=(True, "2026-03-28T08:38:50+00:00"),
+        ) as fetch_stop_request_state_mock, patch.object(
             telemetry_module.wandb_store,
             "set_stop_requested",
         ) as set_stop_requested_mock, patch.object(
             telemetry_module.wandb_store,
             "update_run_summary",
-        ):
+        ) as update_summary_mock:
             cleared = begin_run_attempt(
                 client=client,
                 experiment_id="wordle_exp",
@@ -596,7 +615,13 @@ class WandBAttemptTests(unittest.TestCase):
             )
 
         self.assertTrue(cleared)
-        fetch_stop_requested_mock.assert_called_once()
+        fetch_stop_request_state_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            attempt_token="resume-attempt",
+        )
         set_stop_requested_mock.assert_called_once_with(
             "wandb://ayush/wordle",
             experiment_id="wordle_exp",
@@ -606,6 +631,13 @@ class WandBAttemptTests(unittest.TestCase):
             when_iso=None,
             create_if_missing=False,
             attempt_token="resume-attempt",
+        )
+        summary_values = update_summary_mock.call_args.args[1]
+        self.assertFalse(
+            summary_values[telemetry_module.wandb_store.SUMMARY_STOP_REQUESTED]
+        )
+        self.assertIsNone(
+            summary_values[telemetry_module.wandb_store.SUMMARY_STOP_REQUESTED_AT]
         )
 
     def test_begin_run_attempt_keeps_stop_state_for_non_terminal_prior_attempt(self) -> None:
@@ -621,14 +653,15 @@ class WandBAttemptTests(unittest.TestCase):
             return_value=({}, {"status": "running", "run_id": "wordle_rl_mixed"}),
         ), patch.object(
             telemetry_module.wandb_store,
-            "fetch_stop_requested",
-        ) as fetch_stop_requested_mock, patch.object(
+            "fetch_stop_request_state",
+            return_value=(True, "2026-03-28T08:40:00+00:00"),
+        ) as fetch_stop_request_state_mock, patch.object(
             telemetry_module.wandb_store,
             "set_stop_requested",
         ) as set_stop_requested_mock, patch.object(
             telemetry_module.wandb_store,
             "update_run_summary",
-        ):
+        ) as update_summary_mock:
             cleared = begin_run_attempt(
                 client=client,
                 experiment_id="wordle_exp",
@@ -638,8 +671,22 @@ class WandBAttemptTests(unittest.TestCase):
             )
 
         self.assertFalse(cleared)
-        fetch_stop_requested_mock.assert_not_called()
+        fetch_stop_request_state_mock.assert_called_once_with(
+            "wandb://ayush/wordle",
+            experiment_id="wordle_exp",
+            phase="rl",
+            run_name="wordle_rl_mixed",
+            attempt_token="active-attempt",
+        )
         set_stop_requested_mock.assert_not_called()
+        summary_values = update_summary_mock.call_args.args[1]
+        self.assertTrue(
+            summary_values[telemetry_module.wandb_store.SUMMARY_STOP_REQUESTED]
+        )
+        self.assertEqual(
+            summary_values[telemetry_module.wandb_store.SUMMARY_STOP_REQUESTED_AT],
+            "2026-03-28T08:40:00+00:00",
+        )
 
 
 class ManualStopCallbackTests(unittest.TestCase):

@@ -291,6 +291,21 @@ def begin_run_attempt(
     )
     cleared_stale_stop = False
     existing_result = None
+    preserved_stop_requested = False
+    preserved_stop_requested_at = None
+    try:
+        preserved_stop_requested, preserved_stop_requested_at = (
+            wandb_store.fetch_stop_request_state(
+                client.db_url,
+                experiment_id=experiment_id,
+                phase=phase_name or "run",
+                run_name=run_id,
+                attempt_token=attempt_token,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        preserved_stop_requested = False
+        preserved_stop_requested_at = None
     try:
         _results_payload, existing_result = get_run_result(
             client,
@@ -307,13 +322,7 @@ def begin_run_attempt(
     if existing_result is not None:
         prior_status = str(existing_result.get("status") or "").strip().lower()
         if prior_status in {"success", "failed", "stopped", "partial"}:
-            cleared_stale_stop = wandb_store.fetch_stop_requested(
-                client.db_url,
-                experiment_id=experiment_id,
-                phase=phase_name or "run",
-                run_name=run_id,
-                attempt_token=attempt_token,
-            )
+            cleared_stale_stop = bool(preserved_stop_requested)
             wandb_store.set_stop_requested(
                 client.db_url,
                 experiment_id=experiment_id,
@@ -324,6 +333,8 @@ def begin_run_attempt(
                 create_if_missing=False,
                 attempt_token=attempt_token,
             )
+            preserved_stop_requested = False
+            preserved_stop_requested_at = None
     wandb_store.update_run_summary(
         run,
         {
@@ -335,8 +346,10 @@ def begin_run_attempt(
             wandb_store.SUMMARY_RESULT_ARTIFACT: None,
             wandb_store.SUMMARY_FAILURE_REASON: None,
             wandb_store.SUMMARY_WANDB_URL: getattr(run, "url", None),
-            wandb_store.SUMMARY_STOP_REQUESTED: False,
-            wandb_store.SUMMARY_STOP_REQUESTED_AT: None,
+            wandb_store.SUMMARY_STOP_REQUESTED: bool(preserved_stop_requested),
+            wandb_store.SUMMARY_STOP_REQUESTED_AT: (
+                preserved_stop_requested_at if preserved_stop_requested else None
+            ),
             wandb_store.SUMMARY_HEARTBEAT_AT: now.isoformat(),
         },
     )

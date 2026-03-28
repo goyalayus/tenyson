@@ -562,13 +562,7 @@ def set_stop_requested(
         phase=phase,
         run_name=run_name,
     )
-    normalized_attempt = _normalize_attempt_token(attempt_token)
-    expected_control_run_id = build_run_id(
-        control_experiment_id,
-        control_phase,
-        control_run_name,
-        attempt_token=normalized_attempt,
-    )
+    control_attempt = _normalize_attempt_token(attempt_token)
     using_legacy_live_run = False
     try:
         run = resolve_run(
@@ -577,23 +571,38 @@ def set_stop_requested(
             phase=control_phase,
             run_name=control_run_name,
             create_if_missing=create_if_missing,
-            attempt_token=normalized_attempt,
+            attempt_token=control_attempt,
         )
     except Exception:  # noqa: BLE001
         if create_if_missing:
             return False
         try:
-            run = resolve_run(
+            live_run = resolve_run(
                 backend_ref,
                 experiment_id=experiment_id,
                 phase=phase,
                 run_name=run_name,
                 create_if_missing=False,
-                attempt_token=normalized_attempt,
+                attempt_token=control_attempt,
             )
-            using_legacy_live_run = True
         except Exception:  # noqa: BLE001
             return False
+        live_attempt = _normalize_attempt_token(
+            _summary_get(live_run, SUMMARY_ATTEMPT_TOKEN)
+        )
+        control_attempt = control_attempt or live_attempt
+        if control_attempt is not None:
+            run = resolve_run(
+                backend_ref,
+                experiment_id=control_experiment_id,
+                phase=control_phase,
+                run_name=control_run_name,
+                create_if_missing=True,
+                attempt_token=control_attempt,
+            )
+        else:
+            run = live_run
+            using_legacy_live_run = True
     if using_legacy_live_run:
         update_run_summary(
             run,
@@ -609,7 +618,7 @@ def set_stop_requested(
                 SUMMARY_EXPERIMENT_ID: control_experiment_id,
                 SUMMARY_PHASE: control_phase,
                 SUMMARY_RUN_NAME: control_run_name,
-                SUMMARY_ATTEMPT_TOKEN: normalized_attempt,
+                SUMMARY_ATTEMPT_TOKEN: control_attempt,
                 SUMMARY_STATUS: "control",
                 SUMMARY_IS_ACTIVE: False,
                 SUMMARY_CONTROL_KIND: "manual_stop",
@@ -621,6 +630,12 @@ def set_stop_requested(
             },
         )
         local_control_run = active_run()
+        expected_control_run_id = build_run_id(
+            control_experiment_id,
+            control_phase,
+            control_run_name,
+            attempt_token=control_attempt,
+        )
         if getattr(local_control_run, "id", None) == expected_control_run_id:
             try:
                 import wandb
