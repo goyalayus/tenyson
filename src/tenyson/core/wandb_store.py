@@ -569,6 +569,7 @@ def set_stop_requested(
         control_run_name,
         attempt_token=normalized_attempt,
     )
+    using_legacy_live_run = False
     try:
         run = resolve_run(
             backend_ref,
@@ -579,32 +580,54 @@ def set_stop_requested(
             attempt_token=normalized_attempt,
         )
     except Exception:  # noqa: BLE001
-        return False
-    update_run_summary(
-        run,
-        {
-            SUMMARY_EXPERIMENT_ID: control_experiment_id,
-            SUMMARY_PHASE: control_phase,
-            SUMMARY_RUN_NAME: control_run_name,
-            SUMMARY_ATTEMPT_TOKEN: normalized_attempt,
-            SUMMARY_STATUS: "control",
-            SUMMARY_IS_ACTIVE: False,
-            SUMMARY_CONTROL_KIND: "manual_stop",
-            SUMMARY_CONTROL_TARGET_EXPERIMENT_ID: str(experiment_id),
-            SUMMARY_CONTROL_TARGET_PHASE: str(phase),
-            SUMMARY_CONTROL_TARGET_RUN_NAME: str(run_name),
-            SUMMARY_STOP_REQUESTED: bool(requested),
-            SUMMARY_STOP_REQUESTED_AT: when_iso if requested else None,
-        },
-    )
-    local_control_run = active_run()
-    if getattr(local_control_run, "id", None) == expected_control_run_id:
+        if create_if_missing:
+            return False
         try:
-            import wandb
-
-            wandb.finish()
+            run = resolve_run(
+                backend_ref,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=run_name,
+                create_if_missing=False,
+                attempt_token=normalized_attempt,
+            )
+            using_legacy_live_run = True
         except Exception:  # noqa: BLE001
-            pass
+            return False
+    if using_legacy_live_run:
+        update_run_summary(
+            run,
+            {
+                SUMMARY_STOP_REQUESTED: bool(requested),
+                SUMMARY_STOP_REQUESTED_AT: when_iso if requested else None,
+            },
+        )
+    else:
+        update_run_summary(
+            run,
+            {
+                SUMMARY_EXPERIMENT_ID: control_experiment_id,
+                SUMMARY_PHASE: control_phase,
+                SUMMARY_RUN_NAME: control_run_name,
+                SUMMARY_ATTEMPT_TOKEN: normalized_attempt,
+                SUMMARY_STATUS: "control",
+                SUMMARY_IS_ACTIVE: False,
+                SUMMARY_CONTROL_KIND: "manual_stop",
+                SUMMARY_CONTROL_TARGET_EXPERIMENT_ID: str(experiment_id),
+                SUMMARY_CONTROL_TARGET_PHASE: str(phase),
+                SUMMARY_CONTROL_TARGET_RUN_NAME: str(run_name),
+                SUMMARY_STOP_REQUESTED: bool(requested),
+                SUMMARY_STOP_REQUESTED_AT: when_iso if requested else None,
+            },
+        )
+        local_control_run = active_run()
+        if getattr(local_control_run, "id", None) == expected_control_run_id:
+            try:
+                import wandb
+
+                wandb.finish()
+            except Exception:  # noqa: BLE001
+                pass
     return True
 
 

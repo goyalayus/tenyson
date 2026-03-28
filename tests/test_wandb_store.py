@@ -633,6 +633,59 @@ class WandBStoreTests(unittest.TestCase):
             wandb_store._stop_control_run_name("rl", "wordle_rl_main"),
         )
 
+    def test_set_stop_requested_falls_back_to_legacy_live_run_when_control_run_missing(self) -> None:
+        live_run = FakeRun("live-run")
+
+        def fake_resolve_run(
+            backend_ref,
+            *,
+            experiment_id,
+            phase,
+            run_name,
+            create_if_missing=False,
+            attempt_token=None,
+        ):
+            _unused = (backend_ref, phase, run_name, create_if_missing, attempt_token)
+            if experiment_id == wandb_store._stop_control_experiment_id("wordle_exp"):
+                raise LookupError("no control record yet")
+            return live_run
+
+        with patch.object(
+            wandb_store,
+            "resolve_run",
+            side_effect=fake_resolve_run,
+        ) as resolve_run_mock:
+            stopped = wandb_store.set_stop_requested(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="sft",
+                run_name="sft_main",
+                requested=True,
+                when_iso="2026-03-22T10:00:00+00:00",
+                create_if_missing=False,
+            )
+
+        self.assertTrue(stopped)
+        self.assertEqual(live_run.summary[wandb_store.SUMMARY_STOP_REQUESTED], True)
+        self.assertEqual(
+            live_run.summary[wandb_store.SUMMARY_STOP_REQUESTED_AT],
+            "2026-03-22T10:00:00+00:00",
+        )
+        self.assertNotIn(wandb_store.SUMMARY_CONTROL_KIND, live_run.summary)
+        self.assertEqual(resolve_run_mock.call_count, 2)
+        self.assertEqual(
+            resolve_run_mock.call_args_list[0].kwargs["experiment_id"],
+            wandb_store._stop_control_experiment_id("wordle_exp"),
+        )
+        self.assertEqual(
+            resolve_run_mock.call_args_list[1].kwargs["experiment_id"],
+            "wordle_exp",
+        )
+        self.assertEqual(
+            resolve_run_mock.call_args_list[1].kwargs["run_name"],
+            "sft_main",
+        )
+
     def test_fetch_stop_request_state_prefers_control_run(self) -> None:
         control = FakeRun("control-run")
         control.summary.update(
