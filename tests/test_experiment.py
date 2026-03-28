@@ -1243,6 +1243,109 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertEqual(results["eval_turn3"].status, "success")
         self.assertEqual(results["eval_turn3"].processed_samples, 25)
 
+    def test_run_parallel_waits_for_delayed_telemetry_result_after_aborting_sibling(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+        )
+        adapter = AdapterRef(repo_id="repo/id", revision="sha123")
+        left_stage = session.eval(
+            "eval_turn2",
+            adapter=adapter,
+            run_name="wordle_eval_turn2",
+        )
+        right_stage = session.eval(
+            "eval_turn3",
+            adapter=adapter,
+            run_name="wordle_eval_turn3",
+        )
+        stopped_left = _result(
+            "wordle_eval_turn2",
+            status="stopped",
+            processed_samples=0,
+            expected_samples=33,
+            stopped_early=True,
+            failure_reason="Manual stop requested after processing 0 / 33 prompts.",
+        )
+        stopped_right = _result(
+            "wordle_eval_turn3",
+            status="stopped",
+            processed_samples=0,
+            expected_samples=33,
+            stopped_early=True,
+            failure_reason="Manual stop requested after processing 0 / 33 prompts.",
+        )
+
+        right_fetches = {"count": 0}
+
+        def fake_get_run_result(
+            client,
+            experiment_id,
+            run_id,
+            phase,
+            *,
+            attempt_token=None,
+            include_results_payload=True,
+        ):
+            del client, experiment_id, phase, attempt_token, include_results_payload
+            if run_id == "wordle_eval_turn2":
+                return ({}, dict(stopped_left.__dict__))
+            if run_id == "wordle_eval_turn3":
+                right_fetches["count"] += 1
+                if right_fetches["count"] < 2:
+                    return None
+                return ({}, dict(stopped_right.__dict__))
+            return None
+
+        live_row = LiveRunInfo(
+            run_id="wordle_eval_turn3",
+            phase="eval",
+            provider="modal",
+            status="running",
+            is_active=True,
+            created_at=None,
+            updated_at=datetime.now(timezone.utc),
+            attempt_token="attempt-3",
+        )
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            side_effect=fake_get_run_result,
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            side_effect=[[live_row], []],
+        ) as list_live_runs_mock, patch.object(
+            experiment_module.time,
+            "sleep",
+        ) as sleep_mock, patch.object(
+            experiment_module,
+            "run_pipeline",
+            return_value=[stopped_left],
+        ):
+            results = session.run_parallel(
+                "eval_pair",
+                [left_stage, right_stage],
+                cloud=object(),
+            )
+
+        self.assertEqual(results["eval_turn2"].status, "stopped")
+        self.assertEqual(results["eval_turn3"].status, "stopped")
+        self.assertGreaterEqual(right_fetches["count"], 2)
+        list_live_runs_mock.assert_called_with(
+            db_url="wandb://demo/tenyson",
+            experiment_id="wordle_exp",
+            max_age_seconds=experiment_module._RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
+        )
+        sleep_mock.assert_called()
+
     def test_recovery_experiment_id_must_match_stage_telemetry_experiment_id(self) -> None:
         session = ExperimentSession(
             task=object(),

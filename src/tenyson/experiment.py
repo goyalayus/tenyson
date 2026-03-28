@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
@@ -50,6 +51,9 @@ _DEFAULT_ABORT_MESSAGE = (
 )
 _RECOVERY_PROMPT_LOCK = threading.Lock()
 _RECOVERY_LIVE_RUN_MAX_AGE_SECONDS = 180
+_PARALLEL_RESULT_TELEMETRY_WAIT_TIMEOUT_SECONDS = 120.0
+_PARALLEL_RESULT_TELEMETRY_POLL_SECONDS = 5.0
+_PARALLEL_RESULT_TELEMETRY_EMPTY_LIVE_POLLS = 3
 _RECOVERY_FILE_LOCKS: Dict[str, Tuple[Any, int]] = {}
 _RECOVERY_FILE_LOCKS_LOCK = threading.Lock()
 
@@ -1015,6 +1019,46 @@ class ExperimentSession:
         except TypeError:
             return None
 
+    def _wait_for_stage_result_from_telemetry(self, stage: StageSpec) -> Optional[JobResult]:
+        result = self._load_stage_result_from_telemetry(stage)
+        if result is not None:
+            return result
+
+        try:
+            backend_ref, experiment_id = resolve_telemetry_context(stage.config)
+        except Exception:
+            return None
+        if not backend_ref or not experiment_id:
+            return None
+
+        deadline = time.monotonic() + _PARALLEL_RESULT_TELEMETRY_WAIT_TIMEOUT_SECONDS
+        empty_live_polls = 0
+        while time.monotonic() < deadline:
+            try:
+                live_rows = list_live_runs(
+                    db_url=str(backend_ref),
+                    experiment_id=str(experiment_id),
+                    max_age_seconds=_RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
+                )
+            except Exception:
+                live_rows = []
+
+            if live_rows:
+                empty_live_polls = 0
+            else:
+                empty_live_polls += 1
+
+            time.sleep(
+                max(0.1, float(_PARALLEL_RESULT_TELEMETRY_POLL_SECONDS))
+            )
+            result = self._load_stage_result_from_telemetry(stage)
+            if result is not None:
+                return result
+            if empty_live_polls >= _PARALLEL_RESULT_TELEMETRY_EMPTY_LIVE_POLLS:
+                break
+
+        return self._load_stage_result_from_telemetry(stage)
+
     def _reconcile_stage_report_from_telemetry(self, stage: StageSpec) -> None:
         if self._report_controller is None:
             return
@@ -1269,7 +1313,7 @@ class ExperimentSession:
                         matched_result = result
                         break
                 if matched_result is None:
-                    matched_result = self._load_stage_result_from_telemetry(stage)
+                    matched_result = self._wait_for_stage_result_from_telemetry(stage)
                 if matched_result is None:
                     returned_run_ids = [result.run_id for result in results]
                     raise RuntimeError(
