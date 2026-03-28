@@ -479,28 +479,56 @@ class ExperimentSessionTests(unittest.TestCase):
             updated_at=datetime.now(timezone.utc),
             attempt_token="attempt-1",
         )
+        recovered = _result(
+            "wordle_sft_main",
+            status="stopped",
+            hf_repo_id="repo/id",
+            hf_revision="sha123",
+            failure_reason="Manual stop requested at step 12.",
+            stopped_early=True,
+            attempt_token="old-attempt-token",
+        )
 
         with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            return_value=({}, dict(recovered.__dict__)),
+        ), patch.object(
+            experiment_module,
+            "_prompt_recovery_action",
+            return_value="resume",
+        ) as prompt_mock, patch.object(
             experiment_module,
             "list_live_runs",
             return_value=[live_row],
         ) as list_live_runs_mock, patch.object(
             experiment_module,
-            "get_run_result",
-            return_value=None,
-        ) as get_run_result_mock, patch.object(
-            experiment_module,
             "run_pipeline",
         ) as run_pipeline_mock:
-            with self.assertRaisesRegex(RuntimeError, "still has live runs"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r'live runs are still active: mixed_rl \(phase=rl\)',
+            ):
                 session.run_stage(stage, cloud=object())
 
+        self.assertEqual(
+            stage.config["training"]["resume_from_checkpoint"],
+            "repo/id:sha123",
+        )
+        self.assertEqual(
+            stage.config["telemetry"]["attempt_token"],
+            "old-attempt-token",
+        )
+        prompt_mock.assert_called_once()
         list_live_runs_mock.assert_called_once_with(
             db_url="wandb://demo/tenyson",
             experiment_id="wordle_exp",
             max_age_seconds=experiment_module._RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
         )
-        get_run_result_mock.assert_called_once()
         run_pipeline_mock.assert_not_called()
 
     def test_run_stage_recovery_live_run_check_only_happens_once_per_session(self) -> None:
@@ -852,6 +880,88 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertEqual(results["eval_turn2"].processed_samples, 25)
         self.assertEqual(results["eval_turn3"].status, "success")
         run_pipeline_mock.assert_called_once()
+
+    def test_run_parallel_recovery_refuses_when_live_runs_exist(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+            shared_overrides=_telemetry_shared_overrides(),
+            recovery_experiment_id="wordle_exp",
+        )
+        adapter = AdapterRef(repo_id="repo/id", revision="sha123")
+        recovered_stage = session.eval(
+            "eval_turn2",
+            adapter=adapter,
+            run_name="wordle_eval_turn2",
+        )
+        fresh_stage = session.eval(
+            "eval_turn3",
+            adapter=adapter,
+            run_name="wordle_eval_turn3",
+        )
+        recovered = _result(
+            "wordle_eval_turn2",
+            status="success",
+            processed_samples=25,
+            expected_samples=25,
+        )
+        live_row = LiveRunInfo(
+            run_id="curr_rl_t3",
+            phase="rl",
+            provider="modal",
+            status="running",
+            is_active=True,
+            created_at=None,
+            updated_at=datetime.now(timezone.utc),
+            attempt_token="attempt-2",
+        )
+
+        def fake_get_run_result(
+            client,
+            experiment_id,
+            run_id,
+            phase,
+            *,
+            include_results_payload=True,
+        ):
+            del client, experiment_id, phase, include_results_payload
+            if run_id == "wordle_eval_turn2":
+                return ({}, dict(recovered.__dict__))
+            return None
+
+        with patch.object(
+            experiment_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            experiment_module,
+            "get_run_result",
+            side_effect=fake_get_run_result,
+        ), patch.object(
+            experiment_module,
+            "list_live_runs",
+            return_value=[live_row],
+        ) as list_live_runs_mock, patch.object(
+            experiment_module,
+            "run_pipeline",
+        ) as run_pipeline_mock:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r'live runs are still active: curr_rl_t3 \(phase=rl\)',
+            ):
+                session.run_parallel(
+                    "eval_pair",
+                    [recovered_stage, fresh_stage],
+                    cloud=object(),
+                )
+
+        list_live_runs_mock.assert_called_once_with(
+            db_url="wandb://demo/tenyson",
+            experiment_id="wordle_exp",
+            max_age_seconds=experiment_module._RECOVERY_LIVE_RUN_MAX_AGE_SECONDS,
+        )
+        run_pipeline_mock.assert_not_called()
 
     def test_run_stage_uses_telemetry_result_when_pipeline_result_is_missing(self) -> None:
         session = ExperimentSession(
