@@ -123,7 +123,7 @@ class WordleParserTests(unittest.TestCase):
             }
         )
 
-        with patch("datasets.load_dataset", return_value=dataset):
+        with patch("tenyson.core.chat_sft.load_dataset", return_value=dataset):
             train_ds, eval_ds = wordle_task._load_sft_train_eval_split(
                 {
                     "task": {

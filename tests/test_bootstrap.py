@@ -249,10 +249,7 @@ class BootstrapTests(unittest.TestCase):
             experiment_path.resolve(),
         )
         self.assertIn("prepare", captured["kwargs"])
-        self.assertEqual(
-            captured["kwargs"]["recovery_restart_stage_fallback_env_vars"],
-            ("TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE",),
-        )
+        self.assertNotIn("recovery_restart_stage_fallback_env_vars", captured["kwargs"])
 
         top_level_calls: list[tuple[str, str, str]] = []
         branch_calls: list[tuple[str, str, str]] = []

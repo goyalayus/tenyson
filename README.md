@@ -96,9 +96,13 @@ Wordle SFT path loads a Hugging Face dataset where each row looks like:
 Important constraints:
 
 - If you bring your own SFT dataset and want to use the default path, it must
-  expose a `messages` column in this chat format. A plain `prompt` /
-  `completion` table will not work unless you also provide a custom formatting
-  hook or collator.
+  expose a `messages` column in this chat format. This is now a strict
+  contract for the built-in Hub chat-SFT helper in Tenyson core. A plain
+  `prompt` / `completion` table will not work unless you also provide a custom
+  formatting hook or collator.
+- Every `messages` row must be a non-empty list of objects with string
+  `role` and string `content` fields. The built-in helper validates this before
+  training starts.
 - The built-in assistant-only-loss path expects the formatted sequence to
   contain an assistant-turn marker such as
   `training.response_template: "<|im_start|>assistant\n"`.
@@ -364,7 +368,7 @@ Or with a `module:Class` task spec:
 python -m tenyson.runner \
   --job-type sft \
   --config path/to/config.yaml \
-  --task-module examples.wordle.functional:WordleTask
+  --task-module examples.wordle.functional
 ```
 
 `--job-type` must be one of `sft`, `rl`, or `eval`.

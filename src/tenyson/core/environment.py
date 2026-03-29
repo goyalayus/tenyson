@@ -17,6 +17,7 @@ MetricFactory = Callable[
     [List[str], List[str], Dataset, Dict[str, Any], Any],
     Dict[str, Any],
 ]
+RunFamilyConfigFactory = Callable[[Any], Mapping[str, Any]]
 
 _ENV_META_KEY = "_tenyson"
 _ENV_RUN_NAME_KEY = "environment_run"
@@ -125,6 +126,55 @@ class EnvironmentDefinition:
                 "Select one by name in experiments.py."
             )
         return candidates[0]
+
+
+def merge_config_overrides(*chunks: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for chunk in chunks:
+        if not chunk:
+            continue
+        _deep_merge(merged, chunk)
+    return merged
+
+
+def build_run_family(
+    *,
+    prefix: str,
+    run_type: str,
+    values: Sequence[Any],
+    datasets: DatasetHooks = DatasetHooks(),
+    rubric: Optional[RubricHooks] = None,
+    env: Optional[Any] = None,
+    base_config_overrides: Optional[Mapping[str, Any]] = None,
+    config_for_value: Optional[RunFamilyConfigFactory] = None,
+    name_for_value: Optional[Callable[[Any], str]] = None,
+    variants: Optional[Mapping[str, Dict[str, Any]]] = None,
+) -> Dict[str, EnvironmentRunSpec]:
+    runs: Dict[str, EnvironmentRunSpec] = {}
+    for value in values:
+        value_name = (
+            name_for_value(value)
+            if name_for_value is not None
+            else str(value)
+        )
+        run_name = f"{prefix}{value_name}"
+        value_overrides = (
+            config_for_value(value)
+            if config_for_value is not None
+            else {}
+        )
+        runs[run_name] = EnvironmentRunSpec(
+            run_type=run_type,
+            datasets=datasets,
+            rubric=rubric,
+            env=env,
+            config_overrides=merge_config_overrides(
+                base_config_overrides,
+                value_overrides,
+            ),
+            variants=deepcopy(dict(variants or {})),
+        )
+    return runs
 
 
 def bind_environment_run(config: Dict[str, Any], run_name: str) -> None:

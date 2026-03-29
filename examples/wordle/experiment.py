@@ -145,7 +145,4 @@ if __name__ == "__main__":
         __file__,
         build,
         prepare=prepare_wordle_experiment,
-        recovery_restart_stage_fallback_env_vars=(
-            "TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE",
-        ),
     )
