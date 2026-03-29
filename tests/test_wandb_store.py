@@ -836,6 +836,55 @@ class WandBStoreTests(unittest.TestCase):
             "attempt-live",
         )
 
+    def test_set_stop_requested_creates_control_row_from_finished_historical_run(self) -> None:
+        finished = FakeRun(
+            "finished-run",
+            name="wordle_rl_mixed",
+            group="wordle_exp",
+            job_type="rl",
+            updated_at="2026-03-29T00:00:00+00:00",
+            state="finished",
+        )
+        finished.summary.update(
+            {
+                wandb_store.SUMMARY_EXPERIMENT_ID: "wordle_exp",
+                wandb_store.SUMMARY_PHASE: "rl",
+                wandb_store.SUMMARY_RUN_NAME: "wordle_rl_mixed",
+                wandb_store.SUMMARY_STATUS: "success",
+                wandb_store.SUMMARY_IS_ACTIVE: False,
+                wandb_store.SUMMARY_HEARTBEAT_AT: "2026-03-29T00:00:00+00:00",
+            }
+        )
+
+        fake_wandb = build_fake_wandb_module(api_run=None)
+        fake_wandb.api_runs = [finished]
+        fake_wandb.api_run_error = LookupError("direct run missing")
+
+        with patch.dict(sys.modules, {"wandb": fake_wandb}):
+            stopped = wandb_store.set_stop_requested(
+                "wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="rl",
+                run_name="wordle_rl_mixed",
+                requested=True,
+                when_iso="2026-03-29T08:25:15+00:00",
+                create_if_missing=False,
+            )
+
+        self.assertTrue(stopped)
+        self.assertEqual(len(fake_wandb.init_calls), 1)
+        init_kwargs = fake_wandb.init_calls[0]
+        self.assertTrue(
+            init_kwargs["id"].startswith(
+                "__tenyson_control__-wordle_exp-__control__-__manual_stop__-rl-wordle_rl_mixed"
+            )
+        )
+        self.assertEqual(init_kwargs["name"], "__manual_stop__:rl::wordle_rl_mixed")
+        self.assertEqual(init_kwargs["group"], "__tenyson_control__:wordle_exp")
+        self.assertEqual(init_kwargs["job_type"], "__control__")
+        self.assertNotIn(wandb_store.SUMMARY_STOP_REQUESTED, finished.summary)
+        self.assertNotIn(wandb_store.SUMMARY_CONTROL_KIND, finished.summary)
+
     def test_fetch_stop_request_state_prefers_control_run(self) -> None:
         control = FakeRun("control-run")
         control.summary.update(
