@@ -53,13 +53,26 @@ That is the big design point: task logic stays in the environment file, while ex
 
 The Wordle experiment entrypoint in [`examples/wordle/experiment.py`](./examples/wordle/experiment.py) is the intended style.
 
-It does three jobs:
+The point is that the experiment file should stay small. In the happy path it is
+just:
 
-1. load the environment and base config templates
-2. choose the named runs to execute
-3. describe the graph: sequence, parallel branches, and follow-up evals
+```python
+from tenyson import run_experiment
 
-That file is not supposed to contain reward logic, dataset construction logic, or reporting customization. Those concerns live in the library and the environment definition.
+
+def build(exp):
+    exp.eval("baseline", run="eval_turn6", adapter=exp.seed("base"))
+    exp.rl("train", run="rl_turn6", adapter=exp.seed("base"))
+    exp.eval("final", run="eval_turn6", adapter=exp.adapter("train"))
+
+
+if __name__ == "__main__":
+    run_experiment(__file__, build)
+```
+
+That file is not supposed to contain reward logic, dataset construction logic,
+report rebuilding, or controller shutdown plumbing. Those concerns live in the
+library and the environment definition.
 
 ## Dataset Format Requirements
 
@@ -149,7 +162,7 @@ from tenyson.loader import load_task
 with open("config_templates/sft.yaml", "r", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
-task = load_task(str(Path("examples/wordle/wordle_task.py").resolve()))
+task = load_task(str(Path("examples/wordle/functional.py").resolve()))
 cfg.setdefault("training", {})["run_name"] = "example_sft_run"
 cfg.setdefault("telemetry", {})["experiment_id"] = "example_experiment"
 job = SFTJob(config=cfg, task=task)
@@ -182,12 +195,16 @@ The important part is not Wordle itself. The important part is the shape:
 Run from the repo root:
 
 ```bash
-cp examples/wordle/.env.example examples/wordle/.env
-# fill in your values in examples/wordle/.env
+cp examples/wordle/.env.example .env
+# fill in your values in .env
 python3 examples/wordle/experiment.py
 ```
 
-The experiment entrypoint auto-loads `examples/wordle/.env` when present, auto-adds `src/` to `PYTHONPATH`, and can install missing controller-side dependencies on a fresh local checkout. Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable dependency bootstrap behavior.
+The experiment entrypoint loads the repo-root `.env` by default and falls back
+to a local example `.env` only if the root file is missing. It can also install
+missing controller-side dependencies on a fresh local checkout. Set
+`TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable dependency bootstrap
+behavior.
 
 For long-running experiments, prefer launching the local controller in detached
 mode so it does not die with your interactive terminal session:
@@ -205,7 +222,8 @@ This writes controller pid/log metadata under `.tenyson_runs/controllers/`.
 Use `python3 -m tenyson.ctl stop-controller --name wordle` if you need to
 terminate the detached local controller process itself.
 
-For a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in `examples/wordle/.env`.
+For a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in
+the repo-root `.env`.
 If your GitHub remote is private, also provide `TENYSON_GIT_AUTH_TOKEN` or `GITHUB_TOKEN` so Modal can clone the repo during image build.
 
 Useful environment variables:
@@ -337,7 +355,7 @@ Remote workers call a single entrypoint:
 python -m tenyson.runner \
   --job-type sft \
   --config path/to/config.yaml \
-  --task-module examples/wordle/wordle_task.py
+  --task-module examples/wordle/functional.py
 ```
 
 Or with a `module:Class` task spec:
@@ -346,7 +364,7 @@ Or with a `module:Class` task spec:
 python -m tenyson.runner \
   --job-type sft \
   --config path/to/config.yaml \
-  --task-module examples.wordle.wordle_task:WordleTask
+  --task-module examples.wordle.functional:WordleTask
 ```
 
 `--job-type` must be one of `sft`, `rl`, or `eval`.

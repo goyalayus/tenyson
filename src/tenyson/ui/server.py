@@ -190,7 +190,7 @@ def _maybe_enrich_wordle_eval_results(
         return payload
 
     try:
-        from examples.wordle.wordle_task import (
+        from examples.wordle.functional import (
             get_wordlists,
             resolve_reward_max_output_tokens,
             score_completion,

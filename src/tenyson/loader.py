@@ -27,7 +27,7 @@ def load_config(path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def _load_module_from_path(path: str) -> ModuleType:
+def load_module_from_path(path: str) -> ModuleType:
     abs_path = os.path.abspath(path)
     if not os.path.isfile(abs_path):
         raise FileNotFoundError(f"Task file not found: {path}")
@@ -60,7 +60,7 @@ def _load_environment_definition_from_module(module: ModuleType) -> EnvironmentD
     return None
 
 
-def _load_task_from_module(
+def load_task_from_module(
     module: ModuleType,
     *,
     source: Optional[str] = None,
@@ -101,7 +101,7 @@ def load_environment_definition(path: str) -> EnvironmentDefinition:
     """
     Load an EnvironmentDefinition from a Python file path.
     """
-    module = _load_module_from_path(path)
+    module = load_module_from_path(path)
     environment = _load_environment_definition_from_module(module)
     if environment is None:
         raise ValueError(f"Expected ENVIRONMENT in {path}, found none.")
@@ -114,8 +114,8 @@ def load_task(path: str) -> TaskPlugin:
     - an EnvironmentDefinition (wrapped in an EnvironmentTaskAdapter), or
     - exactly one concrete TaskPlugin subclass.
     """
-    module = _load_module_from_path(path)
-    return _load_task_from_module(module, source=path)
+    module = load_module_from_path(path)
+    return load_task_from_module(module, source=path)
 
 
 def load_task_from_spec(spec: str) -> TaskPlugin:
@@ -124,7 +124,7 @@ def load_task_from_spec(spec: str) -> TaskPlugin:
     """
     if ":" not in spec:
         module = importlib.import_module(spec)
-        return _load_task_from_module(module, source=spec)
+        return load_task_from_module(module, source=spec)
     module_name, class_name = spec.split(":", 1)
     module = importlib.import_module(module_name)
     task_cls = getattr(module, class_name)

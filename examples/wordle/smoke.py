@@ -2,73 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
-from typing import Any
 
 from tenyson.bootstrap import is_truthy
 from tenyson.core.experiment_runtime import (
+    DEFAULT_REPORT_ENV_VAR,
     LocalExperimentContext,
     env_float,
     env_int,
-    load_local_task,
 )
-from tenyson.experiment import AdapterRef
-
-
-WORDLE_TASK_FILENAME = "wordle_task.py"
-WORDLE_REPORT_ENV_VAR = "TENYSON_WORDLE_REPORT_PATH"
-WORDLE_REPORT_FILENAME = "final_report.md"
-WORDLE_EXPERIMENT2_REPORT_ENV_VAR = "TENYSON_WORDLE_EXPERIMENT2_REPORT_PATH"
-WORDLE_EXPERIMENT2_REPORT_FILENAME = "final_report_experiment2.md"
-WORDLE_EXPERIMENT2_PREFIX = "wordle_experiment2_"
-
-WORDLE_EXPERIMENT2_DEFAULT_SFT_REPO = (
-    "goyalayus/wordle-lora-20260324-163252-sft_main"
-)
-WORDLE_EXPERIMENT2_DEFAULT_SFT_REVISION = (
-    "30a33278640fcc5bcce216adce59984bfb8f7698"
-)
-
-_WORDLE_REPORT_STAGE_ORDER = [
-    "sft_main",
-    "eval_baseline_mixed",
-    "mixed_rl",
-    "mixed_final_eval",
-    "curr_rl_t2",
-    "curr_eval_after_t2_turn2",
-    "curr_rl_t3",
-    "curr_eval_after_t3_turn2",
-    "curr_eval_after_t3_turn3",
-    "curr_rl_t4",
-    "curr_eval_after_t4_turn3",
-    "curr_eval_after_t4_turn4",
-    "curr_rl_t5",
-    "curr_eval_after_t5_turn4",
-    "curr_eval_after_t5_turn5",
-    "curr_final_eval",
-]
-
-
-def load_wordle_task(context: LocalExperimentContext) -> Any:
-    return load_local_task(context=context, task_filename=WORDLE_TASK_FILENAME)
-
-
-def wordle_report_stage_order() -> list[str]:
-    return list(_WORDLE_REPORT_STAGE_ORDER)
-
-
-def wordle_recovery_restart_stages() -> list[str]:
-    restart_from = str(
-        os.getenv("TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE", "")
-    ).strip()
-    if not restart_from:
-        return []
-    ordered_stages = wordle_report_stage_order()
-    if restart_from not in ordered_stages:
-        raise ValueError(
-            "TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE must be one of "
-            f"{ordered_stages}, got {restart_from!r}."
-        )
-    return ordered_stages[ordered_stages.index(restart_from) :]
 
 
 def wordle_smoke_overrides(
@@ -162,7 +103,6 @@ def configure_wordle_smoke_identity(
     *,
     context: LocalExperimentContext,
     label: str,
-    report_env_var: str = WORDLE_REPORT_ENV_VAR,
 ) -> None:
     if not is_truthy(os.getenv("TENYSON_WORDLE_SMOKE", "false")):
         return
@@ -194,44 +134,30 @@ def configure_wordle_smoke_identity(
         os.environ["TENYSON_HF_REPO_BASE"] = hf_repo_base
 
     if explicit_smoke_report_path:
-        os.environ[report_env_var] = explicit_smoke_report_path
-    elif report_env_var in context.loaded_env or not str(
-        os.getenv(report_env_var, "")
+        os.environ[DEFAULT_REPORT_ENV_VAR] = explicit_smoke_report_path
+    elif DEFAULT_REPORT_ENV_VAR in context.loaded_env or not str(
+        os.getenv(DEFAULT_REPORT_ENV_VAR, "")
     ).strip():
         report_path = context.file("smoke_reports") / f"{experiment_id}.md"
-        os.environ[report_env_var] = str(report_path)
+        os.environ[DEFAULT_REPORT_ENV_VAR] = str(report_path)
 
     print(
         f"[{label}] Smoke identity "
         f"(experiment_id={os.getenv('TENYSON_EXPERIMENT_ID', '')}, "
         f"hf_repo_base={os.getenv('TENYSON_HF_REPO_BASE', 'n/a')}, "
-        f"report_path={os.getenv(report_env_var, '')}).",
+        f"report_path={os.getenv(DEFAULT_REPORT_ENV_VAR, '')}).",
         flush=True,
     )
 
 
-def resolve_wordle_experiment2_seed_adapter(*, label: str) -> AdapterRef:
-    repo_id = str(
-        os.getenv(
-            "TENYSON_WORDLE_EXPERIMENT2_SFT_REPO",
-            WORDLE_EXPERIMENT2_DEFAULT_SFT_REPO,
-        )
-    ).strip()
-    revision = str(
-        os.getenv(
-            "TENYSON_WORDLE_EXPERIMENT2_SFT_REVISION",
-            WORDLE_EXPERIMENT2_DEFAULT_SFT_REVISION,
-        )
-    ).strip()
-    if not repo_id or not revision:
-        raise ValueError(
-            "Experiment 2 needs a concrete SFT adapter seed. Set "
-            "TENYSON_WORDLE_EXPERIMENT2_SFT_REPO and "
-            "TENYSON_WORDLE_EXPERIMENT2_SFT_REVISION if you want to override the "
-            "default seed."
-        )
-    print(f"[{label}] Using SFT seed adapter {repo_id}@{revision}.", flush=True)
-    return AdapterRef(repo_id=repo_id, revision=revision)
+def prepare_wordle_experiment(
+    context: LocalExperimentContext,
+    _manifest: object,
+) -> None:
+    configure_wordle_smoke_identity(
+        context=context,
+        label="wordle experiment",
+    )
 
 
 def _smoke_timestamp() -> str:

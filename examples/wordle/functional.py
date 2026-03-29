@@ -16,6 +16,7 @@ from tenyson.core.environment import (
     EnvironmentTaskAdapter,
     RubricHooks,
 )
+from tenyson.experiment import AdapterRef
 
 # ==============================================================================
 # PROMPTS
@@ -1420,3 +1421,11 @@ def load_environment_definition() -> EnvironmentDefinition:
 class WordleTask(EnvironmentTaskAdapter):
     def __init__(self):
         super().__init__(ENVIRONMENT)
+
+
+SEEDS = {
+    "experiment2_sft": AdapterRef(
+        repo_id="goyalayus/wordle-lora-20260324-163252-sft_main",
+        revision="30a33278640fcc5bcce216adce59984bfb8f7698",
+    )
+}

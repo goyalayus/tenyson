@@ -15,7 +15,7 @@ from tenyson.reporting.fixed import ExperimentReport
 class EnvironmentContractTests(unittest.TestCase):
     def test_wordle_named_runs_drive_stage_config(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        task = load_task(str(repo_root / "examples" / "wordle" / "wordle_task.py"))
+        task = load_task(str(repo_root / "examples" / "wordle" / "functional.py"))
         self.assertEqual(task.get_environment_name(), "wordle")
         self.assertIn("wordle_rl_turn4", task.list_named_runs("rl"))
         self.assertIn("wordle_eval_turn5", task.list_named_runs("eval"))

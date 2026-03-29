@@ -180,13 +180,13 @@ class CloudManagerDefaultTests(unittest.TestCase):
 class ModalTaskSpecTests(unittest.TestCase):
     def test_resolve_task_spec_prefers_repo_relative_file_for_loaded_task(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        task_path = repo_root / "examples" / "wordle" / "wordle_task.py"
+        task_path = repo_root / "examples" / "wordle" / "functional.py"
         task = load_task(str(task_path))
 
         manager = ModalManager()
         task_spec = manager._resolve_task_spec(task, str(repo_root))
 
-        self.assertEqual(task_spec, "examples/wordle/wordle_task.py")
+        self.assertEqual(task_spec, "examples/wordle/functional.py")
 
 
 class ModalFunctionOptionsTests(unittest.TestCase):
@@ -243,7 +243,7 @@ class ModalFunctionOptionsTests(unittest.TestCase):
             python_executable="/usr/bin/python3",
             job_type="rl",
             config_path="/tmp/job.yaml",
-            task_spec="examples/wordle/wordle_task.py",
+            task_spec="examples/wordle/functional.py",
             gpu="A100",
             timeout=7200,
             serialized=False,
@@ -260,7 +260,7 @@ class ModalFunctionOptionsTests(unittest.TestCase):
                 "--config",
                 "/tmp/job.yaml",
                 "--task-spec",
-                "examples/wordle/wordle_task.py",
+                "examples/wordle/functional.py",
                 "--gpu",
                 "A100",
                 "--timeout",
@@ -457,7 +457,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
             manager._run_modal_job_via_launcher(
                 job_type="rl",
                 config_payload={"training": {"steps": 4}},
-                task_spec="examples/wordle/wordle_task.py",
+                task_spec="examples/wordle/functional.py",
                 local_project_root="/repo",
                 backend_ref="wandb://demo/tenyson",
                 experiment_id="wordle_exp",
@@ -507,7 +507,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                 manager._run_modal_job_via_launcher(
                     job_type="eval",
                     config_payload={"eval": {"samples": 10}},
-                    task_spec="examples/wordle/wordle_task.py",
+                    task_spec="examples/wordle/functional.py",
                     local_project_root="/repo",
                     backend_ref="wandb://demo/tenyson",
                     experiment_id="wordle_exp",
@@ -544,7 +544,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
                 manager._run_modal_job_via_launcher(
                     job_type="sft",
                     config_payload={"training": {"steps": 4}},
-                    task_spec="examples/wordle/wordle_task.py",
+                    task_spec="examples/wordle/functional.py",
                     local_project_root="/repo",
                     backend_ref="wandb://demo/tenyson",
                     experiment_id="wordle_exp",
@@ -624,7 +624,7 @@ class ModalSubprocessStreamingTests(unittest.TestCase):
             manager._run_modal_job_via_launcher(
                 job_type="eval",
                 config_payload={"evaluation": {"samples": 4}},
-                task_spec="examples/wordle/wordle_task.py",
+                task_spec="examples/wordle/functional.py",
                 local_project_root="/repo",
                 backend_ref="wandb://demo/tenyson",
                 experiment_id="wordle_exp",
@@ -925,7 +925,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
             manager._run_modal_job(
                 job_type="rl",
                 config_payload={"training": {"steps": 4}},
-                task_spec="examples/wordle/wordle_task.py",
+                task_spec="examples/wordle/functional.py",
             )
 
         self.assertTrue(captured["enable_output_entered"])
@@ -933,7 +933,7 @@ class ModalDetachedLaunchTests(unittest.TestCase):
         self.assertTrue(captured["run_exited"])
         self.assertEqual(
             captured["spawn_args"],
-            ("rl", {"training": {"steps": 4}}, "examples/wordle/wordle_task.py"),
+            ("rl", {"training": {"steps": 4}}, "examples/wordle/functional.py"),
         )
         self.assertEqual(captured["python_version"], manager.python_version)
         wait_mock.assert_not_called()
@@ -1030,7 +1030,7 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch.object(
             manager,
             "_resolve_task_spec",
-            return_value="examples/wordle/wordle_task.py",
+            return_value="examples/wordle/functional.py",
         ), patch.object(
             manager,
             "_run_modal_job_via_launcher",
@@ -1110,7 +1110,7 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch.object(
             manager,
             "_resolve_task_spec",
-            return_value="examples/wordle/wordle_task.py",
+            return_value="examples/wordle/functional.py",
         ), patch.object(
             manager,
             "_run_modal_job_via_launcher",
@@ -1176,7 +1176,7 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch.object(
             manager,
             "_resolve_task_spec",
-            return_value="examples/wordle/wordle_task.py",
+            return_value="examples/wordle/functional.py",
         ), patch.object(
             manager,
             "_run_modal_job_via_launcher",
@@ -1236,7 +1236,7 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch.object(
             manager,
             "_resolve_task_spec",
-            return_value="examples/wordle/wordle_task.py",
+            return_value="examples/wordle/functional.py",
         ), patch.object(
             manager,
             "_run_modal_job_via_launcher",
@@ -1304,7 +1304,7 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch.object(
             manager,
             "_resolve_task_spec",
-            return_value="examples/wordle/wordle_task.py",
+            return_value="examples/wordle/functional.py",
         ), patch.object(
             manager,
             "_run_modal_job_via_launcher",
@@ -1378,7 +1378,7 @@ class ModalManagerRunTests(unittest.TestCase):
         ), patch.object(
             manager,
             "_resolve_task_spec",
-            return_value="examples/wordle/wordle_task.py",
+            return_value="examples/wordle/functional.py",
         ), patch.object(
             manager,
             "_run_modal_job_via_launcher",

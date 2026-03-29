@@ -38,9 +38,9 @@ from tenyson.jobs.reporting_utils import normalize_report_to
 
 def _load_wordle_task_module():
     module_path = (
-        Path(__file__).resolve().parents[1] / "examples" / "wordle" / "wordle_task.py"
+        Path(__file__).resolve().parents[1] / "examples" / "wordle" / "functional.py"
     )
-    spec = importlib.util.spec_from_file_location("wordle_task_for_tests", module_path)
+    spec = importlib.util.spec_from_file_location("wordle_functional_for_tests", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
