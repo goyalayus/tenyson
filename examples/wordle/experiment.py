@@ -1,242 +1,45 @@
-from datetime import datetime, timezone
-import os
 from pathlib import Path
-import signal
+import os
 import sys
 import threading
 import time
 
 # src-layout convenience for running this file directly from a fresh checkout.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_THIS_DIR = Path(__file__).resolve().parent
 _SRC_DIR = _REPO_ROOT / "src"
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from tenyson.bootstrap import ensure_local_controller_environment, load_env_file
-from tenyson.cloud.modal import ModalManager
+from common import (
+    WORDLE_REPORT_ENV_VAR,
+    WORDLE_REPORT_FILENAME,
+    configure_wordle_smoke_identity,
+    load_wordle_task,
+    wordle_recovery_restart_stages,
+    wordle_report_stage_order,
+    wordle_smoke_overrides,
+)
 from tenyson.core.control import list_live_runs
-from tenyson.core.run_config import shared_overrides_from_env
-from tenyson.experiment import ConfigTemplates, ExperimentAborted, ExperimentSession
-from tenyson.loader import load_task
+from tenyson.core.experiment_runtime import (
+    bootstrap_local_experiment,
+    build_experiment_report,
+    create_modal_experiment_session,
+    install_sigterm_handler,
+    resolve_recovery_experiment_id,
+)
+from tenyson.experiment import ExperimentAborted
 from tenyson.reporting.fixed import ExperimentReport
 
-ensure_local_controller_environment(anchor_file=__file__)
 
 _FORCED_STOP_REQUESTED = False
 
 
-def _graceful_shutdown_signal_handler(signum: int, _frame: object) -> None:
+def _mark_forced_stop(_signum: int) -> None:
     global _FORCED_STOP_REQUESTED
     _FORCED_STOP_REQUESTED = True
-    signal_name = signal.Signals(signum).name
-    print(
-        f"[wordle experiment] Received {signal_name}; shutting down cleanly.",
-        flush=True,
-    )
-    raise KeyboardInterrupt
-
-
-def _install_graceful_shutdown_handlers() -> None:
-    signal.signal(signal.SIGTERM, _graceful_shutdown_signal_handler)
-
-
-def _load_example_env(path: Path | None = None) -> dict[str, str]:
-    return load_env_file(path or Path(__file__).with_name(".env"))
-
-
-def _is_truthy(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = str(os.getenv(name, str(default))).strip()
-    return int(raw or str(default))
-
-
-def _float_env(name: str, default: float) -> float:
-    raw = str(os.getenv(name, str(default))).strip()
-    return float(raw or str(default))
-
-
-def _wordle_smoke_overrides() -> dict[str, dict] | None:
-    if not _is_truthy(os.getenv("TENYSON_WORDLE_SMOKE", "false")):
-        return None
-
-    sft_steps = max(1, _int_env("TENYSON_WORDLE_SMOKE_SFT_STEPS", 30))
-    sft_train_samples = max(
-        1, _int_env("TENYSON_WORDLE_SMOKE_SFT_TRAIN_SAMPLES", 128)
-    )
-    rl_steps = max(1, _int_env("TENYSON_WORDLE_SMOKE_RL_STEPS", 20))
-    rl_samples = max(1, _int_env("TENYSON_WORDLE_SMOKE_RL_SAMPLES", 64))
-    eval_samples = max(1, _int_env("TENYSON_WORDLE_SMOKE_EVAL_SAMPLES", 25))
-    sft_val_size = max(1, _int_env("TENYSON_WORDLE_SMOKE_SFT_VAL_SIZE", 32))
-    sft_save_steps = max(1, min(sft_steps, _int_env("TENYSON_WORDLE_SMOKE_SFT_SAVE_STEPS", 10)))
-    sft_eval_steps = max(1, min(sft_steps, _int_env("TENYSON_WORDLE_SMOKE_SFT_EVAL_STEPS", 10)))
-    rl_push_steps = max(1, min(rl_steps, _int_env("TENYSON_WORDLE_SMOKE_RL_PUSH_STEPS", 10)))
-    rl_vllm_gpu_util = min(
-        0.95,
-        max(0.1, _float_env("TENYSON_WORDLE_SMOKE_RL_VLLM_GPU_UTIL", 0.5)),
-    )
-
-    print(
-        "[wordle experiment] Smoke mode enabled "
-        f"(sft_steps={sft_steps}, sft_train_samples={sft_train_samples}, "
-        f"rl_steps={rl_steps}, rl_samples={rl_samples}, "
-        f"eval_samples={eval_samples}, rl_vllm_gpu_util={rl_vllm_gpu_util}).",
-        flush=True,
-    )
-
-    return {
-        "sft": {
-            "task": {
-                "sft_train_samples": sft_train_samples,
-            },
-            "training": {
-                "max_steps": sft_steps,
-                "val_size": sft_val_size,
-                "save_steps": sft_save_steps,
-                "eval_steps": sft_eval_steps,
-                "hf_push_every_steps": sft_save_steps,
-                "save_total_limit": 1,
-                "logging_steps": 1,
-            }
-        },
-        "rl": {
-            "training": {
-                "max_steps": rl_steps,
-                "hf_push_every_steps": rl_push_steps,
-                "save_total_limit": 1,
-            },
-            "vllm": {
-                "gpu_memory_utilization": rl_vllm_gpu_util,
-            },
-            "task": {
-                "synthetic_samples": rl_samples,
-            },
-        },
-        "eval": {
-            "task": {
-                "eval_samples": eval_samples,
-            }
-        },
-    }
-
-
-def _smoke_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-
-
-def _append_hf_repo_suffix(repo_base: str, suffix: str) -> str:
-    text = str(repo_base or "").strip().rstrip("/")
-    if not text:
-        return ""
-
-    namespace = ""
-    repo_name = text
-    if "/" in text:
-        namespace, repo_name = text.split("/", 1)
-
-    suffix_text = f"-{suffix}"
-    if not repo_name.endswith(suffix_text):
-        repo_name = f"{repo_name}{suffix_text}"
-    repo_name = repo_name[:96].rstrip("-")
-    if namespace:
-        return f"{namespace}/{repo_name}"
-    return repo_name
-
-
-def _configure_smoke_identity(*, base_dir: Path, loaded_env: dict[str, str]) -> None:
-    if not _is_truthy(os.getenv("TENYSON_WORDLE_SMOKE", "false")):
-        return
-
-    explicit_smoke_experiment_id = str(
-        os.getenv("TENYSON_WORDLE_SMOKE_EXPERIMENT_ID", "")
-    ).strip()
-    explicit_smoke_repo_base = str(
-        os.getenv("TENYSON_WORDLE_SMOKE_HF_REPO_BASE", "")
-    ).strip()
-    explicit_smoke_report_path = str(
-        os.getenv("TENYSON_WORDLE_SMOKE_REPORT_PATH", "")
-    ).strip()
-
-    experiment_id = str(os.getenv("TENYSON_EXPERIMENT_ID", "")).strip()
-    if explicit_smoke_experiment_id:
-        experiment_id = explicit_smoke_experiment_id
-        os.environ["TENYSON_EXPERIMENT_ID"] = experiment_id
-    elif "TENYSON_EXPERIMENT_ID" in loaded_env or not experiment_id:
-        experiment_id = f"wordle_smoke_{_smoke_timestamp()}"
-        os.environ["TENYSON_EXPERIMENT_ID"] = experiment_id
-
-    hf_repo_base = str(os.getenv("TENYSON_HF_REPO_BASE", "")).strip()
-    if explicit_smoke_repo_base:
-        hf_repo_base = explicit_smoke_repo_base
-        os.environ["TENYSON_HF_REPO_BASE"] = hf_repo_base
-    elif hf_repo_base and "TENYSON_HF_REPO_BASE" in loaded_env:
-        hf_repo_base = _append_hf_repo_suffix(hf_repo_base, "smoke")
-        os.environ["TENYSON_HF_REPO_BASE"] = hf_repo_base
-
-    if explicit_smoke_report_path:
-        os.environ["TENYSON_WORDLE_REPORT_PATH"] = explicit_smoke_report_path
-    elif "TENYSON_WORDLE_REPORT_PATH" in loaded_env or not str(
-        os.getenv("TENYSON_WORDLE_REPORT_PATH", "")
-    ).strip():
-        report_path = base_dir / "smoke_reports" / f"{experiment_id}.md"
-        os.environ["TENYSON_WORDLE_REPORT_PATH"] = str(report_path)
-
-    print(
-        "[wordle experiment] Smoke identity "
-        f"(experiment_id={os.getenv('TENYSON_EXPERIMENT_ID', '')}, "
-        f"hf_repo_base={os.getenv('TENYSON_HF_REPO_BASE', 'n/a')}, "
-        f"report_path={os.getenv('TENYSON_WORDLE_REPORT_PATH', '')}).",
-        flush=True,
-    )
-
-
-def _report_output_path(base_dir: Path) -> Path:
-    configured = str(os.getenv("TENYSON_WORDLE_REPORT_PATH", "")).strip()
-    if configured:
-        return Path(configured)
-    return base_dir / "final_report.md"
-
-
-def _resolve_on_failure_policy() -> str:
-    return str(os.getenv("TENYSON_ON_FAILURE", "wait")).strip() or "wait"
-
-
-def _canonical_report_stage_order() -> list[str]:
-    return [
-        "sft_main",
-        "eval_baseline_mixed",
-        "mixed_rl",
-        "mixed_final_eval",
-        "curr_rl_t2",
-        "curr_eval_after_t2_turn2",
-        "curr_rl_t3",
-        "curr_eval_after_t3_turn2",
-        "curr_eval_after_t3_turn3",
-        "curr_rl_t4",
-        "curr_eval_after_t4_turn3",
-        "curr_eval_after_t4_turn4",
-        "curr_rl_t5",
-        "curr_eval_after_t5_turn4",
-        "curr_eval_after_t5_turn5",
-        "curr_final_eval",
-    ]
-
-
-def _recovery_restart_stages() -> list[str]:
-    restart_from = str(
-        os.getenv("TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE", "")
-    ).strip()
-    if not restart_from:
-        return []
-    ordered_stages = _canonical_report_stage_order()
-    if restart_from not in ordered_stages:
-        raise ValueError(
-            "TENYSON_WORDLE_RECOVER_RESTART_FROM_STAGE must be one of "
-            f"{ordered_stages}, got {restart_from!r}."
-        )
-    return ordered_stages[ordered_stages.index(restart_from) :]
 
 
 def _report_backend_ref(report: ExperimentReport) -> str:
@@ -272,7 +75,7 @@ def _rebuild_report_from_telemetry(report: ExperimentReport, task: object) -> No
             backend_ref=backend_ref,
             experiment_id=experiment_id,
             environment_name=environment_name,
-            run_name_allowlist=_canonical_report_stage_order(),
+            run_name_allowlist=wordle_report_stage_order(),
             prefer_terminal_results=True,
         )
         print(
@@ -341,7 +144,7 @@ def _wait_for_wordle_live_runs_to_finish(
     if not experiment_id or not backend_ref:
         return
 
-    tracked_run_ids = set(_canonical_report_stage_order())
+    tracked_run_ids = set(wordle_report_stage_order())
     deadline = time.monotonic() + max(1.0, float(timeout_seconds))
     max_age_seconds = max(30, int(timeout_seconds) + 30)
 
@@ -374,30 +177,38 @@ def _wait_for_wordle_live_runs_to_finish(
 
 
 def main() -> None:
-    _install_graceful_shutdown_handlers()
-    base_dir = Path(__file__).parent
-    loaded_env = _load_example_env(base_dir / ".env")
-    _configure_smoke_identity(base_dir=base_dir, loaded_env=loaded_env)
-    task = load_task(str(base_dir / "wordle_task.py"))
-    report = ExperimentReport(output_path=_report_output_path(base_dir))
-    smoke_overrides = _wordle_smoke_overrides() or {}
+    context = bootstrap_local_experiment(__file__)
+    install_sigterm_handler(
+        label="wordle experiment",
+        on_signal=_mark_forced_stop,
+    )
+    configure_wordle_smoke_identity(
+        context=context,
+        label="wordle experiment",
+    )
+
+    task = load_wordle_task(context)
+    report = build_experiment_report(
+        context=context,
+        report_env_var=WORDLE_REPORT_ENV_VAR,
+        default_filename=WORDLE_REPORT_FILENAME,
+    )
+    smoke_overrides = wordle_smoke_overrides(
+        include_sft=True,
+        label="wordle experiment",
+    ) or {}
     sft_overrides = smoke_overrides.get("sft")
     rl_overrides = smoke_overrides.get("rl")
     eval_overrides = smoke_overrides.get("eval")
 
-    on_failure = _resolve_on_failure_policy()
-    modal_gpu = os.getenv("TENYSON_MODAL_GPU", "A100").strip() or "A100"
-    modal_timeout = int(os.getenv("TENYSON_MODAL_TIMEOUT", "86400"))
-    recovery_experiment_id = (
-        str(os.getenv("TENYSON_RECOVER_EXPERIMENT_ID", "")).strip() or None
-    )
+    recovery_experiment_id = resolve_recovery_experiment_id()
     if recovery_experiment_id:
         print(
             "[wordle experiment] Recovery enabled for "
             f"experiment_id={recovery_experiment_id}.",
             flush=True,
         )
-    recovery_restart_stages = _recovery_restart_stages()
+    recovery_restart_stages = wordle_recovery_restart_stages()
     if recovery_restart_stages:
         print(
             "[wordle experiment] Recovery will restart stages: "
@@ -405,20 +216,10 @@ def main() -> None:
             flush=True,
         )
 
-    session = ExperimentSession(
+    session = create_modal_experiment_session(
+        context=context,
         task=task,
-        templates=ConfigTemplates.from_directory(_REPO_ROOT / "config_templates"),
-        cloud_factory=ModalManager.factory_from_env(
-            auto_terminate=True,
-            gpu=modal_gpu,
-            timeout=modal_timeout,
-        ),
-        on_failure=on_failure,
-        shared_overrides=shared_overrides_from_env(),
-        parallel=True,
         report=report,
-        report_metric_precision=4,
-        report_wandb_text="run",
         recovery_experiment_id=recovery_experiment_id,
         recovery_restart_stages=recovery_restart_stages,
     )

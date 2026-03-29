@@ -67,6 +67,15 @@ _DEFAULT_REWARD_CONFIG = {
     "overlength_penalty": -0.5,
 }
 
+_DEFAULT_REWARD_PROFILE = "constraint"
+_PRIME_NO_LENGTH_REWARD_PROFILE = "prime_no_length"
+_PRIME_NO_LENGTH_REWARD_CONFIG = {
+    "format": 0.2,
+    "correct_answer": 1.0,
+    "green": 0.2,
+    "yellow": 0.1,
+}
+
 
 def _normalize_feedback_string(feedback: str) -> str:
     compact = "".join(ch for ch in str(feedback).upper() if ch in {"G", "Y", "X"})
@@ -309,7 +318,14 @@ def resolve_reward_max_output_tokens(
     return 2048
 
 
-def score_completion(
+def _resolve_reward_profile(task_cfg: Dict[str, Any]) -> str:
+    profile = str(
+        task_cfg.get("reward_profile", _DEFAULT_REWARD_PROFILE)
+    ).strip() or _DEFAULT_REWARD_PROFILE
+    return profile
+
+
+def _score_constraint_completion(
     prompt_text: str,
     completion_text: str,
     valid_set: set,
@@ -357,6 +373,7 @@ def score_completion(
     strict_ok = bool(guess and re.fullmatch(r"[a-z]{5}", guess))
     if not strict_ok:
         return {
+            "reward_profile": _DEFAULT_REWARD_PROFILE,
             "strict_ok": False,
             "parsed_guess": guess,
             "is_wordle_valid": 0,
@@ -404,6 +421,7 @@ def score_completion(
     )
 
     return {
+        "reward_profile": _DEFAULT_REWARD_PROFILE,
         "strict_ok": True,
         "parsed_guess": guess,
         "is_wordle_valid": is_wordle_valid,
@@ -422,6 +440,115 @@ def score_completion(
         "reward_overlength": reward_overlength,
         "reward_total": reward_total,
     }
+
+
+def _score_prime_no_length_completion(
+    completion_text: str,
+    valid_set: set,
+    task_cfg: Dict[str, Any],
+    tokenizer: Any,
+    *,
+    secret: Optional[str],
+) -> Dict[str, Any]:
+    rewards_cfg = task_cfg.get("rewards", {})
+    format_reward = float(
+        rewards_cfg.get("format", _PRIME_NO_LENGTH_REWARD_CONFIG["format"])
+    )
+    correct_answer_reward = float(
+        rewards_cfg.get(
+            "correct_answer",
+            _PRIME_NO_LENGTH_REWARD_CONFIG["correct_answer"],
+        )
+    )
+    green_reward = float(
+        rewards_cfg.get("green", _PRIME_NO_LENGTH_REWARD_CONFIG["green"])
+    )
+    yellow_reward = float(
+        rewards_cfg.get("yellow", _PRIME_NO_LENGTH_REWARD_CONFIG["yellow"])
+    )
+
+    target = str(secret or "").strip().lower()
+    if len(target) != 5 or not target.isalpha():
+        raise ValueError(
+            "Prime-style Wordle rewards require a 5-letter secret target for each sample."
+        )
+
+    completion_tokens = _count_completion_tokens(completion_text, tokenizer=tokenizer)
+    guess = parse_strict_guess(completion_text)
+    strict_ok = bool(guess and re.fullmatch(r"[a-z]{5}", guess))
+    if not strict_ok:
+        return {
+            "reward_profile": _PRIME_NO_LENGTH_REWARD_PROFILE,
+            "strict_ok": False,
+            "parsed_guess": guess,
+            "completion_tokens": completion_tokens,
+            "is_wordle_valid": 0,
+            "is_exact_correct": 0,
+            "feedback": None,
+            "num_greens": 0,
+            "num_yellows": 0,
+            "reward_format": 0.0,
+            "reward_correct_answer": 0.0,
+            "reward_partial_answer": 0.0,
+            "reward_total": 0.0,
+        }
+
+    feedback = _normalize_feedback_string(compute_feedback(secret=target, guess=guess))
+    num_greens = feedback.count("G")
+    num_yellows = feedback.count("Y")
+    is_exact_correct = int(guess == target)
+    reward_correct_answer = correct_answer_reward if is_exact_correct else 0.0
+    reward_partial_answer = (
+        0.0 if is_exact_correct else (green_reward * num_greens) + (yellow_reward * num_yellows)
+    )
+    reward_total = format_reward + reward_correct_answer + reward_partial_answer
+
+    return {
+        "reward_profile": _PRIME_NO_LENGTH_REWARD_PROFILE,
+        "strict_ok": True,
+        "parsed_guess": guess,
+        "completion_tokens": completion_tokens,
+        "is_wordle_valid": int(guess in valid_set),
+        "is_exact_correct": is_exact_correct,
+        "feedback": feedback,
+        "num_greens": num_greens,
+        "num_yellows": num_yellows,
+        "reward_format": format_reward,
+        "reward_correct_answer": reward_correct_answer,
+        "reward_partial_answer": reward_partial_answer,
+        "reward_total": reward_total,
+    }
+
+
+def score_completion(
+    prompt_text: str,
+    completion_text: str,
+    valid_set: set,
+    task_cfg: Dict[str, Any],
+    tokenizer: Any,
+    *,
+    reward_max_output_tokens: Optional[int] = None,
+    secret: Optional[str] = None,
+) -> Dict[str, Any]:
+    profile = _resolve_reward_profile(task_cfg)
+    if profile == _DEFAULT_REWARD_PROFILE:
+        return _score_constraint_completion(
+            prompt_text,
+            completion_text,
+            valid_set,
+            task_cfg,
+            tokenizer,
+            reward_max_output_tokens=reward_max_output_tokens,
+        )
+    if profile == _PRIME_NO_LENGTH_REWARD_PROFILE:
+        return _score_prime_no_length_completion(
+            completion_text,
+            valid_set,
+            task_cfg,
+            tokenizer,
+            secret=secret,
+        )
+    raise ValueError(f"Unsupported Wordle reward_profile: {profile!r}")
 
 
 # ==============================================================================
@@ -528,6 +655,7 @@ def generate_synthetic_wordle_dataset(
             {
                 "id": i,
                 "secret": secret,
+                "answer": secret,
                 "history_len": history_len,
                 "history_rows": history_rows,
                 "prompt": prompt_text,
@@ -541,7 +669,7 @@ def generate_synthetic_wordle_dataset(
 def _validate_eval_exact_turns(turns: Any) -> List[int]:
     if not isinstance(turns, list) or not turns:
         raise ValueError(
-            "task.eval_exact_turns must be a non-empty list of turns (1..5)."
+            "task.eval_exact_turns must be a non-empty list of turns (1..6)."
         )
     parsed: List[int] = []
     for turn in turns:
@@ -549,9 +677,9 @@ def _validate_eval_exact_turns(turns: Any) -> List[int]:
             raise ValueError(
                 f"task.eval_exact_turns must contain integers only, got {type(turn).__name__}."
             )
-        if turn < 1 or turn > 5:
+        if turn < 1 or turn > 6:
             raise ValueError(
-                f"task.eval_exact_turns values must be within 1..5, got {turn}."
+                f"task.eval_exact_turns values must be within 1..6, got {turn}."
             )
         parsed.append(turn)
     return sorted(list(set(parsed)))
@@ -667,10 +795,38 @@ def _extract_completion_text(completion_obj: Any) -> str:
     return str(completion_obj)
 
 
+def _coerce_batch_string_values(value: Any, batch_size: int) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, str):
+        return [value] * batch_size
+    if isinstance(value, tuple):
+        value = list(value)
+    if isinstance(value, list):
+        if len(value) != batch_size:
+            return None
+        return ["" if item is None else str(item) for item in value]
+    return None
+
+
+def _resolve_prime_reward_targets(kwargs: Dict[str, Any], batch_size: int) -> List[str]:
+    for key in ("secret", "answer", "target", "secrets", "answers", "targets"):
+        values = _coerce_batch_string_values(kwargs.get(key), batch_size)
+        if values is not None:
+            return [value.strip().lower() for value in values]
+    raise ValueError(
+        "Prime-style Wordle rewards require a dataset target column. "
+        "Expected one of: secret, answer, target."
+    )
+
+
 def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
     """Returns a list of callable reward functions for GRPO."""
 
     task_cfg = config.get("task", {})
+    reward_profile = _resolve_reward_profile(task_cfg)
     rewards_cfg = task_cfg.get("rewards", {})
     format_reward = float(rewards_cfg.get("format", 0.2))
     reward_max_output_tokens = resolve_reward_max_output_tokens(
@@ -692,7 +848,7 @@ def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
             )
         return rewards
 
-    def reward_wordle_strict(
+    def reward_wordle_constraint(
         prompts: Sequence[Any], completions: Sequence[Any], **kwargs
     ) -> List[float]:
         rewards = []
@@ -713,10 +869,34 @@ def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
             rewards.append(float(scored["reward_total"] - scored["reward_format"]))
         return rewards
 
-    setattr(reward_format_exact, "tenyson_reward_name", "format_exact")
-    setattr(reward_wordle_strict, "tenyson_reward_name", "wordle_strict")
+    def reward_wordle_prime(
+        prompts: Sequence[Any], completions: Sequence[Any], **kwargs
+    ) -> List[float]:
+        rewards = []
+        targets = _resolve_prime_reward_targets(kwargs, len(completions))
+        for prompt_obj, comp_obj, target in zip(prompts, completions, targets):
+            prompt_text = _extract_prompt_text(prompt_obj)
+            completion_text = _extract_completion_text(comp_obj)
 
-    return [reward_format_exact, reward_wordle_strict]
+            scored = score_completion(
+                prompt_text,
+                completion_text,
+                valid_set,
+                task_cfg,
+                tokenizer,
+                reward_max_output_tokens=reward_max_output_tokens,
+                secret=target,
+            )
+            rewards.append(float(scored["reward_total"] - scored["reward_format"]))
+        return rewards
+
+    setattr(reward_format_exact, "tenyson_reward_name", "format_exact")
+    if reward_profile == _PRIME_NO_LENGTH_REWARD_PROFILE:
+        setattr(reward_wordle_prime, "tenyson_reward_name", "wordle_prime")
+        return [reward_format_exact, reward_wordle_prime]
+
+    setattr(reward_wordle_constraint, "tenyson_reward_name", "wordle_strict")
+    return [reward_format_exact, reward_wordle_constraint]
 
 
 # ==============================================================================
@@ -770,14 +950,12 @@ def get_eval_dataset(config: Dict[str, Any]) -> Dataset:
     return Dataset.from_list(rows[:n_samples])
 
 
-def compute_metrics(
+def _compute_constraint_metrics(
     prompts: List[str],
     completions: List[str],
-    dataset_rows: Dataset,
     config: Dict[str, Any],
     tokenizer: Any,
 ) -> Dict[str, Any]:
-    """Scores completions and returns an aggregated metric dictionary."""
     solutions, allowed = get_wordlists(config)
     valid_set = set(solutions) | set(allowed)
     task_cfg = config.get("task", {})
@@ -855,6 +1033,115 @@ def compute_metrics(
         "detailed_results": detailed_results,
     }
 
+
+def _compute_prime_no_length_metrics(
+    prompts: List[str],
+    completions: List[str],
+    dataset_rows: Dataset,
+    config: Dict[str, Any],
+    tokenizer: Any,
+) -> Dict[str, Any]:
+    solutions, allowed = get_wordlists(config)
+    valid_set = set(solutions) | set(allowed)
+    task_cfg = config.get("task", {})
+
+    total = len(completions)
+    format_ok = 0
+    dict_ok = 0
+    correct_ok = 0
+    total_correct_reward = 0.0
+    total_partial_reward = 0.0
+    total_format_reward = 0.0
+    total_reward = 0.0
+
+    detailed_results = []
+
+    for prompt, comp, row in zip(prompts, completions, dataset_rows):
+        secret = str(row.get("secret") or row.get("answer") or "").strip().lower()
+        scored = score_completion(
+            prompt_text=prompt,
+            completion_text=comp,
+            valid_set=valid_set,
+            task_cfg=task_cfg,
+            tokenizer=tokenizer,
+            secret=secret,
+        )
+
+        format_passed = bool(scored.get("strict_ok"))
+        dict_passed = bool(scored.get("is_wordle_valid"))
+        is_exact_correct = bool(scored.get("is_exact_correct"))
+
+        failure_reasons: List[str] = []
+        if not format_passed:
+            failure_reasons.append("format")
+        if not is_exact_correct:
+            failure_reasons.append("exact_answer")
+
+        row_res = {
+            "prompt": prompt,
+            "completion": comp,
+            "parsed_guess": scored.get("parsed_guess"),
+            "format_ok": format_passed,
+            "dict_ok": dict_passed,
+            "exact_ok": is_exact_correct,
+            "passed": format_passed and is_exact_correct,
+            "failure_reasons": failure_reasons,
+        }
+        row_res.update(scored)
+
+        if format_passed:
+            format_ok += 1
+        if dict_passed:
+            dict_ok += 1
+        if is_exact_correct:
+            correct_ok += 1
+
+        total_correct_reward += float(scored.get("reward_correct_answer") or 0.0)
+        total_partial_reward += float(scored.get("reward_partial_answer") or 0.0)
+        total_format_reward += float(scored.get("reward_format") or 0.0)
+        total_reward += float(scored.get("reward_total") or 0.0)
+        detailed_results.append(row_res)
+
+    return {
+        "metrics": {
+            "avg_correct_answer_reward": total_correct_reward / max(total, 1),
+            "avg_partial_answer_reward": total_partial_reward / max(total, 1),
+            "avg_format_reward": total_format_reward / max(total, 1),
+            "avg_total_reward": total_reward / max(total, 1),
+            "correct_answer_accuracy": correct_ok / max(total, 1),
+            "format_accuracy": format_ok / max(total, 1),
+            "dict_accuracy": dict_ok / max(total, 1),
+            "total_samples": total,
+        },
+        "detailed_results": detailed_results,
+    }
+
+
+def compute_metrics(
+    prompts: List[str],
+    completions: List[str],
+    dataset_rows: Dataset,
+    config: Dict[str, Any],
+    tokenizer: Any,
+) -> Dict[str, Any]:
+    """Scores completions and returns an aggregated metric dictionary."""
+    task_cfg = config.get("task", {})
+    reward_profile = _resolve_reward_profile(task_cfg)
+    if reward_profile == _PRIME_NO_LENGTH_REWARD_PROFILE:
+        return _compute_prime_no_length_metrics(
+            prompts,
+            completions,
+            dataset_rows,
+            config,
+            tokenizer,
+        )
+    return _compute_constraint_metrics(
+        prompts,
+        completions,
+        config,
+        tokenizer,
+    )
+
 def _wordlists_override() -> Dict[str, Any]:
     return {
         "task": {
@@ -931,6 +1218,13 @@ _EVAL_OVERRIDES: Dict[str, Any] = {
     }
 }
 _EVAL_OVERRIDES["task"].update(_wordlists_override()["task"])
+
+_PRIME_TURN6_REWARD_OVERRIDES: Dict[str, Any] = {
+    "task": {
+        "reward_profile": _PRIME_NO_LENGTH_REWARD_PROFILE,
+        "rewards": dict(_PRIME_NO_LENGTH_REWARD_CONFIG),
+    }
+}
 
 ENVIRONMENT = EnvironmentDefinition(
     name="wordle",
@@ -1015,6 +1309,21 @@ ENVIRONMENT = EnvironmentDefinition(
                 _turn_window_override(4, 4),
             ),
         ),
+        "wordle_rl_turn6_prime": EnvironmentRunSpec(
+            run_type="rl",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_rl_dataset(config),
+            ),
+            rubric=RubricHooks(
+                reward_funcs=get_reward_funcs,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _RL_OVERRIDES,
+                _PRIME_TURN6_REWARD_OVERRIDES,
+                _turn_window_override(5, 5),
+            ),
+        ),
         "wordle_eval_mixed": EnvironmentRunSpec(
             run_type="eval",
             datasets=DatasetHooks(
@@ -1083,6 +1392,21 @@ ENVIRONMENT = EnvironmentDefinition(
             config_overrides=_merge_overrides(
                 _EVAL_OVERRIDES,
                 _turn_window_override(4, 4, eval_exact_turns=[5]),
+            ),
+        ),
+        "wordle_eval_turn6_prime": EnvironmentRunSpec(
+            run_type="eval",
+            datasets=DatasetHooks(
+                primary=lambda config, _tokenizer: get_eval_dataset(config),
+            ),
+            rubric=RubricHooks(
+                compute_metrics=compute_metrics,
+            ),
+            env=_WORDLE_ENV,
+            config_overrides=_merge_overrides(
+                _EVAL_OVERRIDES,
+                _PRIME_TURN6_REWARD_OVERRIDES,
+                _turn_window_override(5, 5, eval_exact_turns=[6]),
             ),
         ),
     },
