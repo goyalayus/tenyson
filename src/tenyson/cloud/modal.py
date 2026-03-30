@@ -1321,10 +1321,17 @@ class ModalManager(BaseCloudManager):
                         return recovered_result
 
                     if modal_state == "failed":
+                        failure_detail = str(modal_failure_reason or "").strip()
+                        if not failure_detail:
+                            failure_detail = (
+                                "Modal function call "
+                                f"{active_launch.function_call_id} ended without "
+                                "publishing an error message."
+                            )
                         raise RuntimeError(
                             "Detached Modal function call failed before telemetry "
                             "wrote the canonical run result: "
-                            f"{modal_failure_reason}"
+                            f"{failure_detail}"
                         ) from exc
 
                     raise RuntimeError(
