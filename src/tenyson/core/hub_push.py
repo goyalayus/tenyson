@@ -1,14 +1,52 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 from huggingface_hub import create_repo
+from huggingface_hub.errors import HfHubHTTPError
+from requests.exceptions import RequestException
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 
 
-def ensure_hf_repo(repo_id: str) -> None:
+def ensure_hf_repo(
+    repo_id: str,
+    *,
+    max_attempts: int = 5,
+    initial_backoff_seconds: float = 2.0,
+) -> None:
     """Create the target Hub repository if it does not exist."""
-    create_repo(repo_id=repo_id, exist_ok=True)
+    if int(max_attempts) < 1:
+        raise ValueError("max_attempts must be >= 1.")
+
+    last_error: Exception | None = None
+    for attempt in range(1, int(max_attempts) + 1):
+        try:
+            create_repo(repo_id=repo_id, exist_ok=True)
+            return
+        except HfHubHTTPError as exc:
+            if not _is_retryable_hf_http_error(exc) or attempt >= int(max_attempts):
+                raise
+            last_error = exc
+        except RequestException as exc:
+            if attempt >= int(max_attempts):
+                raise
+            last_error = exc
+        time.sleep(_retry_backoff_seconds(attempt, initial_backoff_seconds))
+
+    if last_error is not None:
+        raise last_error
+
+
+def _is_retryable_hf_http_error(exc: HfHubHTTPError) -> bool:
+    response = getattr(exc, "response", None)
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    return status_code in {408, 429} or status_code >= 500
+
+
+def _retry_backoff_seconds(attempt: int, initial_backoff_seconds: float) -> float:
+    base_delay = max(0.1, float(initial_backoff_seconds))
+    return base_delay * (2 ** max(0, int(attempt) - 1))
 
 
 class PeriodicHubPushCallback(TrainerCallback):
