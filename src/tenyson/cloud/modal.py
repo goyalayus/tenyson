@@ -94,6 +94,8 @@ _MODAL_CLOSE_GRACE_SECONDS = 90.0
 _MODAL_APP_STOP_TIMEOUT_SECONDS = 30.0
 _MODAL_TELEMETRY_START_TIMEOUT_SECONDS = 180.0
 _MODAL_RUN_RESULT_TIMEOUT_BUFFER_SECONDS = 300.0
+_MODAL_RUN_RESULT_POLL_CHUNK_SECONDS = 15.0
+_MODAL_FUNCTION_CALL_PROBE_SECONDS = 1.0
 _IGNORABLE_TRACKED_GIT_PATH_PREFIXES = (
     ".tenyson_runs/",
 )
@@ -362,6 +364,22 @@ def _wait_for_modal_function_call(
             return
         except TimeoutError:
             continue
+
+
+def _probe_modal_function_call(
+    function_call_id: str,
+) -> tuple[str, str | None]:
+    try:
+        _wait_for_modal_function_call(
+            function_call_id,
+            poll_timeout_seconds=_MODAL_FUNCTION_CALL_PROBE_SECONDS,
+            overall_timeout_seconds=_MODAL_FUNCTION_CALL_PROBE_SECONDS,
+        )
+    except TimeoutError:
+        return "running", None
+    except Exception as exc:  # noqa: BLE001
+        return "failed", str(exc)
+    return "success", None
 
 
 def _wait_for_run_start_or_terminal_result(
@@ -769,6 +787,27 @@ class ModalManager(BaseCloudManager):
         with self._active_launch_lock:
             return list(self._active_launches.values())
 
+    def _find_active_launch_for_run(
+        self,
+        *,
+        experiment_id: str,
+        phase: str,
+        run_name: str,
+        attempt_token: str | None,
+    ) -> ActiveModalLaunch | None:
+        with self._active_launch_lock:
+            for launch in self._active_launches.values():
+                if launch.experiment_id != experiment_id:
+                    continue
+                if launch.phase != phase:
+                    continue
+                if launch.run_name != run_name:
+                    continue
+                if launch.attempt_token != attempt_token:
+                    continue
+                return launch
+        return None
+
     def _forget_active_launch_for_run(
         self,
         *,
@@ -1129,17 +1168,15 @@ class ModalManager(BaseCloudManager):
             return any(marker in lowered for marker in crash_markers)
 
         def _has_active_launch_for_run() -> bool:
-            for launch in self._snapshot_active_launches():
-                if launch.experiment_id != experiment_id:
-                    continue
-                if launch.phase != job_type:
-                    continue
-                if launch.run_name != run_name:
-                    continue
-                if launch.attempt_token != attempt_token:
-                    continue
-                return True
-            return False
+            return (
+                self._find_active_launch_for_run(
+                    experiment_id=experiment_id,
+                    phase=job_type,
+                    run_name=run_name,
+                    attempt_token=attempt_token,
+                )
+                is not None
+            )
 
         def _recover_terminal_result_after_launcher_failure() -> JobResult | None:
             try:
@@ -1161,6 +1198,42 @@ class ModalManager(BaseCloudManager):
                 return JobResult.from_dict(job_result_payload)
             except Exception:  # noqa: BLE001
                 return None
+
+        def _record_failed_result(failure_reason: str) -> JobResult:
+            hf_repo_id, hf_revision = _resolve_failed_resume_target()
+            result = JobResult(
+                run_id=run_name,
+                status="failed",
+                total_time_seconds=0.0,
+                hf_repo_id=hf_repo_id,
+                hf_revision=hf_revision,
+                failure_reason=failure_reason,
+                instance_id=None,
+                spot_interruption=None,
+                attempt_token=attempt_token,
+            )
+            record_run_summary(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                phase=job_type,
+                result=result,
+            )
+            record_run_result(
+                client=telemetry_client,
+                experiment_id=experiment_id,
+                run_id=run_name,
+                phase=job_type,
+                results_payload=result,
+                job_result_payload=result,
+            )
+            _finish_local_failed_run_record(
+                experiment_id=experiment_id,
+                phase=job_type,
+                run_name=run_name,
+                attempt_token=attempt_token,
+            )
+            _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
+            return result
 
         def _recover_started_run_after_launcher_failure() -> tuple[JobResult | None, bool]:
             try:
@@ -1185,6 +1258,79 @@ class ModalManager(BaseCloudManager):
                 return JobResult.from_dict(job_result_payload), False
             except Exception:  # noqa: BLE001
                 return None, False
+
+        def _wait_for_terminal_result_with_modal_fallback() -> JobResult:
+            active_launch = self._find_active_launch_for_run(
+                experiment_id=experiment_id,
+                phase=job_type,
+                run_name=run_name,
+                attempt_token=attempt_token,
+            )
+            if active_launch is None:
+                _results_payload, job_result_payload = wait_for_run_result(
+                    client=telemetry_client,
+                    experiment_id=experiment_id,
+                    run_id=run_name,
+                    phase=job_type,
+                    timeout_seconds=run_result_timeout_seconds,
+                    poll_interval_seconds=2.0,
+                    attempt_token=attempt_token,
+                    min_attempt_updated_at=launch_started_at,
+                    include_results_payload=False,
+                )
+                del _results_payload
+                return JobResult.from_dict(job_result_payload)
+
+            deadline = time.monotonic() + max(1.0, float(run_result_timeout_seconds))
+            while True:
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0.0:
+                    raise TimeoutError(
+                        "Timed out waiting for detached Modal job telemetry "
+                        f"(experiment_id={experiment_id}, run_id={run_name}, "
+                        f"phase={job_type})."
+                    )
+
+                poll_chunk_seconds = min(
+                    _MODAL_RUN_RESULT_POLL_CHUNK_SECONDS,
+                    max(1.0, remaining_seconds),
+                )
+                try:
+                    _results_payload, job_result_payload = wait_for_run_result(
+                        client=telemetry_client,
+                        experiment_id=experiment_id,
+                        run_id=run_name,
+                        phase=job_type,
+                        timeout_seconds=max(1, int(poll_chunk_seconds)),
+                        poll_interval_seconds=2.0,
+                        attempt_token=attempt_token,
+                        min_attempt_updated_at=launch_started_at,
+                        include_results_payload=False,
+                    )
+                    del _results_payload
+                    return JobResult.from_dict(job_result_payload)
+                except TimeoutError as exc:
+                    modal_state, modal_failure_reason = _probe_modal_function_call(
+                        active_launch.function_call_id
+                    )
+                    if modal_state == "running":
+                        continue
+
+                    recovered_result = _recover_terminal_result_after_launcher_failure()
+                    if recovered_result is not None:
+                        return recovered_result
+
+                    if modal_state == "failed":
+                        raise RuntimeError(
+                            "Detached Modal function call failed before telemetry "
+                            "wrote the canonical run result: "
+                            f"{modal_failure_reason}"
+                        ) from exc
+
+                    raise RuntimeError(
+                        "Detached Modal function call completed, but canonical "
+                        "run result was not available in telemetry DB."
+                    ) from exc
 
         def _wait_for_launch_telemetry_signal() -> JobResult | None:
             try:
@@ -1270,40 +1416,7 @@ class ModalManager(BaseCloudManager):
                             )
 
                 if not launch_handed_off_to_telemetry:
-                    hf_repo_id, hf_revision = _resolve_failed_resume_target()
-                    result = JobResult(
-                        run_id=run_name,
-                        status="failed",
-                        total_time_seconds=0.0,
-                        hf_repo_id=hf_repo_id,
-                        hf_revision=hf_revision,
-                        failure_reason=str(exc),
-                        instance_id=None,
-                        spot_interruption=None,
-                        attempt_token=attempt_token,
-                    )
-                    record_run_summary(
-                        client=telemetry_client,
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                        result=result,
-                    )
-                    record_run_result(
-                        client=telemetry_client,
-                        experiment_id=experiment_id,
-                        run_id=run_name,
-                        phase=job_type,
-                        results_payload=result,
-                        job_result_payload=result,
-                    )
-                    _finish_local_failed_run_record(
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                        run_name=run_name,
-                        attempt_token=attempt_token,
-                    )
-                    _red_print(f"[TENYSON] Step failed (Modal): {exc}")
-                    return result
+                    return _record_failed_result(str(exc))
 
             if not launch_handed_off_to_telemetry:
                 launch_terminal_result = _wait_for_launch_telemetry_signal()
@@ -1383,98 +1496,28 @@ class ModalManager(BaseCloudManager):
                         "Detached Modal job never published a live telemetry heartbeat "
                         "or terminal result after launch."
                     )
-                    hf_repo_id, hf_revision = _resolve_failed_resume_target()
-                    result = JobResult(
-                        run_id=run_name,
-                        status="failed",
-                        total_time_seconds=0.0,
-                        hf_repo_id=hf_repo_id,
-                        hf_revision=hf_revision,
-                        failure_reason=failure_reason,
-                        instance_id=None,
-                        spot_interruption=None,
-                        attempt_token=attempt_token,
-                    )
-                    record_run_summary(
-                        client=telemetry_client,
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                        result=result,
-                    )
-                    record_run_result(
-                        client=telemetry_client,
-                        experiment_id=experiment_id,
-                        run_id=run_name,
-                        phase=job_type,
-                        results_payload=result,
-                        job_result_payload=result,
-                    )
-                    _finish_local_failed_run_record(
-                        experiment_id=experiment_id,
-                        phase=job_type,
-                        run_name=run_name,
-                        attempt_token=attempt_token,
-                    )
-                    _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
-                    return result
+                    return _record_failed_result(failure_reason)
 
             try:
-                _results_payload, job_result_payload = wait_for_run_result(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    run_id=run_name,
-                    phase=job_type,
-                    timeout_seconds=run_result_timeout_seconds,
-                    poll_interval_seconds=2.0,
-                    attempt_token=attempt_token,
-                    min_attempt_updated_at=launch_started_at,
-                    include_results_payload=False,
-                )
+                terminal_result = _wait_for_terminal_result_with_modal_fallback()
                 self._forget_active_launch_for_run(
                     experiment_id=experiment_id,
                     phase=job_type,
                     run_name=run_name,
                     attempt_token=attempt_token,
                 )
-                return JobResult.from_dict(job_result_payload)
+                return terminal_result
             except Exception as exc:  # noqa: BLE001
-                failure_reason = (
-                    "Modal job completed but canonical run result was not available in "
-                    f"telemetry DB: {exc}"
-                )
-                hf_repo_id, hf_revision = _resolve_failed_resume_target()
-                result = JobResult(
-                    run_id=run_name,
-                    status="failed",
-                    total_time_seconds=0.0,
-                    hf_repo_id=hf_repo_id,
-                    hf_revision=hf_revision,
-                    failure_reason=failure_reason,
-                    instance_id=None,
-                    spot_interruption=None,
-                    attempt_token=attempt_token,
-                )
-                record_run_summary(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    phase=job_type,
-                    result=result,
-                )
-                record_run_result(
-                    client=telemetry_client,
-                    experiment_id=experiment_id,
-                    run_id=run_name,
-                    phase=job_type,
-                    results_payload=result,
-                    job_result_payload=result,
-                )
-                _finish_local_failed_run_record(
+                self._forget_active_launch_for_run(
                     experiment_id=experiment_id,
                     phase=job_type,
                     run_name=run_name,
                     attempt_token=attempt_token,
                 )
-                _red_print(f"[TENYSON] Step failed (Modal): {failure_reason}")
-                return result
+                failure_reason = (
+                    "Modal job completed but canonical run result was not available in "
+                    f"telemetry DB: {exc}"
+                )
+                return _record_failed_result(failure_reason)
         finally:
             pass

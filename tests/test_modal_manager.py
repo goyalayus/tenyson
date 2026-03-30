@@ -1067,7 +1067,10 @@ class ModalManagerRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "success")
         self.assertEqual(result.run_id, "eval_baseline_mixed")
-        self.assertEqual(wait_mock.call_args.kwargs["timeout_seconds"], 86700)
+        self.assertEqual(
+            wait_mock.call_args.kwargs["timeout_seconds"],
+            15,
+        )
         self.assertIsNotNone(wait_mock.call_args.kwargs["min_attempt_updated_at"])
         self.assertEqual(
             wait_mock.call_args.kwargs["include_results_payload"],
@@ -1345,7 +1348,7 @@ class ModalManagerRunTests(unittest.TestCase):
         self.assertIsNotNone(
             wait_mock.call_args_list[0].kwargs["min_attempt_updated_at"]
         )
-        self.assertEqual(wait_mock.call_args_list[1].kwargs["timeout_seconds"], 360)
+        self.assertEqual(wait_mock.call_args_list[1].kwargs["timeout_seconds"], 15)
         self.assertEqual(wait_mock.call_args_list[1].kwargs["attempt_token"], "attempt-123")
         self.assertIsNotNone(
             wait_mock.call_args_list[1].kwargs["min_attempt_updated_at"]
@@ -1411,6 +1414,107 @@ class ModalManagerRunTests(unittest.TestCase):
             run_name="eval_baseline_mixed",
             attempt_token="attempt-123",
         )
+
+    def test_run_records_failure_when_detached_modal_call_crashes_after_handoff(self) -> None:
+        manager = ModalManager(timeout=60)
+        manager._remember_active_launch(
+            ActiveModalLaunch(
+                app_id="ap-live",
+                function_call_id="fc-live",
+                backend_ref="wandb://ayush/wordle",
+                experiment_id="wordle_exp",
+                phase="eval",
+                run_name="eval_baseline_mixed",
+                attempt_token="attempt-123",
+                launched_at=datetime.now(timezone.utc),
+            )
+        )
+        job = EvalJob(
+            {
+                "telemetry": {
+                    "entity": "ayush",
+                    "project": "wordle",
+                    "experiment_id": "wordle_exp",
+                    "attempt_token": "attempt-123",
+                },
+                "evaluation": {
+                    "run_name": "eval_baseline_mixed",
+                },
+            },
+            task=SimpleNamespace(),
+        )
+
+        with patch.object(
+            manager,
+            "_resolve_local_project_root",
+            return_value="/repo",
+        ), patch.object(
+            manager,
+            "_resolve_task_spec",
+            return_value="examples/wordle/functional.py",
+        ), patch.object(
+            manager,
+            "_run_modal_job_via_launcher",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.TelemetryClient",
+            return_value=object(),
+        ), patch(
+            "tenyson.cloud.modal._wait_for_run_start_or_terminal_result",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.list_live_run_heartbeats",
+            return_value=[
+                SimpleNamespace(
+                    run_id="eval_baseline_mixed",
+                    phase="eval",
+                    attempt_token="attempt-123",
+                    updated_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                    created_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                )
+            ],
+        ), patch(
+            "tenyson.core.telemetry.get_run_result",
+            return_value=None,
+        ), patch(
+            "tenyson.core.telemetry.wait_for_run_result",
+            side_effect=[
+                TimeoutError("terminal result not written yet"),
+                TimeoutError("terminal result still missing"),
+            ],
+        ) as wait_mock, patch(
+            "tenyson.cloud.modal._probe_modal_function_call",
+            return_value=("failed", "worker crashed"),
+        ) as probe_mock, patch(
+            "tenyson.core.telemetry.record_run_summary"
+        ) as record_summary_mock, patch(
+            "tenyson.core.telemetry.record_run_result"
+        ) as record_result_mock, patch(
+            "tenyson.cloud.modal._finish_local_failed_run_record"
+        ) as finish_run_mock:
+            result = manager.run(job)
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("worker crashed", str(result.failure_reason))
+        self.assertEqual(wait_mock.call_count, 2)
+        self.assertEqual(
+            wait_mock.call_args_list[0].kwargs["timeout_seconds"],
+            15,
+        )
+        self.assertEqual(
+            wait_mock.call_args_list[1].kwargs["timeout_seconds"],
+            20,
+        )
+        probe_mock.assert_called_once_with("fc-live")
+        self.assertEqual(record_summary_mock.call_count, 1)
+        self.assertEqual(record_result_mock.call_count, 1)
+        finish_run_mock.assert_called_once_with(
+            experiment_id="wordle_exp",
+            phase="eval",
+            run_name="eval_baseline_mixed",
+            attempt_token="attempt-123",
+        )
+        self.assertEqual(manager._snapshot_active_launches(), [])
 
 
 if __name__ == "__main__":
