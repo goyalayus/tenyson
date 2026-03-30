@@ -5,21 +5,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from datasets import Dataset
+
 import tenyson.reporting.fixed as fixed_module
 from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
 from tenyson.jobs.result import JobResult
-from tenyson.loader import load_task
+from tenyson.loader import load_module_from_path, load_task
 from tenyson.reporting.fixed import ExperimentReport
 
 
 class EnvironmentContractTests(unittest.TestCase):
-    def test_wordle_named_runs_drive_stage_config(self) -> None:
+    def test_wordle_template_helpers_drive_stage_behavior(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        task = load_task(str(repo_root / "examples" / "wordle" / "functional.py"))
+        functional_path = repo_root / "examples" / "wordle" / "functional.py"
+        task = load_task(str(functional_path))
+        module = load_module_from_path(str(functional_path))
         self.assertEqual(task.get_environment_name(), "wordle")
-        self.assertIn("wordle_rl_turn4", task.list_named_runs("rl"))
-        self.assertIn("wordle_eval_turn5", task.list_named_runs("eval"))
-        self.assertEqual(task.get_named_run_type("wordle_rl_turn4"), "rl")
+        self.assertEqual(list(task.list_named_runs("rl")), [])
+        self.assertEqual(list(task.list_named_runs("eval")), [])
 
         session = ExperimentSession(
             task=task,
@@ -37,40 +40,77 @@ class EnvironmentContractTests(unittest.TestCase):
         rl_stage = session.rl(
             "curr_rl_t4",
             adapter=AdapterRef(repo_id="org/base", revision="main"),
-            run="wordle_rl_turn4",
             run_name="wordle_curriculum_rl_t4",
+            dataset=module.rl_turn_dataset(4),
+            reward=module.constraint_reward(),
+            overrides=module.merge_config_overrides(
+                module.rl_defaults(),
+                {
+                    "task": {
+                        "synthetic_samples": 1,
+                    },
+                    "training": {
+                        "seed": 123,
+                    },
+                },
+            ),
         )
         eval_stage = session.eval(
-            "curr_eval_after_t5_turn5",
+            "curr_eval_after_t6_turn6",
             adapter=AdapterRef(repo_id="org/base", revision="main"),
-            run="wordle_eval_turn5",
-            run_name="wordle_curr_eval_after_t5_turn5",
+            run_name="wordle_curr_eval_after_t6_turn6",
+            dataset=module.eval_turn_dataset(6),
+            metrics=module.constraint_metrics(),
+            overrides=module.merge_config_overrides(
+                module.eval_defaults(),
+                {
+                    "task": {
+                        "eval_samples": 1,
+                        "eval_seed": 42,
+                    }
+                },
+            ),
         )
 
         self.assertEqual(rl_stage.run_type, "rl")
-        self.assertEqual(rl_stage.environment_run, "wordle_rl_turn4")
-        self.assertEqual(rl_stage.config["task"]["min_history_turns"], 3)
-        self.assertEqual(rl_stage.config["task"]["max_history_turns"], 3)
+        self.assertIsNone(rl_stage.environment_run)
         self.assertEqual(rl_stage.config["model"]["init_adapter_repo"], "org/base")
-        self.assertEqual(
-            rl_stage.config["_tenyson"]["environment_run"],
-            "wordle_rl_turn4",
-        )
         self.assertEqual(
             rl_stage.config["training"]["output_dir"],
             "./outputs/wordle_curriculum_rl_t4",
         )
-        self.assertIn("words_alpha.txt", rl_stage.config["task"]["wordlists"]["url"])
+        self.assertNotIn("wordlists", rl_stage.config["task"])
+        rl_dataset = rl_stage.task.get_rl_dataset(rl_stage.config)
+        self.assertEqual(len(rl_dataset), 1)
+        self.assertEqual(rl_dataset[0]["history_len"], 3)
+        self.assertIn("This is turn 4 of the game.", rl_dataset[0]["prompt"])
 
         self.assertEqual(eval_stage.run_type, "eval")
-        self.assertEqual(eval_stage.environment_run, "wordle_eval_turn5")
-        self.assertEqual(eval_stage.config["task"]["eval_exact_turns"], [5])
-        self.assertEqual(eval_stage.config["task"]["min_history_turns"], 4)
-        self.assertEqual(eval_stage.config["task"]["max_history_turns"], 4)
+        self.assertIsNone(eval_stage.environment_run)
         self.assertEqual(
             eval_stage.config["evaluation"]["output_dir"],
-            "./outputs/wordle_curr_eval_after_t5_turn5",
+            "./outputs/wordle_curr_eval_after_t6_turn6",
         )
+        eval_dataset = eval_stage.task.get_eval_dataset(eval_stage.config)
+        self.assertEqual(len(eval_dataset), 1)
+        self.assertEqual(eval_dataset[0]["history_len"], 5)
+        self.assertIn("This is turn 6 of the game.", eval_dataset[0]["prompt"])
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                del add_special_tokens
+                return list(text)
+
+        row = dict(eval_dataset[0])
+        metrics_payload = eval_stage.task.compute_metrics(
+            prompts=[row["prompt"]],
+            completions=[f"<think>ok</think><guess>[{row['secret']}]</guess>"],
+            dataset_rows=Dataset.from_list([row]),
+            config=eval_stage.config,
+            tokenizer=FakeTokenizer(),
+        )
+        self.assertEqual(metrics_payload["metrics"]["total_samples"], 1)
+        self.assertEqual(metrics_payload["metrics"]["format_accuracy"], 1.0)
 
 
 class ExperimentReportTests(unittest.TestCase):

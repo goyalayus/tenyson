@@ -158,6 +158,28 @@ def make_run(
     )
 
 
+class WordleEvalDetectionTests(unittest.TestCase):
+    def test_wordle_eval_detection_does_not_require_wordlists_in_config(self) -> None:
+        self.assertTrue(
+            ui_server._is_wordle_like_eval(
+                {"task": {}},
+                {
+                    "detailed_results": [
+                        {
+                            "prompt": (
+                                "You are playing Wordle.\n"
+                                "This is turn 6 of the game.\n"
+                                "Prior turns and feedback:\n"
+                                "Turn 1: [crane] -> X X X X X"
+                            ),
+                            "completion": "<guess>[slate]</guess>",
+                        }
+                    ]
+                },
+            )
+        )
+
+
 class DashboardDataServiceTests(unittest.TestCase):
     def test_list_experiments_groups_runs_by_experiment_and_activity(self) -> None:
         now = datetime.now(timezone.utc)
@@ -454,7 +476,7 @@ class DashboardDataServiceTests(unittest.TestCase):
                 {"_step": 1, "train/reward": 0.12, "train/global_step": 8},
                 {"_step": 2, "train/reward": 0.18, "train/global_step": 24},
             ],
-            config={"task": {"wordlists": {"solutions": "a.txt", "allowed": "b.txt"}}},
+            config={"task": {}},
         )
 
         fake_wandb = build_fake_wandb_module([rl_run])

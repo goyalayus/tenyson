@@ -12,6 +12,7 @@ from datasets import Dataset
 import torch
 
 import tenyson.core.telemetry as telemetry_module
+from tenyson.core.chat_sft import load_hub_chat_sft_train_eval_split
 from tenyson.core.telemetry import RLRolloutTracker
 import tenyson.jobs.eval as eval_module
 import tenyson.jobs.rl as rl_module
@@ -47,6 +48,25 @@ def _load_wordle_task_module():
     return module
 
 
+def _write_temp_word_source(tmpdir: str) -> str:
+    words = [
+        "apple",
+        "zebra",
+        "crane",
+        "slate",
+        "stare",
+        "adieu",
+        "cigar",
+        "ratio",
+        "stone",
+        "tears",
+    ]
+    source_path = Path(tmpdir) / "words.txt"
+    payload = "\n".join(words) + "\n"
+    source_path.write_text(payload, encoding="utf-8")
+    return str(source_path)
+
+
 class WordleParserTests(unittest.TestCase):
     def test_parse_history_accepts_unicode_arrow(self) -> None:
         wordle_task = _load_wordle_task_module()
@@ -68,22 +88,32 @@ class WordleParserTests(unittest.TestCase):
 
         self.assertEqual(compact, spaced)
 
-    def test_wordlists_relative_paths_resolve_from_task_file(self) -> None:
+    def test_get_wordlists_defaults_to_remote_source_when_unset(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        with patch.object(
+            wordle_task,
+            "_load_word_source",
+            return_value=["apple", "zebra"],
+        ) as load_word_source:
+            solutions, allowed = wordle_task.get_wordlists({"task": {}})
+
+        load_word_source.assert_called_once_with(wordle_task._DEFAULT_WORD_SOURCE_URL)
+        self.assertEqual(solutions, ["apple", "zebra"])
+        self.assertEqual(allowed, ["apple", "zebra"])
+
+    def test_get_wordlists_rejects_task_wordlists_config(self) -> None:
         wordle_task = _load_wordle_task_module()
 
-        solutions, allowed = wordle_task.get_wordlists(
-            {
-                "task": {
-                    "wordlists": {
-                        "solutions": "wordlists/wordle_solutions.txt",
-                        "allowed": "wordlists/wordle_allowed_guesses.txt",
+        with self.assertRaisesRegex(ValueError, "task.wordlists is no longer supported"):
+            wordle_task.get_wordlists(
+                {
+                    "task": {
+                        "wordlists": {
+                            "url": "file:///tmp/words.txt",
+                        }
                     }
                 }
-            }
-        )
-
-        self.assertGreater(len(solutions), 0)
-        self.assertGreater(len(allowed), 0)
+            )
 
     def test_single_word_source_url_filters_and_reuses_five_letter_words(self) -> None:
         wordle_task = _load_wordle_task_module()
@@ -100,19 +130,50 @@ class WordleParserTests(unittest.TestCase):
             )
 
             solutions, allowed = wordle_task.get_wordlists(
-                {
-                    "task": {
-                        "wordlists": {
-                            "url": source_path.as_uri(),
-                        }
-                    }
-                }
+                {"task": {}},
+                word_source=source_path.as_uri(),
             )
 
         self.assertEqual(solutions, ["apple", "zebra"])
         self.assertEqual(allowed, ["apple", "zebra"])
 
-    def test_sft_dataset_limit_trims_train_split_for_smoke_runs(self) -> None:
+    def test_eval_turn_dataset_accepts_direct_word_source_argument(self) -> None:
+        wordle_task = _load_wordle_task_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = Path(_write_temp_word_source(tmpdir))
+
+            dataset = wordle_task.eval_turn_dataset(
+                6,
+                word_source=source_path.as_uri(),
+            ).build(
+                {
+                    "task": {
+                        "eval_samples": 2,
+                        "eval_seed": 42,
+                    }
+                }
+            )
+
+        self.assertEqual(len(dataset), 2)
+        for row in dataset:
+            self.assertEqual(row["history_len"], 5)
+            self.assertIn(
+                row["secret"],
+                {
+                    "apple",
+                    "zebra",
+                    "crane",
+                    "slate",
+                    "stare",
+                    "adieu",
+                    "cigar",
+                    "ratio",
+                    "stone",
+                    "tears",
+                },
+            )
+
+    def test_sft_dataset_limit_trims_train_split(self) -> None:
         wordle_task = _load_wordle_task_module()
         dataset = Dataset.from_dict(
             {
@@ -124,7 +185,7 @@ class WordleParserTests(unittest.TestCase):
         )
 
         with patch("tenyson.core.chat_sft.load_dataset", return_value=dataset):
-            train_ds, eval_ds = wordle_task._load_sft_train_eval_split(
+            train_ds, eval_ds = load_hub_chat_sft_train_eval_split(
                 {
                     "task": {
                         "sft_train_samples": 5,
@@ -133,7 +194,8 @@ class WordleParserTests(unittest.TestCase):
                         "val_size": 2,
                         "seed": 123,
                     },
-                }
+                },
+                default_dataset=wordle_task._DEFAULT_SFT_DATASET,
             )
 
         self.assertEqual(len(train_ds), 5)
@@ -143,21 +205,19 @@ class WordleParserTests(unittest.TestCase):
 
     def test_fixed_turn_eval_named_run_matches_prompt_turn_number(self) -> None:
         wordle_task = _load_wordle_task_module()
-        config = {
-            "task": {
-                "eval_samples": 1,
-                "eval_seed": 42,
-                "wordlists": {
-                    "solutions": "wordlists/wordle_solutions.txt",
-                    "allowed": "wordlists/wordle_allowed_guesses.txt",
-                },
-                "min_history_turns": 1,
-                "max_history_turns": 1,
-                "eval_exact_turns": [2],
+        with tempfile.TemporaryDirectory() as tmpdir:
+            word_source = Path(_write_temp_word_source(tmpdir)).as_uri()
+            config = {
+                "task": {
+                    "eval_samples": 1,
+                    "eval_seed": 42,
+                    "min_history_turns": 1,
+                    "max_history_turns": 1,
+                    "eval_exact_turns": [2],
+                }
             }
-        }
 
-        dataset = wordle_task.get_eval_dataset(config)
+            dataset = wordle_task.get_eval_dataset(config, word_source=word_source)
         row = dataset[0]
         prompt = row["prompt"]
 
@@ -166,21 +226,22 @@ class WordleParserTests(unittest.TestCase):
 
     def test_generated_secret_satisfies_constraints_from_raw_history_rows(self) -> None:
         wordle_task = _load_wordle_task_module()
-        config = {
-            "task": {
-                "wordlists": {
-                    "solutions": "wordlists/wordle_solutions.txt",
-                    "allowed": "wordlists/wordle_allowed_guesses.txt",
+        with tempfile.TemporaryDirectory() as tmpdir:
+            word_source = Path(_write_temp_word_source(tmpdir)).as_uri()
+            config = {
+                "task": {
+                    "min_history_turns": 1,
+                    "max_history_turns": 5,
                 },
-                "min_history_turns": 1,
-                "max_history_turns": 5,
-            },
-            "training": {"seed": 123},
-        }
+                "training": {"seed": 123},
+            }
 
-        dataset = wordle_task.generate_synthetic_wordle_dataset(
-            config, seed=123, n_samples=25
-        )
+            dataset = wordle_task.generate_synthetic_wordle_dataset(
+                config,
+                seed=123,
+                n_samples=25,
+                word_source=word_source,
+            )
 
         for row in dataset:
             ac = wordle_task.aggregate_constraints(row["history_rows"])
@@ -189,22 +250,23 @@ class WordleParserTests(unittest.TestCase):
 
     def test_invalid_word_gets_no_constraint_reward(self) -> None:
         wordle_task = _load_wordle_task_module()
-        config = {
-            "task": {
-                "wordlists": {
-                    "solutions": "wordlists/wordle_solutions.txt",
-                    "allowed": "wordlists/wordle_allowed_guesses.txt",
-                },
-                "rewards": {
-                    "format": 0.2,
-                    "dict": 0.2,
-                    "repeat_penalty": -0.5,
-                    "constraint": 0.1,
-                    "overlength_penalty": -0.5,
-                },
+        with tempfile.TemporaryDirectory() as tmpdir:
+            word_source = Path(_write_temp_word_source(tmpdir)).as_uri()
+            config = {
+                "task": {
+                    "rewards": {
+                        "format": 0.2,
+                        "dict": 0.2,
+                        "repeat_penalty": -0.5,
+                        "constraint": 0.1,
+                        "overlength_penalty": -0.5,
+                    },
+                }
             }
-        }
-        solutions, allowed = wordle_task.get_wordlists(config)
+            solutions, allowed = wordle_task.get_wordlists(
+                config,
+                word_source=word_source,
+            )
         valid_set = set(solutions) | set(allowed)
         self.assertNotIn("irkls", valid_set)
 
@@ -278,10 +340,8 @@ class WordleParserTests(unittest.TestCase):
                 return list(text)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            solutions_path = Path(tmpdir) / "solutions.txt"
-            allowed_path = Path(tmpdir) / "allowed.txt"
-            solutions_path.write_text("fghij\nabcde\n", encoding="utf-8")
-            allowed_path.write_text("fghij\nabcde\n", encoding="utf-8")
+            source_path = Path(tmpdir) / "words.txt"
+            source_path.write_text("fghij\nabcde\n", encoding="utf-8")
 
             metrics_payload = wordle_task.compute_metrics(
                 prompts=prompts,
@@ -294,10 +354,6 @@ class WordleParserTests(unittest.TestCase):
                 ),
                 config={
                     "task": {
-                        "wordlists": {
-                            "solutions": str(solutions_path),
-                            "allowed": str(allowed_path),
-                        },
                         "rewards": {
                             "constraint": 0.5,
                             "constraint_perfect_bonus": 0.2,
@@ -305,6 +361,7 @@ class WordleParserTests(unittest.TestCase):
                     }
                 },
                 tokenizer=FakeTokenizer(),
+                word_source=source_path.as_uri(),
             )
 
         metrics = metrics_payload["metrics"]
@@ -356,7 +413,7 @@ class EvalStopTests(unittest.TestCase):
         task = FakeTask()
         job = EvalJob(
             config={
-                "evaluation": {"run_name": "eval_smoke", "batch_size": 1},
+                "evaluation": {"run_name": "eval_test", "batch_size": 1},
                 "telemetry": {
                     "backend": "wandb",
                     "entity": "demo",
@@ -434,7 +491,7 @@ class EvalStopTests(unittest.TestCase):
         run_stop_requested_mock.assert_called_with(
             fake_client,
             experiment_id="wordle_exp",
-            run_id="eval_smoke",
+            run_id="eval_test",
             phase="eval",
             attempt_token="attempt-eval",
         )
@@ -452,8 +509,8 @@ class RLJobTelemetryStartupTests(unittest.TestCase):
         job = RLJob(
             config={
                 "training": {
-                    "run_name": "rl_smoke",
-                    "hf_repo_base": "goyalayus/rl-smoke",
+                    "run_name": "rl_test",
+                    "hf_repo_base": "goyalayus/rl-test",
                 },
                 "telemetry": {
                     "backend": "wandb",
@@ -523,7 +580,7 @@ class EvalJobFailureTelemetryTests(unittest.TestCase):
     def test_eval_run_records_failed_result_when_startup_raises(self) -> None:
         job = EvalJob(
             config={
-                "evaluation": {"run_name": "eval_smoke", "batch_size": 1},
+                "evaluation": {"run_name": "eval_test", "batch_size": 1},
                 "telemetry": {
                     "backend": "wandb",
                     "entity": "demo",
@@ -536,7 +593,7 @@ class EvalJobFailureTelemetryTests(unittest.TestCase):
         )
 
         fake_client = SimpleNamespace(db_url="wandb://demo/tenyson")
-        fake_wandb_run = SimpleNamespace(url="https://wandb.example/runs/eval_smoke")
+        fake_wandb_run = SimpleNamespace(url="https://wandb.example/runs/eval_test")
         fake_wandb = SimpleNamespace(finish=lambda: None)
 
         with patch.object(eval_module, "require_gpu_provider_runtime"), patch.object(
@@ -573,7 +630,7 @@ class EvalJobFailureTelemetryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertIn("adapter download 504", result.failure_reason or "")
-        self.assertEqual(result.wandb_url, "https://wandb.example/runs/eval_smoke")
+        self.assertEqual(result.wandb_url, "https://wandb.example/runs/eval_test")
         recorded_summary_result = record_run_summary_mock.call_args.kwargs["result"]
         recorded_payload = record_run_result_mock.call_args.kwargs["job_result_payload"]
         self.assertEqual(recorded_summary_result.status, "failed")

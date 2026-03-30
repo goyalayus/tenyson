@@ -26,6 +26,13 @@ __all__ = [
     "run_pipeline",
     "run_experiment",
     "shared_overrides_from_env",
+    "hub_chat_sft_dataset",
+    "merge_config_overrides",
+    "SFTDatasetTemplate",
+    "RLDatasetTemplate",
+    "RLRewardTemplate",
+    "EvalDatasetTemplate",
+    "EvalMetricsTemplate",
 ]
 
 _EXPORTS = {
@@ -54,6 +61,13 @@ _EXPORTS = {
     "run_pipeline": ("tenyson.pipeline", "run_pipeline"),
     "run_experiment": ("tenyson.core.experiment_runner", "run_experiment"),
     "shared_overrides_from_env": ("tenyson.core.run_config", "shared_overrides_from_env"),
+    "hub_chat_sft_dataset": ("tenyson.core.chat_sft", "hub_chat_sft_dataset"),
+    "merge_config_overrides": ("tenyson.core.environment", "merge_config_overrides"),
+    "SFTDatasetTemplate": ("tenyson.core.stage_templates", "SFTDatasetTemplate"),
+    "RLDatasetTemplate": ("tenyson.core.stage_templates", "RLDatasetTemplate"),
+    "RLRewardTemplate": ("tenyson.core.stage_templates", "RLRewardTemplate"),
+    "EvalDatasetTemplate": ("tenyson.core.stage_templates", "EvalDatasetTemplate"),
+    "EvalMetricsTemplate": ("tenyson.core.stage_templates", "EvalMetricsTemplate"),
 }
 
 if TYPE_CHECKING:
@@ -76,7 +90,16 @@ if TYPE_CHECKING:
     from tenyson.loader import load_config, load_task, load_task_from_spec
     from tenyson.pipeline import run_pipeline
     from tenyson.core.experiment_runner import run_experiment
+    from tenyson.core.chat_sft import hub_chat_sft_dataset
     from tenyson.core.run_config import shared_overrides_from_env
+    from tenyson.core.environment import merge_config_overrides
+    from tenyson.core.stage_templates import (
+        EvalDatasetTemplate,
+        EvalMetricsTemplate,
+        RLRewardTemplate,
+        RLDatasetTemplate,
+        SFTDatasetTemplate,
+    )
     from tenyson.reporting.builder import ReportBuilder
     from tenyson.reporting.fixed import ExperimentReport
 

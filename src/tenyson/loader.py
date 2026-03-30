@@ -60,6 +60,15 @@ def _load_environment_definition_from_module(module: ModuleType) -> EnvironmentD
     return None
 
 
+def _load_task_instance_from_module(module: ModuleType) -> TaskPlugin | None:
+    task = getattr(module, "TASK", None)
+    if task is None:
+        return None
+    if not isinstance(task, TaskPlugin):
+        raise TypeError("TASK must be a TaskPlugin instance.")
+    return task
+
+
 def load_task_from_module(
     module: ModuleType,
     *,
@@ -71,6 +80,12 @@ def load_task_from_module(
         setattr(adapter, "__tenyson_source_path__", getattr(module, "__file__", None))
         setattr(adapter, "__tenyson_source_module__", module.__name__)
         return adapter
+
+    task_instance = _load_task_instance_from_module(module)
+    if task_instance is not None:
+        setattr(task_instance, "__tenyson_source_path__", getattr(module, "__file__", None))
+        setattr(task_instance, "__tenyson_source_module__", module.__name__)
+        return task_instance
 
     candidates = []
     for name in dir(module):

@@ -16,8 +16,6 @@ from tenyson.bootstrap import (
     resolve_project_root,
 )
 from tenyson.core.experiment_runtime import (
-    DEFAULT_REPORT_ENV_VAR,
-    LocalExperimentContext,
     install_sigterm_handler,
 )
 from tenyson.core.run_config import shared_overrides_from_env
@@ -131,87 +129,6 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(current, "from_file")
         self.assertEqual(loaded, {"TENYSON_EXPERIMENT_ID": "from_file"})
 
-    def test_wordle_smoke_identity_uses_isolated_defaults(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        common_path = repo_root / "examples" / "wordle" / "smoke.py"
-        module_globals = runpy.run_path(
-            str(common_path),
-            run_name="__tenyson_wordle_smoke_default_test__",
-        )
-        configure_wordle_smoke_identity = module_globals["configure_wordle_smoke_identity"]
-
-        context = LocalExperimentContext(
-            anchor_file=repo_root / "examples" / "wordle" / "experiment.py",
-            project_root=repo_root,
-            base_dir=repo_root / "examples" / "wordle",
-            env_path=repo_root / ".env",
-            loaded_env={
-                "TENYSON_EXPERIMENT_ID": "from_file",
-                "TENYSON_HF_REPO_BASE": "org/wordle-lora",
-            },
-        )
-
-        with patch.dict(
-            os.environ,
-            {
-                "TENYSON_WORDLE_SMOKE": "true",
-                "TENYSON_EXPERIMENT_ID": "from_file",
-                "TENYSON_HF_REPO_BASE": "org/wordle-lora",
-            },
-            clear=True,
-        ):
-            configure_wordle_smoke_identity(
-                context=context,
-                label="wordle experiment",
-            )
-            experiment_id = os.environ["TENYSON_EXPERIMENT_ID"]
-            hf_repo_base = os.environ["TENYSON_HF_REPO_BASE"]
-            report_path = os.environ[DEFAULT_REPORT_ENV_VAR]
-
-        self.assertTrue(experiment_id.startswith("wordle_smoke_"))
-        self.assertNotEqual(experiment_id, "from_file")
-        self.assertEqual(hf_repo_base, "org/wordle-lora-smoke")
-        self.assertTrue(report_path.endswith(f"smoke_reports/{experiment_id}.md"))
-
-    def test_wordle_smoke_identity_preserves_explicit_shell_targets(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        common_path = repo_root / "examples" / "wordle" / "smoke.py"
-        module_globals = runpy.run_path(
-            str(common_path),
-            run_name="__tenyson_wordle_smoke_shell_test__",
-        )
-        configure_wordle_smoke_identity = module_globals["configure_wordle_smoke_identity"]
-
-        context = LocalExperimentContext(
-            anchor_file=repo_root / "examples" / "wordle" / "experiment.py",
-            project_root=repo_root,
-            base_dir=repo_root / "examples" / "wordle",
-            env_path=repo_root / ".env",
-            loaded_env={},
-        )
-
-        with patch.dict(
-            os.environ,
-            {
-                "TENYSON_WORDLE_SMOKE": "true",
-                "TENYSON_EXPERIMENT_ID": "from_shell",
-                "TENYSON_HF_REPO_BASE": "org/custom-smoke",
-                DEFAULT_REPORT_ENV_VAR: "/tmp/custom-smoke-report.md",
-            },
-            clear=True,
-        ):
-            configure_wordle_smoke_identity(
-                context=context,
-                label="wordle experiment",
-            )
-            experiment_id = os.environ["TENYSON_EXPERIMENT_ID"]
-            hf_repo_base = os.environ["TENYSON_HF_REPO_BASE"]
-            report_path = os.environ[DEFAULT_REPORT_ENV_VAR]
-
-        self.assertEqual(experiment_id, "from_shell")
-        self.assertEqual(hf_repo_base, "org/custom-smoke")
-        self.assertEqual(report_path, "/tmp/custom-smoke-report.md")
-
     def test_install_sigterm_handler_raises_keyboardinterrupt(self) -> None:
         previous_handler = signal.getsignal(signal.SIGTERM)
         try:
@@ -248,24 +165,30 @@ class BootstrapTests(unittest.TestCase):
             Path(str(captured["anchor_file"])).resolve(),
             experiment_path.resolve(),
         )
-        self.assertIn("prepare", captured["kwargs"])
+        self.assertNotIn("prepare", captured["kwargs"])
         self.assertNotIn("recovery_restart_stage_fallback_env_vars", captured["kwargs"])
 
-        top_level_calls: list[tuple[str, str, str]] = []
-        branch_calls: list[tuple[str, str, str]] = []
+        top_level_calls: list[tuple[str, str, tuple[str, ...]]] = []
+        branch_calls: list[tuple[str, str, tuple[str, ...]]] = []
         parallel_calls: list[tuple[str, list[str]]] = []
 
         class FakeBranch:
             def rl(self, stage_id: str, **kwargs):
-                branch_calls.append(("rl", stage_id, kwargs["run"]))
+                branch_calls.append(
+                    ("rl", stage_id, tuple(sorted(kwargs.keys())))
+                )
                 return SimpleNamespace(id=stage_id)
 
             def eval(self, stage_id: str, **kwargs):
-                branch_calls.append(("eval", stage_id, kwargs["run"]))
+                branch_calls.append(
+                    ("eval", stage_id, tuple(sorted(kwargs.keys())))
+                )
                 return SimpleNamespace(id=stage_id)
 
             def eval_stage(self, stage_id: str, **kwargs):
-                branch_calls.append(("eval_stage", stage_id, kwargs["run"]))
+                branch_calls.append(
+                    ("eval_stage", stage_id, tuple(sorted(kwargs.keys())))
+                )
                 return SimpleNamespace(id=stage_id)
 
             def run(self, stage):
@@ -281,14 +204,18 @@ class BootstrapTests(unittest.TestCase):
 
         class FakeExperiment:
             def sft(self, stage_id: str, **kwargs):
-                top_level_calls.append(("sft", stage_id, kwargs["run"]))
+                top_level_calls.append(
+                    ("sft", stage_id, tuple(sorted(kwargs.keys())))
+                )
                 return SimpleNamespace(id=stage_id)
 
             def adapter(self, stage_id: str):
                 return f"adapter:{stage_id}"
 
             def eval(self, stage_id: str, **kwargs):
-                top_level_calls.append(("eval", stage_id, kwargs["run"]))
+                top_level_calls.append(
+                    ("eval", stage_id, tuple(sorted(kwargs.keys())))
+                )
                 return SimpleNamespace(id=stage_id)
 
             def run_branches(self, branches):
@@ -301,12 +228,30 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(
             top_level_calls,
             [
-                ("sft", "sft_main", "sft_main"),
-                ("eval", "eval_baseline_mixed", "eval_mixed"),
+                ("sft", "sft_main", ("dataset", "overrides")),
+                (
+                    "eval",
+                    "eval_baseline_mixed",
+                    ("adapter", "dataset", "metrics", "overrides"),
+                ),
             ],
         )
-        self.assertIn(("rl", "mixed_rl", "rl_mixed"), branch_calls)
-        self.assertIn(("eval", "mixed_final_eval", "eval_mixed"), branch_calls)
+        self.assertIn(
+            (
+                "rl",
+                "mixed_rl",
+                ("adapter", "dataset", "overrides", "reward"),
+            ),
+            branch_calls,
+        )
+        self.assertIn(
+            (
+                "eval",
+                "mixed_final_eval",
+                ("adapter", "dataset", "metrics", "overrides"),
+            ),
+            branch_calls,
+        )
         self.assertIn(("curr_eval_after_t3", ["curr_eval_after_t3_turn2", "curr_eval_after_t3_turn3"]), parallel_calls)
 
 

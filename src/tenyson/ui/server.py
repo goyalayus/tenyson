@@ -148,14 +148,15 @@ class _DashboardTokenizerFallback:
 def _is_wordle_like_eval(
     config_preview: Mapping[str, Any], results_payload: Mapping[str, Any]
 ) -> bool:
-    task_cfg = _coerce_mapping(config_preview.get("task"))
     detailed_results = results_payload.get("detailed_results")
     if not isinstance(detailed_results, list) or not detailed_results:
         return False
     first_row = _coerce_mapping(detailed_results[0])
     if not first_row:
         return False
-    return bool(task_cfg.get("wordlists")) and {
+    prompt_text = str(first_row.get("prompt") or "")
+    has_wordle_prompt = "wordle" in prompt_text.lower()
+    return has_wordle_prompt and {
         "prompt",
         "completion",
     }.issubset(first_row.keys())
@@ -198,16 +199,15 @@ def _maybe_enrich_wordle_eval_results(
     except Exception:
         return payload
 
-    task_cfg = _coerce_mapping(config_preview.get("task"))
     try:
-        solutions, allowed = get_wordlists({"task": task_cfg})
+        solutions, allowed = get_wordlists({})
     except Exception:
         return payload
     valid_set = set(solutions) | set(allowed)
     tokenizer = _DashboardTokenizerFallback()
     reward_max_output_tokens = resolve_reward_max_output_tokens(
         config_preview,
-        task_cfg=task_cfg,
+        task_cfg=_coerce_mapping(config_preview.get("task")),
     )
 
     enriched_rows: List[Dict[str, Any]] = []

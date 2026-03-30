@@ -142,8 +142,7 @@ Important constraints:
 - Curriculum Wordle runs intentionally fix the history window for each stage.
 - The default Wordle environment now pulls a single remote word source from
   `dwyl/english-words` and keeps only 5-letter alphabetic words. That same
-  filtered list is used for both candidate secrets and accepted guesses unless
-  you override `task.wordlists`.
+  filtered list is used for both candidate secrets and accepted guesses.
 - Do not expect the SFT dataset and the RL/eval datasets to have the same row
   schema. They are different on purpose.
 

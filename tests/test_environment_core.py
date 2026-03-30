@@ -7,6 +7,14 @@ from tenyson.core.chat_sft import (
     build_chat_messages_formatting_func,
     load_hub_chat_sft_train_eval_split,
 )
+from tenyson.core.plugin import TaskPlugin
+from tenyson.core.stage_templates import (
+    EvalDatasetTemplate,
+    EvalMetricsTemplate,
+    RLRewardTemplate,
+    RLDatasetTemplate,
+)
+from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
 from tenyson.core.environment import (
     DatasetHooks,
     EnvironmentDefinition,
@@ -181,6 +189,87 @@ class EnvironmentCoreTests(unittest.TestCase):
 
         self.assertEqual(output, ["formatted:user"])
         tokenizer.apply_chat_template.assert_called_once()
+
+    def test_explicit_stage_templates_override_task_behavior_without_default_run_overrides(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_run_config_overrides(self, run_type, *, variant=None):
+                del run_type, variant
+                return {"task": {"source": "default-run-overrides"}}
+
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        rl_stage = session.rl(
+            "explicit_rl",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=RLDatasetTemplate(build=lambda config: _dataset_for("explicit-rl")),
+            reward=RLRewardTemplate(
+                build=lambda config, tokenizer: [
+                    lambda prompts, completions, **kwargs: [1.0 for _ in completions]
+                ]
+            ),
+        )
+        eval_stage = session.eval(
+            "explicit_eval",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=EvalDatasetTemplate(build=lambda config: _dataset_for("explicit-eval")),
+            metrics=EvalMetricsTemplate(
+                compute=lambda prompts, completions, dataset_rows, config, tokenizer: {
+                    "source": "explicit",
+                    "count": len(prompts),
+                }
+            ),
+        )
+
+        self.assertNotIn("source", rl_stage.config.get("task", {}))
+        self.assertEqual(rl_stage.task.get_rl_dataset(rl_stage.config)[0]["value"], "explicit-rl")
+        self.assertEqual(eval_stage.task.get_eval_dataset(eval_stage.config)[0]["value"], "explicit-eval")
+        self.assertEqual(
+            eval_stage.task.compute_metrics(
+                prompts=["a", "b"],
+                completions=["x", "y"],
+                dataset_rows=_dataset_for("explicit-eval"),
+                config=eval_stage.config,
+                tokenizer=None,
+            ),
+            {"source": "explicit", "count": 2},
+        )
 
 
 if __name__ == "__main__":

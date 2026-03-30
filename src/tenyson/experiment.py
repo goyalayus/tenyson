@@ -25,6 +25,15 @@ from tenyson.core.controller_runtime import (
     update_controller_runtime_state,
 )
 from tenyson.core.environment import bind_environment_run
+from tenyson.core.stage_templates import (
+    EvalDatasetTemplate,
+    EvalMetricsTemplate,
+    RLRewardTemplate,
+    RLDatasetTemplate,
+    SFTDatasetTemplate,
+    bind_stage_templates,
+    has_explicit_stage_templates,
+)
 from tenyson.core.control import list_live_runs, prime_stop_target, request_stop
 from tenyson.core.telemetry import (
     TelemetryClient,
@@ -1124,6 +1133,7 @@ class ExperimentSession:
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
+        dataset: Optional[SFTDatasetTemplate] = None,
     ) -> StageSpec:
         return self._build_stage(
             stage_id=stage_id,
@@ -1137,6 +1147,11 @@ class ExperimentSession:
             overrides=overrides,
             adapter=None,
             run_section="training",
+            sft_dataset=dataset,
+            rl_dataset=None,
+            rl_reward=None,
+            eval_dataset=None,
+            eval_metrics=None,
         )
 
     def rl(
@@ -1150,6 +1165,8 @@ class ExperimentSession:
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
+        dataset: Optional[RLDatasetTemplate] = None,
+        reward: Optional[RLRewardTemplate] = None,
     ) -> StageSpec:
         return self._build_stage(
             stage_id=stage_id,
@@ -1163,6 +1180,11 @@ class ExperimentSession:
             overrides=overrides,
             adapter=adapter,
             run_section="training",
+            sft_dataset=None,
+            rl_dataset=dataset,
+            rl_reward=reward,
+            eval_dataset=None,
+            eval_metrics=None,
         )
 
     def eval(
@@ -1176,6 +1198,8 @@ class ExperimentSession:
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
+        dataset: Optional[EvalDatasetTemplate] = None,
+        metrics: Optional[EvalMetricsTemplate] = None,
     ) -> StageSpec:
         return self._build_stage(
             stage_id=stage_id,
@@ -1189,6 +1213,11 @@ class ExperimentSession:
             overrides=overrides,
             adapter=adapter,
             run_section="evaluation",
+            sft_dataset=None,
+            rl_dataset=None,
+            rl_reward=None,
+            eval_dataset=dataset,
+            eval_metrics=metrics,
         )
 
     def run_stage(self, stage: StageSpec, *, cloud: Optional[Any] = None) -> JobResult:
@@ -1368,10 +1397,22 @@ class ExperimentSession:
         overrides: Optional[Mapping[str, Any]],
         adapter: Optional[AdapterRef],
         run_section: str,
+        sft_dataset: Optional[SFTDatasetTemplate],
+        rl_dataset: Optional[RLDatasetTemplate],
+        rl_reward: Optional[RLRewardTemplate],
+        eval_dataset: Optional[EvalDatasetTemplate],
+        eval_metrics: Optional[EvalMetricsTemplate],
     ) -> StageSpec:
         config = self.templates.clone(base)
         task_overrides = None
         resolved_environment_run = str(environment_run or "").strip() or None
+        explicit_stage_templates = has_explicit_stage_templates(
+            sft_dataset=sft_dataset,
+            rl_dataset=rl_dataset,
+            rl_reward=rl_reward,
+            eval_dataset=eval_dataset,
+            eval_metrics=eval_metrics,
+        )
         if resolved_environment_run is not None:
             named_run_type = None
             if hasattr(self.task, "get_named_run_type"):
@@ -1391,7 +1432,7 @@ class ExperimentSession:
             task_overrides = self.task.get_named_run_config_overrides(
                 resolved_environment_run
             )
-        elif hasattr(self.task, "get_run_config_overrides"):
+        elif not explicit_stage_templates and hasattr(self.task, "get_run_config_overrides"):
             task_overrides = self.task.get_run_config_overrides(
                 run_type,
                 variant=variant,
@@ -1418,11 +1459,20 @@ class ExperimentSession:
         if resolved_environment_run is not None:
             bind_environment_run(config, resolved_environment_run)
 
+        stage_task = bind_stage_templates(
+            self.task,
+            sft_dataset=sft_dataset,
+            rl_dataset=rl_dataset,
+            rl_reward=rl_reward,
+            eval_dataset=eval_dataset,
+            eval_metrics=eval_metrics,
+        )
+
         return StageSpec(
             id=stage_id,
             config=config,
             job_class=job_class,
-            task=self.task,
+            task=stage_task,
             run_type=run_type,
             run_name=resolved_run_name,
             environment_run=resolved_environment_run,

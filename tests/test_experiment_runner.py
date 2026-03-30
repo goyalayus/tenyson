@@ -47,6 +47,34 @@ class FunctionalManifestTests(unittest.TestCase):
             AdapterRef(repo_id="org/demo", revision="rev1"),
         )
 
+    def test_load_functional_manifest_accepts_template_task_without_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            functional_path = base_dir / "functional.py"
+            functional_path.write_text(
+                "\n".join(
+                    [
+                        "from tenyson.core.plugin import TemplateTaskPlugin",
+                        "from tenyson.experiment import AdapterRef",
+                        "",
+                        'TASK = TemplateTaskPlugin(environment_name=\"demo\")',
+                        "SEEDS = {",
+                        '    \"base\": AdapterRef(repo_id=\"org/demo\", revision=\"rev1\"),',
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = load_functional_manifest(functional_path)
+
+        self.assertEqual(manifest.task.get_environment_name(), "demo")
+        self.assertEqual(manifest.resolve_run("eval_turn6"), "eval_turn6")
+        self.assertEqual(
+            manifest.resolve_seed("base"),
+            AdapterRef(repo_id="org/demo", revision="rev1"),
+        )
+
 
 class BootstrapRuntimeTests(unittest.TestCase):
     def test_bootstrap_local_experiment_loads_root_env_and_adds_base_dir_to_sys_path(self) -> None:

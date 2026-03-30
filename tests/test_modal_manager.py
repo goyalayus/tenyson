@@ -335,7 +335,7 @@ class ModalGitSourceTests(unittest.TestCase):
                     "status",
                     "--porcelain",
                     "--untracked-files=no",
-                ): " M README.md\n M examples/wordle/smoke_reports/probe.md",
+                ): " M README.md\n M docs/probe.md",
                 ("rev-parse", "HEAD"): "abc123",
             }
             return mapping[args]
