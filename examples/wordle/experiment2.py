@@ -16,7 +16,7 @@ def build(exp):
         metrics=prime_metrics(),
         overrides={
             "task": {
-                "eval_samples": 100,
+                "eval_samples": 10,
                 "eval_seed": 42,
             }
         },
@@ -27,8 +27,18 @@ def build(exp):
         dataset=rl_turn_dataset(6),
         reward=prime_reward(),
         overrides={
+            "training": {
+                "max_steps": 20,
+                "hf_push_every_steps": 10,
+                "num_generations": 2,
+                "max_completion_length": 512,
+            },
+            "vllm": {
+                "gpu_memory_utilization": 0.5,
+                "max_tokens": 512,
+            },
             "task": {
-                "synthetic_samples": 4096,
+                "synthetic_samples": 64,
             }
         },
     )
@@ -39,7 +49,7 @@ def build(exp):
         metrics=prime_metrics(),
         overrides={
             "task": {
-                "eval_samples": 100,
+                "eval_samples": 10,
                 "eval_seed": 42,
             }
         },
