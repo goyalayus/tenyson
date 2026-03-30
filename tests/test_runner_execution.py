@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from tenyson.core.execution_policy import require_gpu_provider_runtime
+from tenyson.core.stage_templates import STAGE_TEMPLATE_CONFIG_KEY
 from tenyson.jobs.result import JobResult
 import tenyson.runner as runner_module
 
@@ -164,6 +165,61 @@ class RunnerTests(unittest.TestCase):
         job = FakeEvalJob.instances[0]
         self.assertNotIn("training", job.config)
         self.assertTrue(job.run_called)
+
+    def test_main_rebinds_stage_templates_from_config_before_building_job(self) -> None:
+        config = {
+            STAGE_TEMPLATE_CONFIG_KEY: {
+                "eval_dataset": {
+                    "module": "examples.wordle.functional",
+                    "factory": "eval_turn_dataset",
+                    "kwargs": {"turn": 6, "word_source": None},
+                }
+            }
+        }
+
+        with patch.object(runner_module, "require_gpu_provider_runtime"), patch.object(
+            runner_module,
+            "load_config",
+            return_value=config,
+        ), patch.object(
+            runner_module,
+            "_resolve_task",
+            return_value="base-task",
+        ), patch.object(
+            runner_module,
+            "bind_stage_templates_from_config",
+            return_value="bound-task",
+        ) as bind_mock, patch.object(
+            runner_module,
+            "SFTJob",
+            FakeSFTJob,
+        ), patch.object(
+            runner_module,
+            "RLJob",
+            FakeRLJob,
+        ), patch.object(
+            runner_module,
+            "EvalJob",
+            FakeEvalJob,
+        ), patch.object(
+            sys,
+            "argv",
+            [
+                "runner",
+                "--job-type",
+                "eval",
+                "--config",
+                "config.yaml",
+                "--task-module",
+                "module.path:Task",
+            ],
+        ):
+            runner_module.main()
+
+        bind_mock.assert_called_once_with("base-task", config)
+        self.assertEqual(len(FakeEvalJob.instances), 1)
+        self.assertEqual(FakeEvalJob.instances[0].task, "bound-task")
+        self.assertTrue(FakeEvalJob.instances[0].run_called)
 
     def test_main_fast_exits_after_cloud_rl_job_returns_result(self) -> None:
         with patch.dict(

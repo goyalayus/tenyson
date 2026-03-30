@@ -9,10 +9,13 @@ from tenyson.core.chat_sft import (
 )
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.stage_templates import (
+    STAGE_TEMPLATE_CONFIG_KEY,
     EvalDatasetTemplate,
     EvalMetricsTemplate,
     RLRewardTemplate,
     RLDatasetTemplate,
+    bind_stage_templates_from_config,
+    template_factory_ref,
 )
 from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
 from tenyson.core.environment import (
@@ -30,6 +33,39 @@ from tenyson.core.environment import (
 
 def _dataset_for(label: str):
     return Dataset.from_dict({"value": [label]})
+
+
+def _serialized_eval_dataset_template() -> EvalDatasetTemplate:
+    return EvalDatasetTemplate(
+        build=lambda config: _dataset_for("serialized-eval"),
+        factory_ref=template_factory_ref(__name__, "_serialized_eval_dataset_template"),
+    )
+
+
+def _serialized_rl_dataset_template() -> RLDatasetTemplate:
+    return RLDatasetTemplate(
+        build=lambda config: _dataset_for("serialized-rl"),
+        factory_ref=template_factory_ref(__name__, "_serialized_rl_dataset_template"),
+    )
+
+
+def _serialized_rl_reward_template() -> RLRewardTemplate:
+    return RLRewardTemplate(
+        build=lambda config, tokenizer: [
+            lambda prompts, completions, **kwargs: [1.0 for _ in completions]
+        ],
+        factory_ref=template_factory_ref(__name__, "_serialized_rl_reward_template"),
+    )
+
+
+def _serialized_eval_metrics_template() -> EvalMetricsTemplate:
+    return EvalMetricsTemplate(
+        compute=lambda prompts, completions, dataset_rows, config, tokenizer: {
+            "source": "serialized",
+            "count": len(prompts),
+        },
+        factory_ref=template_factory_ref(__name__, "_serialized_eval_metrics_template"),
+    )
 
 
 class EnvironmentCoreTests(unittest.TestCase):
@@ -238,28 +274,19 @@ class EnvironmentCoreTests(unittest.TestCase):
         rl_stage = session.rl(
             "explicit_rl",
             adapter=AdapterRef(repo_id="org/base", revision="main"),
-            dataset=RLDatasetTemplate(build=lambda config: _dataset_for("explicit-rl")),
-            reward=RLRewardTemplate(
-                build=lambda config, tokenizer: [
-                    lambda prompts, completions, **kwargs: [1.0 for _ in completions]
-                ]
-            ),
+            dataset=_serialized_rl_dataset_template(),
+            reward=_serialized_rl_reward_template(),
         )
         eval_stage = session.eval(
             "explicit_eval",
             adapter=AdapterRef(repo_id="org/base", revision="main"),
-            dataset=EvalDatasetTemplate(build=lambda config: _dataset_for("explicit-eval")),
-            metrics=EvalMetricsTemplate(
-                compute=lambda prompts, completions, dataset_rows, config, tokenizer: {
-                    "source": "explicit",
-                    "count": len(prompts),
-                }
-            ),
+            dataset=_serialized_eval_dataset_template(),
+            metrics=_serialized_eval_metrics_template(),
         )
 
         self.assertNotIn("source", rl_stage.config.get("task", {}))
-        self.assertEqual(rl_stage.task.get_rl_dataset(rl_stage.config)[0]["value"], "explicit-rl")
-        self.assertEqual(eval_stage.task.get_eval_dataset(eval_stage.config)[0]["value"], "explicit-eval")
+        self.assertEqual(rl_stage.task.get_rl_dataset(rl_stage.config)[0]["value"], "serialized-rl")
+        self.assertEqual(eval_stage.task.get_eval_dataset(eval_stage.config)[0]["value"], "serialized-eval")
         self.assertEqual(
             eval_stage.task.compute_metrics(
                 prompts=["a", "b"],
@@ -268,7 +295,77 @@ class EnvironmentCoreTests(unittest.TestCase):
                 config=eval_stage.config,
                 tokenizer=None,
             ),
-            {"source": "explicit", "count": 2},
+            {"source": "serialized", "count": 2},
+        )
+
+    def test_explicit_stage_templates_round_trip_through_config_payload(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "serialized_eval",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=_serialized_eval_dataset_template(),
+            metrics=_serialized_eval_metrics_template(),
+        )
+
+        payload = stage.config.get(STAGE_TEMPLATE_CONFIG_KEY)
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(
+            payload["eval_dataset"]["factory"],
+            "_serialized_eval_dataset_template",
+        )
+        rebound_task = bind_stage_templates_from_config(DummyTask(), stage.config)
+        self.assertEqual(
+            rebound_task.get_eval_dataset(stage.config)[0]["value"],
+            "serialized-eval",
+        )
+        self.assertEqual(
+            rebound_task.compute_metrics(
+                prompts=["a", "b", "c"],
+                completions=["x", "y", "z"],
+                dataset_rows=_dataset_for("serialized-eval"),
+                config=stage.config,
+                tokenizer=None,
+            ),
+            {"source": "serialized", "count": 3},
         )
 
 

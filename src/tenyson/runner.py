@@ -7,6 +7,7 @@ from tenyson.jobs.rl import RLJob
 from tenyson.jobs.result import JobResult
 from tenyson.jobs.sft import SFTJob
 from tenyson.core.execution_policy import require_gpu_provider_runtime
+from tenyson.core.stage_templates import bind_stage_templates_from_config
 from tenyson.loader import load_config, load_task, load_task_from_spec
 
 
@@ -55,6 +56,7 @@ def main() -> None:
     if args.resume_from_checkpoint and args.job_type in ("sft", "rl"):
         config.setdefault("training", {})["resume_from_checkpoint"] = args.resume_from_checkpoint
     task = _resolve_task(args.task_module)
+    task = bind_stage_templates_from_config(task, config)
 
     if args.job_type == "sft":
         job = SFTJob(config=config, task=task)

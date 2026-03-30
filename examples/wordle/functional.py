@@ -18,6 +18,7 @@ from tenyson.core.stage_templates import (
     RLRewardTemplate,
     RLDatasetTemplate,
     SFTDatasetTemplate,
+    template_factory_ref,
 )
 from tenyson.experiment import AdapterRef
 
@@ -62,6 +63,7 @@ _DEFAULT_WORD_SOURCE_URL = (
     "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
 )
 _DEFAULT_SFT_DATASET = "goyalayus/wordle-reasoning-sft-prefix-keep-think"
+_FUNCTIONAL_MODULE = "examples.wordle.functional"
 
 _DEFAULT_REWARD_CONFIG = {
     "format": 0.2,
@@ -1163,7 +1165,12 @@ def rl_mixed_dataset(*, word_source: Optional[str] = None) -> RLDatasetTemplate:
                 _turn_window_override(1, 5),
             ),
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "rl_mixed_dataset",
+            word_source=word_source,
+        ),
     )
 
 
@@ -1180,7 +1187,13 @@ def rl_turn_dataset(
                 _turn_window_override(history_len, history_len),
             ),
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "rl_turn_dataset",
+            turn=int(turn),
+            word_source=word_source,
+        ),
     )
 
 
@@ -1192,7 +1205,12 @@ def eval_mixed_dataset(*, word_source: Optional[str] = None) -> EvalDatasetTempl
                 _turn_window_override(1, 5),
             ),
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "eval_mixed_dataset",
+            word_source=word_source,
+        ),
     )
 
 
@@ -1213,7 +1231,13 @@ def eval_turn_dataset(
                 ),
             ),
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "eval_turn_dataset",
+            turn=int(turn),
+            word_source=word_source,
+        ),
     )
 
 
@@ -1223,7 +1247,12 @@ def constraint_reward(*, word_source: Optional[str] = None) -> RLRewardTemplate:
             config,
             tokenizer,
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "constraint_reward",
+            word_source=word_source,
+        ),
     )
 
 
@@ -1233,7 +1262,12 @@ def prime_reward(*, word_source: Optional[str] = None) -> RLRewardTemplate:
             config,
             tokenizer,
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "prime_reward",
+            word_source=word_source,
+        ),
     )
 
 
@@ -1246,7 +1280,12 @@ def constraint_metrics(*, word_source: Optional[str] = None) -> EvalMetricsTempl
             config,
             tokenizer,
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "constraint_metrics",
+            word_source=word_source,
+        ),
     )
 
 
@@ -1259,7 +1298,12 @@ def prime_metrics(*, word_source: Optional[str] = None) -> EvalMetricsTemplate:
             config,
             tokenizer,
             word_source=word_source,
-        )
+        ),
+        factory_ref=template_factory_ref(
+            _FUNCTIONAL_MODULE,
+            "prime_metrics",
+            word_source=word_source,
+        ),
     )
 
 

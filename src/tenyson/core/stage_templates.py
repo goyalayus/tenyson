@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import importlib
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from datasets import Dataset
@@ -19,6 +20,21 @@ EvalMetricsBuilder = Callable[
     [List[str], List[str], Dataset, Dict[str, Any], Any],
     Dict[str, Any],
 ]
+STAGE_TEMPLATE_CONFIG_KEY = "_tenyson_stage_templates"
+
+
+@dataclass(frozen=True)
+class TemplateFactoryRef:
+    module: str
+    factory: str
+    kwargs: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_payload(self) -> Dict[str, Any]:
+        return {
+            "module": str(self.module).strip(),
+            "factory": str(self.factory).strip(),
+            "kwargs": dict(self.kwargs),
+        }
 
 
 @dataclass(frozen=True)
@@ -27,26 +43,43 @@ class SFTDatasetTemplate:
     evaluation: Optional[SFTEvalDatasetBuilder] = None
     formatting: Optional[SFTFormattingBuilder] = None
     collator: Optional[SFTCollatorBuilder] = None
+    factory_ref: Optional[TemplateFactoryRef] = None
 
 
 @dataclass(frozen=True)
 class RLDatasetTemplate:
     build: RLDatasetBuilder
+    factory_ref: Optional[TemplateFactoryRef] = None
 
 
 @dataclass(frozen=True)
 class RLRewardTemplate:
     build: RLRewardBuilder
+    factory_ref: Optional[TemplateFactoryRef] = None
 
 
 @dataclass(frozen=True)
 class EvalDatasetTemplate:
     build: EvalDatasetBuilder
+    factory_ref: Optional[TemplateFactoryRef] = None
 
 
 @dataclass(frozen=True)
 class EvalMetricsTemplate:
     compute: EvalMetricsBuilder
+    factory_ref: Optional[TemplateFactoryRef] = None
+
+
+def template_factory_ref(
+    module: str,
+    factory: str,
+    **kwargs: Any,
+) -> TemplateFactoryRef:
+    return TemplateFactoryRef(
+        module=str(module).strip(),
+        factory=str(factory).strip(),
+        kwargs=dict(kwargs),
+    )
 
 
 def has_explicit_stage_templates(
@@ -87,13 +120,103 @@ def bind_stage_templates(
     ):
         return base_task
 
-    return _StageTemplateTaskAdapter(
+    adapter = _StageTemplateTaskAdapter(
         base_task=base_task,
         sft_dataset=sft_dataset,
         rl_dataset=rl_dataset,
         rl_reward=rl_reward,
         eval_dataset=eval_dataset,
         eval_metrics=eval_metrics,
+    )
+    _copy_task_source_attrs(base_task=base_task, target_task=adapter)
+    return adapter
+
+
+def serialize_stage_templates(
+    *,
+    sft_dataset: Optional[SFTDatasetTemplate] = None,
+    rl_dataset: Optional[RLDatasetTemplate] = None,
+    rl_reward: Optional[RLRewardTemplate] = None,
+    eval_dataset: Optional[EvalDatasetTemplate] = None,
+    eval_metrics: Optional[EvalMetricsTemplate] = None,
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    payload: Dict[str, Dict[str, Any]] = {}
+    _maybe_add_serialized_template(
+        payload,
+        key="sft_dataset",
+        template=sft_dataset,
+        expected_type=SFTDatasetTemplate,
+        label="SFT dataset template",
+    )
+    _maybe_add_serialized_template(
+        payload,
+        key="rl_dataset",
+        template=rl_dataset,
+        expected_type=RLDatasetTemplate,
+        label="RL dataset template",
+    )
+    _maybe_add_serialized_template(
+        payload,
+        key="rl_reward",
+        template=rl_reward,
+        expected_type=RLRewardTemplate,
+        label="RL reward template",
+    )
+    _maybe_add_serialized_template(
+        payload,
+        key="eval_dataset",
+        template=eval_dataset,
+        expected_type=EvalDatasetTemplate,
+        label="Eval dataset template",
+    )
+    _maybe_add_serialized_template(
+        payload,
+        key="eval_metrics",
+        template=eval_metrics,
+        expected_type=EvalMetricsTemplate,
+        label="Eval metrics template",
+    )
+    return payload or None
+
+
+def bind_stage_templates_from_config(
+    base_task: TaskPlugin,
+    config: Dict[str, Any],
+) -> TaskPlugin:
+    raw_payload = config.get(STAGE_TEMPLATE_CONFIG_KEY)
+    if raw_payload is None:
+        return base_task
+    if not isinstance(raw_payload, Mapping):
+        raise TypeError(
+            f"{STAGE_TEMPLATE_CONFIG_KEY} must be a mapping payload."
+        )
+    return bind_stage_templates(
+        base_task,
+        sft_dataset=_load_template_from_payload(
+            raw_payload.get("sft_dataset"),
+            expected_type=SFTDatasetTemplate,
+            label="SFT dataset template",
+        ),
+        rl_dataset=_load_template_from_payload(
+            raw_payload.get("rl_dataset"),
+            expected_type=RLDatasetTemplate,
+            label="RL dataset template",
+        ),
+        rl_reward=_load_template_from_payload(
+            raw_payload.get("rl_reward"),
+            expected_type=RLRewardTemplate,
+            label="RL reward template",
+        ),
+        eval_dataset=_load_template_from_payload(
+            raw_payload.get("eval_dataset"),
+            expected_type=EvalDatasetTemplate,
+            label="Eval dataset template",
+        ),
+        eval_metrics=_load_template_from_payload(
+            raw_payload.get("eval_metrics"),
+            expected_type=EvalMetricsTemplate,
+            label="Eval metrics template",
+        ),
     )
 
 
@@ -270,6 +393,91 @@ def _require_instance(
     expected_name = expected_type.__name__
     actual_name = type(value).__name__
     raise TypeError(f"{name} must be a {expected_name}, got {actual_name}.")
+
+
+def _copy_task_source_attrs(
+    *,
+    base_task: TaskPlugin,
+    target_task: TaskPlugin,
+) -> None:
+    for attr in ("__tenyson_source_path__", "__tenyson_source_module__"):
+        value = getattr(base_task, attr, None)
+        if value is not None:
+            setattr(target_task, attr, value)
+
+
+def _maybe_add_serialized_template(
+    payload: Dict[str, Dict[str, Any]],
+    *,
+    key: str,
+    template: Any,
+    expected_type: type,
+    label: str,
+) -> None:
+    if template is None:
+        return
+    validated_template = _require_instance(
+        template,
+        expected_type,
+        name=label,
+        allow_none=False,
+    )
+    factory_ref = validated_template.factory_ref
+    if factory_ref is None:
+        raise ValueError(
+            f"{label} must define a factory_ref so cloud jobs can rebuild it remotely."
+        )
+    payload[key] = _serialize_factory_ref(factory_ref, label=label)
+
+
+def _serialize_factory_ref(
+    factory_ref: TemplateFactoryRef,
+    *,
+    label: str,
+) -> Dict[str, Any]:
+    module_name = str(factory_ref.module).strip()
+    factory_name = str(factory_ref.factory).strip()
+    if not module_name or not factory_name:
+        raise ValueError(
+            f"{label} factory_ref must include non-empty module and factory names."
+        )
+    return factory_ref.as_payload()
+
+
+def _load_template_from_payload(
+    payload: Any,
+    *,
+    expected_type: type,
+    label: str,
+) -> Any:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"{label} payload must be a mapping.")
+
+    module_name = str(payload.get("module") or "").strip()
+    factory_name = str(payload.get("factory") or "").strip()
+    kwargs = payload.get("kwargs", {})
+    if not module_name or not factory_name:
+        raise ValueError(
+            f"{label} payload must include non-empty module and factory."
+        )
+    if not isinstance(kwargs, Mapping):
+        raise TypeError(f"{label} payload kwargs must be a mapping.")
+
+    module = importlib.import_module(module_name)
+    factory = getattr(module, factory_name)
+    if not callable(factory):
+        raise TypeError(
+            f"{label} factory {module_name}.{factory_name} is not callable."
+        )
+    template = factory(**dict(kwargs))
+    return _require_instance(
+        template,
+        expected_type,
+        name=label,
+        allow_none=False,
+    )
 
 
 def _require_dataset(dataset: Any, *, label: str) -> Dataset:

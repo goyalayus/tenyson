@@ -5,7 +5,7 @@ from typing import Any, Mapping, Optional
 from datasets import Dataset, load_dataset
 
 from tenyson.core.environment import DatasetHooks
-from tenyson.core.stage_templates import SFTDatasetTemplate
+from tenyson.core.stage_templates import SFTDatasetTemplate, template_factory_ref
 
 
 def build_hub_chat_sft_dataset_hooks(
@@ -66,6 +66,14 @@ def hub_chat_sft_dataset(
         train=_train_dataset,
         evaluation=_eval_dataset,
         formatting=_formatting,
+        factory_ref=template_factory_ref(
+            "tenyson.core.chat_sft",
+            "hub_chat_sft_dataset",
+            default_dataset=default_dataset,
+            dataset_key=dataset_key,
+            messages_column=messages_column,
+            split=split,
+        ),
     )
 
 

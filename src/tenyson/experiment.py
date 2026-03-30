@@ -31,8 +31,10 @@ from tenyson.core.stage_templates import (
     RLRewardTemplate,
     RLDatasetTemplate,
     SFTDatasetTemplate,
+    STAGE_TEMPLATE_CONFIG_KEY,
     bind_stage_templates,
     has_explicit_stage_templates,
+    serialize_stage_templates,
 )
 from tenyson.core.control import list_live_runs, prime_stop_target, request_stop
 from tenyson.core.telemetry import (
@@ -1458,6 +1460,15 @@ class ExperimentSession:
             model_cfg["init_adapter_revision"] = adapter.revision
         if resolved_environment_run is not None:
             bind_environment_run(config, resolved_environment_run)
+        serialized_stage_templates = serialize_stage_templates(
+            sft_dataset=sft_dataset,
+            rl_dataset=rl_dataset,
+            rl_reward=rl_reward,
+            eval_dataset=eval_dataset,
+            eval_metrics=eval_metrics,
+        )
+        if serialized_stage_templates is not None:
+            config[STAGE_TEMPLATE_CONFIG_KEY] = serialized_stage_templates
 
         stage_task = bind_stage_templates(
             self.task,
