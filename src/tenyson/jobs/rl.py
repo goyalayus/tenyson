@@ -137,6 +137,67 @@ def _resolve_unsloth_model_load_kwargs(
     return kwargs
 
 
+def _resolve_finetune_mode(train_cfg: Dict[str, Any]) -> str:
+    mode = str(train_cfg.get("finetune_mode", "lora") or "lora").strip().lower()
+    if mode not in {"lora", "full"}:
+        raise ValueError(
+            "training.finetune_mode must be either 'lora' or 'full'."
+        )
+    return mode
+
+
+def _resolve_init_artifact_type(model_cfg: Dict[str, Any]) -> str:
+    artifact_type = str(
+        model_cfg.get("init_artifact_type", "adapter") or "adapter"
+    ).strip().lower()
+    if artifact_type not in {"adapter", "full_model"}:
+        raise ValueError(
+            "model.init_artifact_type must be either 'adapter' or 'full_model'."
+        )
+    return artifact_type
+
+
+def _require_full_finetune_model_config(model_cfg: Dict[str, Any]) -> None:
+    if bool(model_cfg.get("load_in_4bit", False)):
+        raise ValueError(
+            "Full RL finetuning requires model.load_in_4bit=false."
+        )
+
+
+def _enable_unsloth_full_finetune_training_mode(
+    model: Any,
+    *,
+    gradient_checkpointing: Any,
+) -> None:
+    for_training = getattr(model, "for_training", None)
+    if not callable(for_training):
+        return
+    try:
+        for_training(use_gradient_checkpointing=gradient_checkpointing)
+    except TypeError:
+        for_training()
+
+
+def _push_final_model_snapshot(
+    *,
+    repo_id: str,
+    run_name: str,
+    model: Any,
+    tokenizer: Any,
+    step: int,
+) -> None:
+    commit_message = f"[{run_name}] final model sync (step={int(step)})"
+    try:
+        model.push_to_hub(repo_id, commit_message=commit_message)
+        if tokenizer is not None:
+            tokenizer.push_to_hub(repo_id, commit_message=commit_message)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Failed pushing final RL model snapshot to Hugging Face repo "
+            f"'{repo_id}': {exc}"
+        ) from exc
+
+
 def _configure_rl_unsloth_runtime_env(vllm_cfg: Dict[str, Any]) -> None:
     if not bool(vllm_cfg.get("enabled", False)):
         return
@@ -574,11 +635,24 @@ class RLJob:
         lora_cfg = self.config.get("lora", {})
         train_cfg = self.config.get("training", {})
         vllm_cfg = self.config.get("vllm", {})
+        finetune_mode = _resolve_finetune_mode(train_cfg)
+        full_finetuning = finetune_mode == "full"
+        init_artifact_type = _resolve_init_artifact_type(model_cfg)
         _require_rl_vllm_config(model_cfg, vllm_cfg)
+        if full_finetuning:
+            _require_full_finetune_model_config(model_cfg)
+            if init_artifact_type == "adapter" and str(
+                model_cfg.get("init_adapter_repo") or ""
+            ).strip():
+                raise ValueError(
+                    "Full RL finetuning cannot start from model.init_artifact_type=adapter. "
+                    "Seed full-mode RL from a full-model artifact or a base model."
+                )
         _configure_rl_unsloth_runtime_env(vllm_cfg)
         from unsloth import FastLanguageModel
 
-        init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+        init_repo = ""
+        init_revision = "main"
         init_adapter = None
         lora_runtime_kwargs: Dict[str, Any] = {
             "r": lora_cfg.get("r", 16),
@@ -589,10 +663,20 @@ class RLJob:
             "lora_dropout": lora_cfg.get("dropout", 0.0),
             "bias": lora_cfg.get("bias", "none"),
         }
-        if init_repo:
-            init_rev = model_cfg.get("init_adapter_revision", "main")
+        if init_artifact_type == "full_model":
+            init_repo = str(model_cfg.get("init_model_repo") or "").strip()
+            init_revision = str(
+                model_cfg.get("init_model_revision", "main") or "main"
+            ).strip() or "main"
+        else:
+            init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+            init_revision = str(
+                model_cfg.get("init_adapter_revision", "main") or "main"
+            ).strip() or "main"
+
+        if init_repo and init_artifact_type == "adapter":
             init_adapter = download_hf_lora_adapter(
-                repo_id=init_repo, revision=init_rev
+                repo_id=init_repo, revision=init_revision
             )
             lora_runtime_kwargs = resolve_hf_lora_runtime_kwargs(
                 init_adapter,
@@ -612,11 +696,31 @@ class RLJob:
                 f"({init_adapter.weights_in_repo}).",
                 flush=True,
             )
+        elif init_repo and init_artifact_type == "full_model":
+            print(
+                "[RLJob] Using init full model "
+                f"{init_repo}@{init_revision}.",
+                flush=True,
+            )
 
         resolved_model_name = str(
             model_cfg.get("name", "unsloth/Qwen3-4B-Base") or ""
         ).strip()
-        if init_adapter is not None:
+        require_qwen3_model_name(resolved_model_name)
+        resolved_revision = model_cfg.get("revision")
+
+        if init_artifact_type == "full_model" and init_repo:
+            resolved_model_name = init_repo
+            resolved_revision = resolve_hf_repo_revision(
+                repo_id=init_repo,
+                revision=init_revision,
+            )
+            print(
+                "[RLJob] Loading the init full-model artifact directly from "
+                f"{init_repo}@{resolved_revision}.",
+                flush=True,
+            )
+        elif init_adapter is not None:
             adapter_base_model_name = str(
                 init_adapter.config.get("base_model_name_or_path") or ""
             ).strip()
@@ -628,7 +732,7 @@ class RLJob:
                     flush=True,
                 )
 
-        model_name = require_qwen3_model_name(resolved_model_name)
+        model_name = resolved_model_name
         seq_len = model_cfg.get("max_seq_length", 2048)
         load_in_4bit = model_cfg.get("load_in_4bit", False)
         unsloth_load_kwargs = _resolve_unsloth_model_load_kwargs(model_cfg, vllm_cfg)
@@ -650,6 +754,8 @@ class RLJob:
                 max_seq_length=seq_len,
                 load_in_4bit=load_in_4bit,
                 max_lora_rank=int(lora_runtime_kwargs["r"]),
+                full_finetuning=full_finetuning,
+                revision=resolved_revision,
                 **unsloth_load_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
@@ -662,6 +768,17 @@ class RLJob:
             raise
 
         normalize_tokenizer_special_tokens(tokenizer, padding_side="left")
+
+        if full_finetuning:
+            print("[RLJob] Preparing model for full finetuning...", flush=True)
+            _enable_unsloth_full_finetune_training_mode(
+                model,
+                gradient_checkpointing=lora_cfg.get(
+                    "gradient_checkpointing",
+                    "unsloth",
+                ),
+            )
+            return model, tokenizer
 
         print("[RLJob] Applying Unsloth LoRA scaffolding...", flush=True)
         model = FastLanguageModel.get_peft_model(
@@ -697,6 +814,7 @@ class RLJob:
         require_gpu_provider_runtime()
         start = time.time()
         train_cfg = self.config.get("training", {})
+        finetune_mode = _resolve_finetune_mode(train_cfg)
         vllm_cfg = self.config.get("vllm", {})
         attempt_token = str(
             self.config.get("telemetry", {}).get("attempt_token") or ""
@@ -1084,6 +1202,14 @@ class RLJob:
 
         stop_requested = bool(getattr(manual_stop_callback, "stop_requested", False))
         stop_step = getattr(manual_stop_callback, "stop_step", None)
+        if finetune_mode == "full" and not stop_requested and push_repo_id:
+            _push_final_model_snapshot(
+                repo_id=push_repo_id,
+                run_name=run_name,
+                model=getattr(trainer, "model", model),
+                tokenizer=tokenizer,
+                step=int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0),
+            )
         if stop_requested:
             try:
                 hf_revision = (
@@ -1112,6 +1238,7 @@ class RLJob:
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
             hf_revision=hf_revision,
+            hf_artifact_type="full_model" if finetune_mode == "full" else "adapter",
             failure_reason=failure_reason,
             attempt_token=attempt_token,
         )

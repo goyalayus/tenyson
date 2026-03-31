@@ -61,7 +61,7 @@ class ExperimentReport:
     Fixed-format markdown report for experiment runs.
 
     The rendered fields are intentionally not user-customizable. The report always
-    shows experiment context plus per-stage status, run links, HF adapter details,
+    shows experiment context plus per-stage status, run links, HF artifact details,
     and metrics.
     """
 
@@ -493,10 +493,10 @@ class ExperimentReport:
         if entry.hf_repo_id:
             if entry.hf_revision:
                 lines.append(
-                    f"- Hugging Face adapter: `{entry.hf_repo_id}` @ `{entry.hf_revision}`"
+                    f"- Hugging Face artifact: `{entry.hf_repo_id}` @ `{entry.hf_revision}`"
                 )
             else:
-                lines.append(f"- Hugging Face adapter: `{entry.hf_repo_id}`")
+                lines.append(f"- Hugging Face artifact: `{entry.hf_repo_id}`")
         if entry.total_time_seconds is not None:
             lines.append(f"- Runtime (seconds): `{entry.total_time_seconds}`")
         if entry.expected_samples is not None:

@@ -620,7 +620,7 @@
           : pendingRunUrlLabel(summary)
       ),
       metaItem(
-        "HF adapter",
+        "HF artifact",
         summary.hf_repo_id
           ? `${summary.hf_repo_id}${summary.hf_revision ? ` @ ${summary.hf_revision}` : ""}`
           : "n/a"
@@ -1046,7 +1046,7 @@
       return formatDuration(Number(run.total_time_seconds));
     }
     if (run.hf_revision) {
-      return `Adapter ${String(run.hf_revision).slice(0, 8)}`;
+      return `Artifact ${String(run.hf_revision).slice(0, 8)}`;
     }
     return "";
   }

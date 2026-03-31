@@ -1,6 +1,11 @@
 model:
   # Tenyson currently supports Qwen 3 family base models only.
   name: "unsloth/qwen3-4b-unsloth-bnb-4bit"
+  # When evaluating a stage-produced full model, keep `name` pointed at the
+  # Qwen 3 family base and set:
+  # init_artifact_type: "full_model"
+  # init_model_repo: "<repo>"
+  # init_model_revision: "<sha>"
   max_seq_length: 4096
   load_in_4bit: true
   # These should match the adapter shape you expect to load for evaluation.

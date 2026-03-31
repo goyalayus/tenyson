@@ -1184,6 +1184,73 @@ class EvalFallbackTests(unittest.TestCase):
         self.assertTrue(job._vllm_runtime_enabled)
         normalize_mock.assert_not_called()
 
+    def test_build_model_and_tokenizer_loads_full_model_artifact_directly(self) -> None:
+        module_name = "unsloth"
+        original_module = sys.modules.get(module_name)
+        calls = []
+
+        class FakeModel:
+            def train(self, mode):
+                self.mode = mode
+                return self
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                calls.append(kwargs)
+                return FakeModel(), SimpleNamespace()
+
+            @staticmethod
+            def for_inference(model):
+                setattr(model, "for_inference_called", True)
+                return model
+
+        sys.modules[module_name] = SimpleNamespace(
+            FastLanguageModel=FakeFastLanguageModel
+        )
+        try:
+            job = EvalJob(
+                config={
+                    "evaluation": {"run_name": "eval_test"},
+                    "model": {
+                        "name": "Qwen/Qwen3-4B",
+                        "load_in_4bit": True,
+                        "fast_inference": True,
+                        "init_artifact_type": "full_model",
+                        "init_model_repo": "org/full-model",
+                        "init_model_revision": "main",
+                    },
+                    "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch.object(
+                eval_module,
+                "resolve_hf_repo_revision",
+                return_value="rev-full",
+            ), unittest.mock.patch.object(
+                eval_module,
+                "download_hf_lora_adapter",
+            ) as adapter_download_mock, unittest.mock.patch.object(
+                eval_module,
+                "normalize_tokenizer_special_tokens",
+            ) as normalize_mock:
+                model, _tokenizer = job._build_model_and_tokenizer()
+        finally:
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["model_name"], "org/full-model")
+        self.assertEqual(calls[0]["revision"], "rev-full")
+        self.assertTrue(calls[0]["fast_inference"])
+        self.assertTrue(getattr(model, "for_inference_called", False))
+        adapter_download_mock.assert_not_called()
+        normalize_mock.assert_called_once()
+
 
 class RLFallbackTests(unittest.TestCase):
     def test_build_model_and_tokenizer_fails_when_vllm_startup_breaks(self) -> None:
@@ -1476,6 +1543,122 @@ class RLFallbackTests(unittest.TestCase):
         self.assertTrue(callable(getattr(model, "load_lora", None)))
         self.assertEqual(strict_load_calls, [adapter])
         normalize_mock.assert_called_once()
+
+    def test_build_model_and_tokenizer_full_mode_loads_full_model_artifact(self) -> None:
+        unsloth_module_name = "unsloth"
+        original_unsloth_module = sys.modules.get(unsloth_module_name)
+        unsloth_calls = []
+
+        class FakeModel:
+            def __init__(self):
+                self.for_training_calls = []
+
+            def for_training(self, *args, **kwargs):
+                self.for_training_calls.append((args, kwargs))
+
+            def load_lora(self, *args, **kwargs):
+                return {"args": args, "kwargs": kwargs}
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                unsloth_calls.append(kwargs)
+                return FakeModel(), SimpleNamespace()
+
+            @staticmethod
+            def get_peft_model(model, **kwargs):
+                model.peft_kwargs = kwargs
+                return model
+
+        sys.modules[unsloth_module_name] = SimpleNamespace(
+            FastLanguageModel=FakeFastLanguageModel
+        )
+
+        try:
+            job = RLJob(
+                config={
+                    "training": {
+                        "run_name": "rl_test",
+                        "seed": 3407,
+                        "finetune_mode": "full",
+                    },
+                    "model": {
+                        "name": "unsloth/Qwen3-4B-Base",
+                        "fast_inference": True,
+                        "load_in_4bit": False,
+                        "init_artifact_type": "full_model",
+                        "init_model_repo": "org/full-model",
+                        "init_model_revision": "main",
+                    },
+                    "lora": {
+                        "r": 16,
+                        "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                        "alpha": 32,
+                        "dropout": 0.0,
+                        "bias": "none",
+                        "gradient_checkpointing": "unsloth",
+                    },
+                    "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch.object(
+                rl_module,
+                "resolve_hf_repo_revision",
+                return_value="rev-full",
+            ), unittest.mock.patch.object(
+                rl_module,
+                "download_hf_lora_adapter",
+            ) as adapter_download_mock, unittest.mock.patch.object(
+                rl_module,
+                "normalize_tokenizer_special_tokens",
+            ) as normalize_mock:
+                model, _tokenizer = job._build_model_and_tokenizer()
+        finally:
+            if original_unsloth_module is None:
+                sys.modules.pop(unsloth_module_name, None)
+            else:
+                sys.modules[unsloth_module_name] = original_unsloth_module
+
+        self.assertEqual(len(unsloth_calls), 1)
+        self.assertEqual(unsloth_calls[0]["model_name"], "org/full-model")
+        self.assertEqual(unsloth_calls[0]["revision"], "rev-full")
+        self.assertTrue(unsloth_calls[0]["full_finetuning"])
+        self.assertTrue(model.for_training_calls)
+        self.assertFalse(hasattr(model, "peft_kwargs"))
+        adapter_download_mock.assert_not_called()
+        normalize_mock.assert_called_once()
+
+    def test_build_model_and_tokenizer_full_mode_rejects_adapter_seed(self) -> None:
+        job = RLJob(
+            config={
+                "training": {
+                    "run_name": "rl_test",
+                    "seed": 3407,
+                    "finetune_mode": "full",
+                },
+                "model": {
+                    "name": "unsloth/Qwen3-4B-Base",
+                    "fast_inference": True,
+                    "load_in_4bit": False,
+                    "init_adapter_repo": "org/adapter",
+                    "init_adapter_revision": "main",
+                },
+                "lora": {
+                    "r": 16,
+                    "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                    "alpha": 32,
+                    "dropout": 0.0,
+                    "bias": "none",
+                },
+                "vllm": {"enabled": True},
+            },
+            task=object(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot start from .*adapter"):
+            job._build_model_and_tokenizer()
 
 
 if __name__ == "__main__":

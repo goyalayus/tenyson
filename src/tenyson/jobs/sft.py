@@ -90,13 +90,48 @@ def _reject_removed_sft_packing_setting(train_cfg: Dict[str, Any]) -> None:
     )
 
 
-def _push_final_adapter_snapshot(
+def _resolve_finetune_mode(train_cfg: Dict[str, Any]) -> str:
+    mode = str(train_cfg.get("finetune_mode", "lora") or "lora").strip().lower()
+    if mode not in {"lora", "full"}:
+        raise ValueError(
+            "training.finetune_mode must be either 'lora' or 'full'."
+        )
+    return mode
+
+
+def _require_full_finetune_model_config(model_cfg: Dict[str, Any]) -> None:
+    if bool(model_cfg.get("load_in_4bit", False)):
+        raise ValueError(
+            "Full SFT finetuning requires model.load_in_4bit=false."
+        )
+    if bool(model_cfg.get("load_in_8bit", False)):
+        raise ValueError(
+            "Full SFT finetuning requires model.load_in_8bit=false."
+        )
+
+
+def _enable_unsloth_full_finetune_training_mode(
+    model: Any,
+    *,
+    gradient_checkpointing: Any,
+) -> None:
+    for_training = getattr(model, "for_training", None)
+    if not callable(for_training):
+        return
+    try:
+        for_training(use_gradient_checkpointing=gradient_checkpointing)
+    except TypeError:
+        for_training()
+
+
+def _push_final_model_snapshot(
     *,
     repo_id: str,
     run_name: str,
     model: Any,
     tokenizer: Any,
     step: int,
+    artifact_label: str = "model",
     best_checkpoint: str | None = None,
 ) -> None:
     checkpoint_name = os.path.basename(str(best_checkpoint or "").rstrip("/"))
@@ -112,9 +147,29 @@ def _push_final_adapter_snapshot(
             tokenizer.push_to_hub(repo_id, commit_message=commit_message)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"Failed pushing final SFT adapter snapshot to Hugging Face repo "
+            f"Failed pushing final SFT {artifact_label} snapshot to Hugging Face repo "
             f"'{repo_id}': {exc}"
         ) from exc
+
+
+def _push_final_adapter_snapshot(
+    *,
+    repo_id: str,
+    run_name: str,
+    model: Any,
+    tokenizer: Any,
+    step: int,
+    best_checkpoint: str | None = None,
+) -> None:
+    _push_final_model_snapshot(
+        repo_id=repo_id,
+        run_name=run_name,
+        model=model,
+        tokenizer=tokenizer,
+        step=step,
+        artifact_label="adapter",
+        best_checkpoint=best_checkpoint,
+    )
 
 
 class SFTJob:
@@ -137,11 +192,15 @@ class SFTJob:
 
         model_cfg = self.config.get("model", {})
         train_cfg = self.config.get("training", {})
+        finetune_mode = _resolve_finetune_mode(train_cfg)
+        full_finetuning = finetune_mode == "full"
 
         model_name = require_qwen3_model_name(
             model_cfg.get("name", "Qwen/Qwen3-4B")
         )
         seq_len = model_cfg.get("max_seq_length", 2048)
+        if full_finetuning:
+            _require_full_finetune_model_config(model_cfg)
 
         print(f"[SFTJob] Loading model {model_name}...", flush=True)
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -150,10 +209,22 @@ class SFTJob:
             load_in_4bit=model_cfg.get("load_in_4bit", True),
             load_in_8bit=model_cfg.get("load_in_8bit", False),
             fast_inference=model_cfg.get("fast_inference", False),
+            full_finetuning=full_finetuning,
             trust_remote_code=True,
         )
 
         normalize_tokenizer_special_tokens(tokenizer)
+
+        if full_finetuning:
+            print("[SFTJob] Preparing model for full finetuning...", flush=True)
+            _enable_unsloth_full_finetune_training_mode(
+                model,
+                gradient_checkpointing=self.config.get("lora", {}).get(
+                    "gradient_checkpointing",
+                    "unsloth",
+                ),
+            )
+            return model, tokenizer, seq_len
 
         print("[SFTJob] Applying LoRA...", flush=True)
         lora_cfg = self.config.get("lora", {})
@@ -195,6 +266,7 @@ class SFTJob:
 
         start = time.time()
         train_cfg = self.config.get("training", {})
+        finetune_mode = _resolve_finetune_mode(train_cfg)
         run_name = self.run_id
         output_dir = train_cfg.get("output_dir", f"./outputs/{run_name}")
         attempt_token = str(
@@ -572,19 +644,31 @@ class SFTJob:
 
         stop_requested = bool(getattr(manual_stop_callback, "stop_requested", False))
         stop_step = getattr(manual_stop_callback, "stop_step", None)
-        if early_stopping_settings is not None and not stop_requested and push_repo_id:
-            _push_final_adapter_snapshot(
-                repo_id=push_repo_id,
-                run_name=run_name,
-                model=getattr(trainer, "model", model),
-                tokenizer=tokenizer,
-                step=int(getattr(trainer_state, "global_step", 0) or 0),
-                best_checkpoint=getattr(
-                    trainer_state,
-                    "best_model_checkpoint",
-                    None,
-                ),
+        if not stop_requested and push_repo_id:
+            best_checkpoint = getattr(
+                trainer_state,
+                "best_model_checkpoint",
+                None,
             )
+            if finetune_mode == "full":
+                _push_final_model_snapshot(
+                    repo_id=push_repo_id,
+                    run_name=run_name,
+                    model=getattr(trainer, "model", model),
+                    tokenizer=tokenizer,
+                    step=int(getattr(trainer_state, "global_step", 0) or 0),
+                    artifact_label="model",
+                    best_checkpoint=best_checkpoint,
+                )
+            elif early_stopping_settings is not None:
+                _push_final_adapter_snapshot(
+                    repo_id=push_repo_id,
+                    run_name=run_name,
+                    model=getattr(trainer, "model", model),
+                    tokenizer=tokenizer,
+                    step=int(getattr(trainer_state, "global_step", 0) or 0),
+                    best_checkpoint=best_checkpoint,
+                )
 
         # Best-effort capture of the active WandB run URL, if any.
         wandb_url = _wandb_url()
@@ -617,6 +701,7 @@ class SFTJob:
             wandb_url=wandb_url,
             hf_repo_id=push_repo_id or None,
             hf_revision=hf_revision,
+            hf_artifact_type="full_model" if finetune_mode == "full" else "adapter",
             failure_reason=failure_reason,
             attempt_token=attempt_token,
         )

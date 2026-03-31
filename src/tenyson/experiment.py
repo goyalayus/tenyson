@@ -67,6 +67,12 @@ _PARALLEL_RESULT_TELEMETRY_POLL_SECONDS = 5.0
 _PARALLEL_RESULT_TELEMETRY_EMPTY_LIVE_POLLS = 3
 _RECOVERY_FILE_LOCKS: Dict[str, Tuple[Any, int]] = {}
 _RECOVERY_FILE_LOCKS_LOCK = threading.Lock()
+_ADAPTER_ARTIFACT_TYPE = "adapter"
+_FULL_MODEL_ARTIFACT_TYPE = "full_model"
+_SUPPORTED_ARTIFACT_TYPES = {
+    _ADAPTER_ARTIFACT_TYPE,
+    _FULL_MODEL_ARTIFACT_TYPE,
+}
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
@@ -102,10 +108,41 @@ class ExperimentAborted(RuntimeError):
     pass
 
 
+def _normalize_artifact_type(value: Optional[str]) -> str:
+    artifact_type = str(value or _ADAPTER_ARTIFACT_TYPE).strip().lower()
+    if not artifact_type:
+        artifact_type = _ADAPTER_ARTIFACT_TYPE
+    if artifact_type not in _SUPPORTED_ARTIFACT_TYPES:
+        supported = ", ".join(sorted(_SUPPORTED_ARTIFACT_TYPES))
+        raise ValueError(
+            f'Unsupported artifact_type "{value}". Expected one of: {supported}.'
+        )
+    return artifact_type
+
+
 @dataclass(frozen=True)
 class AdapterRef:
     repo_id: str
     revision: str
+    artifact_type: str = _ADAPTER_ARTIFACT_TYPE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "artifact_type",
+            _normalize_artifact_type(self.artifact_type),
+        )
+
+    @property
+    def is_adapter(self) -> bool:
+        return self.artifact_type == _ADAPTER_ARTIFACT_TYPE
+
+    @property
+    def is_full_model(self) -> bool:
+        return self.artifact_type == _FULL_MODEL_ARTIFACT_TYPE
+
+
+ArtifactRef = AdapterRef
 
 
 @dataclass(frozen=True)
@@ -121,6 +158,50 @@ class StageSpec:
 
     def as_pipeline_step(self) -> Tuple[str, Dict[str, Any], type, Any]:
         return (self.id, self.config, self.job_class, self.task)
+
+
+def _resolve_stage_artifact(
+    *,
+    stage_id: str,
+    run_type: str,
+    adapter: Optional[AdapterRef],
+    artifact: Optional[AdapterRef],
+) -> AdapterRef:
+    if adapter is not None and artifact is not None:
+        raise ValueError(
+            f'Stage "{stage_id}" passed both adapter= and artifact= to {run_type}().'
+        )
+
+    resolved = artifact if artifact is not None else adapter
+    if resolved is None:
+        raise TypeError(
+            f'Stage "{stage_id}" must provide adapter= or artifact= to {run_type}().'
+        )
+    return resolved
+
+
+def _apply_stage_artifact_config(
+    config: Dict[str, Any],
+    artifact: Optional[AdapterRef],
+) -> None:
+    if artifact is None:
+        return
+
+    model_cfg = config.setdefault("model", {})
+    model_cfg.pop("init_artifact_type", None)
+    model_cfg.pop("init_model_repo", None)
+    model_cfg.pop("init_model_revision", None)
+
+    if artifact.is_full_model:
+        model_cfg.pop("init_adapter_repo", None)
+        model_cfg.pop("init_adapter_revision", None)
+        model_cfg["init_artifact_type"] = _FULL_MODEL_ARTIFACT_TYPE
+        model_cfg["init_model_repo"] = artifact.repo_id
+        model_cfg["init_model_revision"] = artifact.revision
+        return
+
+    model_cfg["init_adapter_repo"] = artifact.repo_id
+    model_cfg["init_adapter_revision"] = artifact.revision
 
 
 def _ensure_stage_attempt_token(stage: StageSpec) -> str:
@@ -584,8 +665,17 @@ class ExperimentBranch:
             raise KeyError(f'No result recorded for stage "{stage_id}".')
         return self._results[stage_id]
 
+    def artifact(self, stage_id: str) -> AdapterRef:
+        return self.require_artifact(stage_id)
+
+    def require_artifact(self, stage_id: str) -> AdapterRef:
+        return self.session.require_artifact(self.result(stage_id), stage_id)
+
+    def adapter(self, stage_id: str) -> AdapterRef:
+        return self.require_adapter(stage_id)
+
     def require_adapter(self, stage_id: str) -> AdapterRef:
-        return self.session.require_adapter(self.result(stage_id), stage_id)
+        return self.require_artifact(stage_id)
 
     def results(self) -> Dict[str, JobResult]:
         return dict(self._results)
@@ -1147,7 +1237,7 @@ class ExperimentSession:
             run_name=run_name,
             output_dir=output_dir,
             overrides=overrides,
-            adapter=None,
+            artifact=None,
             run_section="training",
             sft_dataset=dataset,
             rl_dataset=None,
@@ -1160,7 +1250,8 @@ class ExperimentSession:
         self,
         stage_id: str,
         *,
-        adapter: AdapterRef,
+        adapter: Optional[AdapterRef] = None,
+        artifact: Optional[AdapterRef] = None,
         base: str = "rl",
         run: Optional[str] = None,
         variant: Optional[str] = None,
@@ -1170,6 +1261,12 @@ class ExperimentSession:
         dataset: Optional[RLDatasetTemplate] = None,
         reward: Optional[RLRewardTemplate] = None,
     ) -> StageSpec:
+        resolved_artifact = _resolve_stage_artifact(
+            stage_id=stage_id,
+            run_type="rl",
+            adapter=adapter,
+            artifact=artifact,
+        )
         return self._build_stage(
             stage_id=stage_id,
             base=base,
@@ -1180,7 +1277,7 @@ class ExperimentSession:
             run_name=run_name,
             output_dir=output_dir,
             overrides=overrides,
-            adapter=adapter,
+            artifact=resolved_artifact,
             run_section="training",
             sft_dataset=None,
             rl_dataset=dataset,
@@ -1193,7 +1290,8 @@ class ExperimentSession:
         self,
         stage_id: str,
         *,
-        adapter: AdapterRef,
+        adapter: Optional[AdapterRef] = None,
+        artifact: Optional[AdapterRef] = None,
         base: str = "eval",
         run: Optional[str] = None,
         variant: Optional[str] = None,
@@ -1203,6 +1301,12 @@ class ExperimentSession:
         dataset: Optional[EvalDatasetTemplate] = None,
         metrics: Optional[EvalMetricsTemplate] = None,
     ) -> StageSpec:
+        resolved_artifact = _resolve_stage_artifact(
+            stage_id=stage_id,
+            run_type="eval",
+            adapter=adapter,
+            artifact=artifact,
+        )
         return self._build_stage(
             stage_id=stage_id,
             base=base,
@@ -1213,7 +1317,7 @@ class ExperimentSession:
             run_name=run_name,
             output_dir=output_dir,
             overrides=overrides,
-            adapter=adapter,
+            artifact=resolved_artifact,
             run_section="evaluation",
             sft_dataset=None,
             rl_dataset=None,
@@ -1370,7 +1474,7 @@ class ExperimentSession:
                 break
         return {stage.id: output[stage.id] for stage in stages}
 
-    def require_adapter(self, result: JobResult, stage_id: str) -> AdapterRef:
+    def require_artifact(self, result: JobResult, stage_id: str) -> AdapterRef:
         repo = getattr(result, "hf_repo_id", None)
         if not repo:
             raise RuntimeError(
@@ -1381,9 +1485,19 @@ class ExperimentSession:
         if not revision:
             raise RuntimeError(
                 f"{stage_id} finished without hf_revision. "
-                "This run cannot seed later stages safely because its exact adapter revision is unknown."
+                "This run cannot seed later stages safely because its exact artifact revision is unknown."
             )
-        return AdapterRef(repo_id=str(repo), revision=str(revision))
+        return AdapterRef(
+            repo_id=str(repo),
+            revision=str(revision),
+            artifact_type=(
+                getattr(result, "hf_artifact_type", None)
+                or getattr(result, "artifact_type", None)
+            ),
+        )
+
+    def require_adapter(self, result: JobResult, stage_id: str) -> AdapterRef:
+        return self.require_artifact(result, stage_id)
 
     def _build_stage(
         self,
@@ -1397,7 +1511,7 @@ class ExperimentSession:
         run_name: Optional[str],
         output_dir: Optional[str],
         overrides: Optional[Mapping[str, Any]],
-        adapter: Optional[AdapterRef],
+        artifact: Optional[AdapterRef],
         run_section: str,
         sft_dataset: Optional[SFTDatasetTemplate],
         rl_dataset: Optional[RLDatasetTemplate],
@@ -1454,10 +1568,7 @@ class ExperimentSession:
         elif not section_cfg.get("output_dir"):
             section_cfg["output_dir"] = f"./outputs/{resolved_run_name}"
 
-        if adapter is not None:
-            model_cfg = config.setdefault("model", {})
-            model_cfg["init_adapter_repo"] = adapter.repo_id
-            model_cfg["init_adapter_revision"] = adapter.revision
+        _apply_stage_artifact_config(config, artifact)
         if resolved_environment_run is not None:
             bind_environment_run(config, resolved_environment_run)
         serialized_stage_templates = serialize_stage_templates(

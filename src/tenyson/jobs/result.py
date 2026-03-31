@@ -14,6 +14,7 @@ class JobResult:
     expected_samples: Optional[int] = None
     hf_repo_id: Optional[str] = None
     hf_revision: Optional[str] = None
+    hf_artifact_type: Optional[str] = None
     wandb_url: Optional[str] = None
     failure_reason: Optional[str] = None
     instance_id: Optional[str] = None

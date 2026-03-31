@@ -8,6 +8,7 @@ from tenyson.core.hf_adapter import (
     resolve_hf_lora_runtime_kwargs,
     strict_load_hf_lora_adapter_weights,
 )
+from tenyson.core.hf_checkpoint import resolve_hf_repo_revision
 from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
@@ -48,6 +49,17 @@ def _resolve_eval_model_load_kwargs(
             vllm_cfg.get("gpu_memory_utilization", 0.9)
         )
     return kwargs
+
+
+def _resolve_init_artifact_type(model_cfg: Dict[str, Any]) -> str:
+    artifact_type = str(
+        model_cfg.get("init_artifact_type", "adapter") or "adapter"
+    ).strip().lower()
+    if artifact_type not in {"adapter", "full_model"}:
+        raise ValueError(
+            "model.init_artifact_type must be either 'adapter' or 'full_model'."
+        )
+    return artifact_type
 
 
 def _require_eval_vllm_config(
@@ -137,13 +149,25 @@ class EvalJob:
         _configure_eval_unsloth_runtime_env(vllm_cfg)
         from unsloth import FastLanguageModel
 
-        init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+        init_artifact_type = _resolve_init_artifact_type(model_cfg)
+        init_repo = ""
+        init_revision = "main"
         init_adapter = None
         lora_runtime_kwargs: Dict[str, Any] | None = None
-        if init_repo:
-            init_rev = model_cfg.get("init_adapter_revision", "main")
+        if init_artifact_type == "full_model":
+            init_repo = str(model_cfg.get("init_model_repo") or "").strip()
+            init_revision = str(
+                model_cfg.get("init_model_revision", "main") or "main"
+            ).strip() or "main"
+        else:
+            init_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+            init_revision = str(
+                model_cfg.get("init_adapter_revision", "main") or "main"
+            ).strip() or "main"
+
+        if init_repo and init_artifact_type == "adapter":
             init_adapter = download_hf_lora_adapter(
-                repo_id=init_repo, revision=init_rev
+                repo_id=init_repo, revision=init_revision
             )
             lora_runtime_kwargs = resolve_hf_lora_runtime_kwargs(
                 init_adapter,
@@ -161,10 +185,28 @@ class EvalJob:
                 f"({init_adapter.weights_in_repo}).",
                 flush=True,
             )
+        elif init_repo and init_artifact_type == "full_model":
+            print(
+                "[EvalJob] Using init full model "
+                f"{init_repo}@{init_revision}.",
+                flush=True,
+            )
 
         model_name = require_qwen3_model_name(
             model_cfg.get("name", "Qwen/Qwen3-4B")
         )
+        model_revision = model_cfg.get("revision")
+        if init_repo and init_artifact_type == "full_model":
+            model_name = init_repo
+            model_revision = resolve_hf_repo_revision(
+                repo_id=init_repo,
+                revision=init_revision,
+            )
+            print(
+                "[EvalJob] Loading the init full-model artifact directly from "
+                f"{init_repo}@{model_revision}.",
+                flush=True,
+            )
         seq_len = model_cfg.get("max_seq_length", 4096)
         max_lora_rank = (
             int(lora_runtime_kwargs["r"])
@@ -184,6 +226,7 @@ class EvalJob:
                 max_seq_length=seq_len,
                 load_in_4bit=model_cfg.get("load_in_4bit", True),
                 max_lora_rank=max_lora_rank,
+                revision=model_revision,
                 **unsloth_load_kwargs,
             )
         except Exception as exc:  # noqa: BLE001

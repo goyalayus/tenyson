@@ -18,6 +18,9 @@ lora:
   gradient_checkpointing: "unsloth"
 
 training:
+  # Set to "full" for dense finetuning. Full mode also requires
+  # model.load_in_4bit=false and model.load_in_8bit=false.
+  finetune_mode: "lora"
   seed: 123
   max_steps: 3000
   per_device_train_batch_size: 4

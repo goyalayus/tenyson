@@ -47,6 +47,39 @@ class FunctionalManifestTests(unittest.TestCase):
             AdapterRef(repo_id="org/demo", revision="rev1"),
         )
 
+    def test_load_functional_manifest_accepts_full_model_seed_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            functional_path = base_dir / "functional.py"
+            functional_path.write_text(
+                "\n".join(
+                    [
+                        "from tenyson.core.plugin import TemplateTaskPlugin",
+                        "",
+                        'TASK = TemplateTaskPlugin(environment_name="demo")',
+                        "SEEDS = {",
+                        '    "base": {',
+                        '        "repo_id": "org/demo-full",',
+                        '        "revision": "rev9",',
+                        '        "artifact_type": "full_model",',
+                        "    },",
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = load_functional_manifest(functional_path)
+
+        self.assertEqual(
+            manifest.resolve_seed("base"),
+            AdapterRef(
+                repo_id="org/demo-full",
+                revision="rev9",
+                artifact_type="full_model",
+            ),
+        )
+
     def test_load_functional_manifest_accepts_template_task_without_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
@@ -191,9 +224,9 @@ class RunExperimentTests(unittest.TestCase):
 
             def build(exp):
                 seed = exp.seed("experiment2_sft")
-                exp.eval("baseline", run="eval_turn6", adapter=seed)
-                exp.rl("train", run="rl_turn6", adapter=seed)
-                exp.eval("final", run="eval_turn6", adapter=exp.adapter("train"))
+                exp.eval("baseline", run="eval_turn6", artifact=seed)
+                exp.rl("train", run="rl_turn6", artifact=seed)
+                exp.eval("final", run="eval_turn6", artifact=exp.artifact("train"))
 
             with patch(
                 "tenyson.core.experiment_runner.bootstrap_local_experiment",
@@ -224,8 +257,14 @@ class RunExperimentTests(unittest.TestCase):
 
         self.assertEqual(created_stages["baseline"]["run"], "demo_eval_turn6")
         self.assertEqual(created_stages["train"]["run"], "demo_rl_turn6")
-        self.assertEqual(created_stages["baseline"]["adapter"], AdapterRef(repo_id="seed/experiment2_sft", revision="r1"))
-        self.assertEqual(created_stages["final"]["adapter"], AdapterRef(repo_id="adapter/train", revision="rev"))
+        self.assertEqual(
+            created_stages["baseline"]["artifact"],
+            AdapterRef(repo_id="seed/experiment2_sft", revision="r1"),
+        )
+        self.assertEqual(
+            created_stages["final"]["artifact"],
+            AdapterRef(repo_id="adapter/train", revision="rev"),
+        )
         self.assertEqual(run_order, ["baseline", "train", "final"])
         self.assertTrue(fake_session.closed)
         rebuild_mock.assert_called_once()
@@ -402,21 +441,21 @@ class RunExperimentTests(unittest.TestCase):
 
             def build(exp):
                 exp.sft("sft_main", run="sft_main")
-                sft_adapter = exp.adapter("sft_main")
+                sft_artifact = exp.artifact("sft_main")
 
                 def build_branch(branch):
                     branch.run(
                         branch.rl(
                             "curr_rl_t2",
                             run="rl_turn2",
-                            adapter=sft_adapter,
+                            artifact=sft_artifact,
                         )
                     )
                     branch.run(
                         branch.eval(
                             "curr_eval_after_t2_turn2",
                             run="eval_turn2",
-                            adapter=branch.require_adapter("curr_rl_t2"),
+                            artifact=branch.require_artifact("curr_rl_t2"),
                         )
                     )
 

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import tenyson.experiment as experiment_module
@@ -201,6 +202,59 @@ class ExperimentSessionTests(unittest.TestCase):
             },
         )
         self.assertEqual(templates.clone("rl"), base_rl_template)
+
+    def test_stage_building_accepts_full_model_artifact_alias(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "baseline_eval",
+            artifact=AdapterRef(
+                repo_id="repo/full-model",
+                revision="sha456",
+                artifact_type="full_model",
+            ),
+            run_name="wordle_eval_baseline",
+        )
+
+        self.assertEqual(
+            stage.config["model"],
+            {
+                "init_artifact_type": "full_model",
+                "init_model_repo": "repo/full-model",
+                "init_model_revision": "sha456",
+            },
+        )
+        self.assertNotIn("init_adapter_repo", stage.config["model"])
+        self.assertNotIn("init_adapter_revision", stage.config["model"])
+
+    def test_require_artifact_preserves_result_artifact_type(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+
+        artifact = session.require_artifact(
+            SimpleNamespace(
+                hf_repo_id="repo/full-model",
+                hf_revision="sha456",
+                hf_artifact_type="full_model",
+            ),
+            "baseline_eval",
+        )
+
+        self.assertEqual(
+            artifact,
+            AdapterRef(
+                repo_id="repo/full-model",
+                revision="sha456",
+                artifact_type="full_model",
+            ),
+        )
 
     def test_branch_run_honors_boundary_stop_request_after_stage_finishes(self) -> None:
         session = ExperimentSession(

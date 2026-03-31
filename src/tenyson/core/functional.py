@@ -107,7 +107,16 @@ def _coerce_adapter_ref(value: Any, *, alias: str) -> AdapterRef:
         repo_id = str(value.get("repo_id") or "").strip()
         revision = str(value.get("revision") or "").strip()
         if repo_id and revision:
-            return AdapterRef(repo_id=repo_id, revision=revision)
+            artifact_type = value.get("artifact_type")
+            return AdapterRef(
+                repo_id=repo_id,
+                revision=revision,
+                artifact_type=(
+                    str(artifact_type).strip()
+                    if artifact_type is not None
+                    else None
+                ),
+            )
     raise TypeError(
         f'Seed "{alias}" must be an AdapterRef or a mapping with repo_id and revision.'
     )

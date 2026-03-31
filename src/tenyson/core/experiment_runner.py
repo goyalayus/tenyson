@@ -48,8 +48,20 @@ class ExperimentController:
     def seed(self, alias: str):
         return self._runtime.manifest.resolve_seed(alias)
 
-    def adapter(self, stage_id: str):
+    def artifact(self, stage_id: str):
+        require_artifact = getattr(self._branch, "require_artifact", None)
+        if callable(require_artifact):
+            return require_artifact(stage_id)
         return self._branch.require_adapter(stage_id)
+
+    def require_artifact(self, stage_id: str):
+        return self.artifact(stage_id)
+
+    def adapter(self, stage_id: str):
+        require_adapter = getattr(self._branch, "require_adapter", None)
+        if callable(require_adapter):
+            return require_adapter(stage_id)
+        return self.artifact(stage_id)
 
     def require_adapter(self, stage_id: str):
         return self.adapter(stage_id)
@@ -182,6 +194,12 @@ class _PlanningController:
 
     def seed(self, alias: str):
         return self._runtime.manifest.resolve_seed(alias)
+
+    def artifact(self, stage_id: str):
+        return _PlannedValue(kind="artifact", ref=stage_id)
+
+    def require_artifact(self, stage_id: str):
+        return self.artifact(stage_id)
 
     def adapter(self, stage_id: str):
         return _PlannedValue(kind="adapter", ref=stage_id)
