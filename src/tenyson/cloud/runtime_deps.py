@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 
 # Keep this list in sync across cloud providers so AWS and Modal workers run
@@ -11,6 +12,23 @@ REMOTE_RUNTIME_PACKAGES: tuple[str, ...] = (
     "pyyaml",
     "wandb",
 )
+
+
+def resolve_runtime_dependency_profile(
+    *,
+    gpu: str | None = None,
+    env_var: str = "TENYSON_MODAL_GPU",
+) -> str:
+    """
+    Resolve the remote dependency install profile from the requested GPU.
+
+    T4 workers need a pinned compatibility stack. Other GPUs can use the
+    simpler default install path.
+    """
+    raw_gpu = str(gpu or os.getenv(env_var, "A100")).strip().upper()
+    if raw_gpu == "T4":
+        return "modal_t4_colab_compat"
+    return "default"
 
 
 def _render_python_pip_install(packages: tuple[str, ...]) -> str:

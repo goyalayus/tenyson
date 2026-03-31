@@ -17,7 +17,10 @@ from typing import Any, Callable, Dict, List
 import yaml
 
 from tenyson.cloud.base import BaseCloudManager, _red_print
-from tenyson.cloud.runtime_deps import runtime_pip_install_command
+from tenyson.cloud.runtime_deps import (
+    resolve_runtime_dependency_profile,
+    runtime_pip_install_command,
+)
 from tenyson.core.control import request_stop
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
 from tenyson.core import wandb_store
@@ -657,10 +660,7 @@ class ModalManager(BaseCloudManager):
         return gpu_map.get(gpu_name, "A100-40GB")
 
     def _resolve_runtime_dependency_profile(self) -> str:
-        gpu_name = str(self.gpu or "").strip().upper()
-        if gpu_name == "T4":
-            return "modal_t4_colab_compat"
-        return "default"
+        return resolve_runtime_dependency_profile(gpu=self.gpu)
 
     def _resolve_local_project_root(self) -> str:
         """

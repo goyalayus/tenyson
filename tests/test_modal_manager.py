@@ -28,7 +28,11 @@ from tenyson.cloud.modal import (
     _wait_for_run_start_or_terminal_result,
     _write_temp_config_payload,
 )
-from tenyson.cloud.runtime_deps import REMOTE_RUNTIME_PACKAGES, runtime_pip_install_command
+from tenyson.cloud.runtime_deps import (
+    REMOTE_RUNTIME_PACKAGES,
+    resolve_runtime_dependency_profile,
+    runtime_pip_install_command,
+)
 from tenyson.jobs.eval import EvalJob
 from tenyson.loader import load_task
 
@@ -959,6 +963,20 @@ class RuntimeDependencyTests(unittest.TestCase):
     def test_runtime_pip_install_command_rejects_unknown_profile(self) -> None:
         with self.assertRaises(ValueError):
             runtime_pip_install_command(profile="unknown-profile")
+
+    def test_resolve_runtime_dependency_profile_uses_t4_env(self) -> None:
+        with patch.dict(os.environ, {"TENYSON_MODAL_GPU": "T4"}, clear=True):
+            self.assertEqual(
+                resolve_runtime_dependency_profile(),
+                "modal_t4_colab_compat",
+            )
+
+    def test_resolve_runtime_dependency_profile_prefers_explicit_gpu(self) -> None:
+        with patch.dict(os.environ, {"TENYSON_MODAL_GPU": "T4"}, clear=True):
+            self.assertEqual(
+                resolve_runtime_dependency_profile(gpu="A100"),
+                "default",
+            )
 
     def test_modal_manager_resolves_t4_runtime_profile(self) -> None:
         self.assertEqual(
