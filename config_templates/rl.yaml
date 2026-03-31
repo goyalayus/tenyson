@@ -30,8 +30,12 @@ vllm:
   top_k: -1
 
 training:
-  # Set to "full" for dense finetuning. Full RL still uses the colocated
-  # vLLM rollout path, so keep model.fast_inference=true and load_in_4bit=false.
+  # Set to "full" for dense finetuning.
+  # The default LoRA path keeps vLLM enabled with model.fast_inference=true.
+  # Dense RL currently needs the fallback path instead:
+  #   model.fast_inference: false
+  #   vllm.enabled: false
+  # The real Modal smoke for that path needed an A100-80GB worker for Qwen3-4B.
   finetune_mode: "lora"
   seed: 3407
   max_steps: 1000
