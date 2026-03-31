@@ -892,6 +892,24 @@ class RLConfigHelpersTests(unittest.TestCase):
                 {"enabled": False},
             )
 
+    def test_require_rl_vllm_config_allows_full_mode_without_vllm(self) -> None:
+        _require_rl_vllm_config(
+            {"fast_inference": False},
+            {"enabled": False},
+            allow_full_finetune_fallback=True,
+        )
+
+    def test_require_rl_vllm_config_rejects_fast_inference_in_full_mode_fallback(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Full RL finetuning fallback requires model.fast_inference=false",
+        ):
+            _require_rl_vllm_config(
+                {"fast_inference": True},
+                {"enabled": False},
+                allow_full_finetune_fallback=True,
+            )
+
     def test_require_rl_vllm_config_rejects_server_mode(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires vllm.mode=colocate"):
             _require_rl_vllm_config(

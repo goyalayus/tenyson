@@ -281,8 +281,21 @@ def _destroy_torch_process_group_if_initialized() -> None:
 def _require_rl_vllm_config(
     model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
+    *,
+    allow_full_finetune_fallback: bool = False,
 ) -> None:
-    if not bool(vllm_cfg.get("enabled", False)):
+    vllm_enabled = bool(vllm_cfg.get("enabled", False))
+    fast_inference_enabled = bool(model_cfg.get("fast_inference", False))
+
+    if allow_full_finetune_fallback and not vllm_enabled:
+        if fast_inference_enabled:
+            raise ValueError(
+                "Full RL finetuning fallback requires model.fast_inference=false "
+                "when vllm.enabled=false."
+            )
+        return
+
+    if not vllm_enabled:
         raise ValueError(
             "RL requires vLLM. Set vllm.enabled=true for RL runs."
         )
@@ -297,7 +310,7 @@ def _require_rl_vllm_config(
             "RL currently requires vllm.mode=colocate to match the Unsloth GRPO "
             "notebook path."
         )
-    if not bool(model_cfg.get("fast_inference", False)):
+    if not fast_inference_enabled:
         raise ValueError(
             "RL requires model.fast_inference=true so Unsloth owns the vLLM "
             "generation path end-to-end."
@@ -638,7 +651,11 @@ class RLJob:
         finetune_mode = _resolve_finetune_mode(train_cfg)
         full_finetuning = finetune_mode == "full"
         init_artifact_type = _resolve_init_artifact_type(model_cfg)
-        _require_rl_vllm_config(model_cfg, vllm_cfg)
+        _require_rl_vllm_config(
+            model_cfg,
+            vllm_cfg,
+            allow_full_finetune_fallback=full_finetuning,
+        )
         if full_finetuning:
             _require_full_finetune_model_config(model_cfg)
             if init_artifact_type == "adapter" and str(
