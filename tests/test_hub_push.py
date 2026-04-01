@@ -9,6 +9,7 @@ from requests.exceptions import ReadTimeout
 
 from tenyson.core.hub_push import (
     PeriodicHubPushCallback,
+    _resolve_stale_root_artifact_files,
     ensure_hf_repo,
     push_pretrained_snapshot_to_hub,
 )
@@ -78,11 +79,56 @@ class HubPushTests(unittest.TestCase):
         create_repo_mock.assert_called_once()
         sleep_mock.assert_not_called()
 
+    def test_resolve_stale_root_artifact_files_deletes_old_model_shards_and_index(self) -> None:
+        stale_files = _resolve_stale_root_artifact_files(
+            remote_files=[
+                "README.md",
+                "config.json",
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+                "model.safetensors.index.json",
+                "tokenizer.json",
+                "checkpoint-10/model.safetensors",
+            ],
+            local_files=[
+                "config.json",
+                "model.safetensors",
+                "tokenizer.json",
+            ],
+            include_tokenizer=True,
+        )
+
+        self.assertEqual(
+            stale_files,
+            [
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+                "model.safetensors.index.json",
+            ],
+        )
+
+    def test_resolve_stale_root_artifact_files_preserves_tokenizer_when_not_uploading_one(self) -> None:
+        stale_files = _resolve_stale_root_artifact_files(
+            remote_files=[
+                "config.json",
+                "model.safetensors",
+                "tokenizer.json",
+                "tokenizer_config.json",
+            ],
+            local_files=[
+                "config.json",
+                "model.safetensors",
+            ],
+            include_tokenizer=False,
+        )
+
+        self.assertEqual(stale_files, [])
+
     def test_push_every_steps_must_be_positive(self) -> None:
         with self.assertRaisesRegex(ValueError, "push_every_steps"):
             PeriodicHubPushCallback("org/repo", "run", 0)
 
-    def test_push_pretrained_snapshot_uploads_current_files_and_replaces_repo_root(self) -> None:
+    def test_push_pretrained_snapshot_uploads_current_files_and_deletes_stale_root_artifacts(self) -> None:
         model = FakeSaveable(
             {
                 "config.json": "{}",
@@ -99,6 +145,20 @@ class HubPushTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.upload_kwargs = None
                 self.uploaded_files = None
+                self.commit_kwargs = None
+
+            def list_repo_files(self, repo_id):
+                return [
+                    "README.md",
+                    "config.json",
+                    "model-00001-of-00002.safetensors",
+                    "model-00002-of-00002.safetensors",
+                    "model.safetensors.index.json",
+                    "tokenizer.json",
+                ]
+
+            def create_commit(self, **kwargs):
+                self.commit_kwargs = kwargs
 
             def upload_folder(self, **kwargs):
                 self.upload_kwargs = kwargs
@@ -125,7 +185,15 @@ class HubPushTests(unittest.TestCase):
         self.assertEqual(len(tokenizer.calls), 1)
         self.assertEqual(fake_api.upload_kwargs["repo_id"], "org/repo")
         self.assertEqual(fake_api.upload_kwargs["commit_message"], "sync snapshot")
-        self.assertEqual(fake_api.upload_kwargs["delete_patterns"], "*")
+        self.assertIsNone(fake_api.upload_kwargs.get("delete_patterns"))
+        self.assertEqual(
+            [op.path_in_repo for op in fake_api.commit_kwargs["operations"]],
+            [
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+                "model.safetensors.index.json",
+            ],
+        )
         self.assertEqual(
             fake_api.uploaded_files,
             [
