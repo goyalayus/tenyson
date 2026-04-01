@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import functools
 import importlib
 import inspect
@@ -176,6 +177,36 @@ def _enable_unsloth_full_finetune_training_mode(
         for_training(use_gradient_checkpointing=gradient_checkpointing)
     except TypeError:
         for_training()
+
+
+def _normalize_full_finetune_rl_config(
+    config: Dict[str, Any],
+) -> tuple[Dict[str, Any], list[str]]:
+    normalized = copy.deepcopy(config)
+    train_cfg = normalized.setdefault("training", {})
+    finetune_mode = str(train_cfg.get("finetune_mode", "lora") or "lora").strip().lower()
+    if finetune_mode != "full":
+        return normalized, []
+
+    model_cfg = normalized.setdefault("model", {})
+    vllm_cfg = normalized.setdefault("vllm", {})
+    messages: list[str] = []
+
+    if bool(model_cfg.get("fast_inference", False)):
+        model_cfg["fast_inference"] = False
+        messages.append(
+            "[RLJob] Full finetuning is incompatible with fast inference; "
+            "forcing model.fast_inference=false."
+        )
+
+    if bool(vllm_cfg.get("enabled", False)):
+        vllm_cfg["enabled"] = False
+        messages.append(
+            "[RLJob] Full finetuning disables the RL vLLM path; "
+            "forcing vllm.enabled=false."
+        )
+
+    return normalized, messages
 
 
 def _push_final_model_snapshot(
@@ -638,7 +669,9 @@ class RLJob:
     """
 
     def __init__(self, config: Dict[str, Any], task: TaskPlugin):
-        self.config = config
+        self.config, self._runtime_normalization_messages = (
+            _normalize_full_finetune_rl_config(config)
+        )
         self.task = task
         self.run_id = resolve_required_run_name(self.config, "rl")
         self._vllm_runtime_enabled: bool | None = None
@@ -656,6 +689,8 @@ class RLJob:
             vllm_cfg,
             allow_full_finetune_fallback=full_finetuning,
         )
+        for message in self._runtime_normalization_messages:
+            print(message, flush=True)
         if full_finetuning:
             _require_full_finetune_model_config(model_cfg)
             if init_artifact_type == "adapter" and str(

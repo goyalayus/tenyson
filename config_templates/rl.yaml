@@ -32,10 +32,11 @@ vllm:
 training:
   # Set to "full" for dense finetuning.
   # The default LoRA path keeps vLLM enabled with model.fast_inference=true.
-  # Dense RL currently needs the fallback path instead:
-  #   model.fast_inference: false
-  #   vllm.enabled: false
-  # The real Modal smoke for that path needed an A100-80GB worker for Qwen3-4B.
+  # When finetune_mode="full", Tenyson automatically disables:
+  #   model.fast_inference
+  #   vllm.enabled
+  # because Unsloth does not support fast_inference together with
+  # full_finetuning=True.
   finetune_mode: "lora"
   seed: 3407
   max_steps: 1000
