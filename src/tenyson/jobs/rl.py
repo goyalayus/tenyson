@@ -21,6 +21,7 @@ from tenyson.core.hf_checkpoint import (
     resolve_hf_repo_revision,
     resolve_hf_resume_revision,
 )
+from tenyson.core.hub_push import push_pretrained_snapshot_to_hub
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.execution_policy import require_gpu_provider_runtime
@@ -219,9 +220,12 @@ def _push_final_model_snapshot(
 ) -> None:
     commit_message = f"[{run_name}] final model sync (step={int(step)})"
     try:
-        model.push_to_hub(repo_id, commit_message=commit_message)
-        if tokenizer is not None:
-            tokenizer.push_to_hub(repo_id, commit_message=commit_message)
+        push_pretrained_snapshot_to_hub(
+            repo_id,
+            model=model,
+            tokenizer=tokenizer,
+            commit_message=commit_message,
+        )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             f"Failed pushing final RL model snapshot to Hugging Face repo "

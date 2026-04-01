@@ -1,12 +1,44 @@
 from __future__ import annotations
 
+import fnmatch
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 from typing import Any, Optional
 
-from huggingface_hub import create_repo
+from huggingface_hub import CommitOperationDelete, create_repo, HfApi
 from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
+
+
+_MODEL_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    "adapter_config.json",
+    "adapter_model*.bin",
+    "adapter_model*.index.json",
+    "adapter_model*.safetensors",
+    "config.json",
+    "generation_config.json",
+    "model*.bin",
+    "model*.index.json",
+    "model*.safetensors",
+    "pytorch_model*.bin",
+    "pytorch_model*.index.json",
+    "training_args.bin",
+)
+
+_TOKENIZER_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    "added_tokens.json",
+    "chat_template.jinja",
+    "merges.txt",
+    "sentencepiece.bpe.model",
+    "special_tokens_map.json",
+    "spiece.model",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "vocab.json",
+)
 
 
 def ensure_hf_repo(
@@ -49,6 +81,99 @@ def _retry_backoff_seconds(attempt: int, initial_backoff_seconds: float) -> floa
     return base_delay * (2 ** max(0, int(attempt) - 1))
 
 
+def _matches_any_pattern(name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def _resolve_stale_root_artifact_files(
+    *,
+    remote_files: list[str],
+    local_files: list[str],
+    include_tokenizer: bool,
+) -> list[str]:
+    local_file_set = set(local_files)
+    stale_files: list[str] = []
+    tokenizer_patterns = (
+        _TOKENIZER_ARTIFACT_PATTERNS if include_tokenizer else tuple()
+    )
+
+    for path_in_repo in remote_files:
+        if "/" in path_in_repo.strip("/"):
+            continue
+        if path_in_repo in local_file_set:
+            continue
+
+        if _matches_any_pattern(path_in_repo, _MODEL_ARTIFACT_PATTERNS):
+            stale_files.append(path_in_repo)
+            continue
+
+        if tokenizer_patterns and _matches_any_pattern(
+            path_in_repo,
+            tokenizer_patterns,
+        ):
+            stale_files.append(path_in_repo)
+
+    return sorted(stale_files)
+
+
+def _delete_stale_root_artifact_files(
+    api: HfApi,
+    *,
+    repo_id: str,
+    stale_files: list[str],
+    commit_message: str,
+) -> None:
+    if not stale_files:
+        return
+
+    api.create_commit(
+        repo_id=repo_id,
+        operations=[
+            CommitOperationDelete(path_in_repo=path_in_repo)
+            for path_in_repo in stale_files
+        ],
+        commit_message=commit_message,
+    )
+
+
+def push_pretrained_snapshot_to_hub(
+    repo_id: str,
+    *,
+    model: Any,
+    tokenizer: Optional[Any],
+    commit_message: str,
+) -> None:
+    ensure_hf_repo(repo_id)
+
+    with TemporaryDirectory(prefix="tenyson-hf-push-") as tmpdir:
+        snapshot_dir = Path(tmpdir)
+        model.save_pretrained(snapshot_dir)
+        if tokenizer is not None:
+            tokenizer.save_pretrained(snapshot_dir)
+        local_files = sorted(
+            path.relative_to(snapshot_dir).as_posix()
+            for path in snapshot_dir.rglob("*")
+            if path.is_file()
+        )
+        api = HfApi()
+        stale_files = _resolve_stale_root_artifact_files(
+            remote_files=list(api.list_repo_files(repo_id=repo_id)),
+            local_files=local_files,
+            include_tokenizer=tokenizer is not None,
+        )
+        _delete_stale_root_artifact_files(
+            api,
+            repo_id=repo_id,
+            stale_files=stale_files,
+            commit_message=f"{commit_message} [cleanup stale files]",
+        )
+        api.upload_folder(
+            repo_id=repo_id,
+            folder_path=snapshot_dir,
+            commit_message=commit_message,
+        )
+
+
 class PeriodicHubPushCallback(TrainerCallback):
     """
     Periodically pushes current model/tokenizer weights to a fixed Hub repo.
@@ -77,9 +202,12 @@ class PeriodicHubPushCallback(TrainerCallback):
             return
         commit_message = f"[{self.run_name}] {reason} (step={step})"
         try:
-            model.push_to_hub(self.repo_id, commit_message=commit_message)
-            if self.tokenizer is not None:
-                self.tokenizer.push_to_hub(self.repo_id, commit_message=commit_message)
+            push_pretrained_snapshot_to_hub(
+                self.repo_id,
+                model=model,
+                tokenizer=self.tokenizer,
+                commit_message=commit_message,
+            )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 f"Failed pushing to Hugging Face Hub repo '{self.repo_id}' at step {step}: {exc}"

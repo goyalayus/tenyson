@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -14,14 +14,6 @@ from tenyson.jobs.sft import (
     _resolve_early_stopping_settings,
     _reject_removed_sft_packing_setting,
 )
-
-
-class FakePusher:
-    def __init__(self):
-        self.calls = []
-
-    def push_to_hub(self, repo_id, commit_message):
-        self.calls.append((repo_id, commit_message))
 
 
 class SFTJobHelperTests(unittest.TestCase):
@@ -109,39 +101,47 @@ class SFTJobHelperTests(unittest.TestCase):
         self.assertFalse(training_args.greater_is_better)
 
     def test_push_final_adapter_snapshot_pushes_model_and_tokenizer(self) -> None:
-        model = FakePusher()
-        tokenizer = FakePusher()
+        model = object()
+        tokenizer = object()
 
-        _push_final_adapter_snapshot(
-            repo_id="org/repo",
-            run_name="wordle_sft_main",
-            model=model,
-            tokenizer=tokenizer,
-            step=42,
-            best_checkpoint="/tmp/checkpoint-40",
-        )
+        with patch("tenyson.jobs.sft.push_pretrained_snapshot_to_hub") as push_mock:
+            _push_final_adapter_snapshot(
+                repo_id="org/repo",
+                run_name="wordle_sft_main",
+                model=model,
+                tokenizer=tokenizer,
+                step=42,
+                best_checkpoint="/tmp/checkpoint-40",
+            )
 
-        self.assertEqual(len(model.calls), 1)
-        self.assertEqual(len(tokenizer.calls), 1)
-        self.assertEqual(model.calls[0][0], "org/repo")
-        self.assertIn("final best-model sync", model.calls[0][1])
-        self.assertIn("checkpoint-40", model.calls[0][1])
-        self.assertIn("step=42", model.calls[0][1])
+        push_mock.assert_called_once()
+        args, kwargs = push_mock.call_args
+        self.assertEqual(args[0], "org/repo")
+        self.assertIs(kwargs["model"], model)
+        self.assertIs(kwargs["tokenizer"], tokenizer)
+        self.assertIn("final best-model sync", kwargs["commit_message"])
+        self.assertIn("checkpoint-40", kwargs["commit_message"])
+        self.assertIn("step=42", kwargs["commit_message"])
 
     def test_push_final_model_snapshot_mentions_model(self) -> None:
-        model = FakePusher()
+        model = object()
 
-        _push_final_model_snapshot(
-            repo_id="org/repo",
-            run_name="wordle_sft_main",
-            model=model,
-            tokenizer=None,
-            step=7,
-            artifact_label="model",
-        )
+        with patch("tenyson.jobs.sft.push_pretrained_snapshot_to_hub") as push_mock:
+            _push_final_model_snapshot(
+                repo_id="org/repo",
+                run_name="wordle_sft_main",
+                model=model,
+                tokenizer=None,
+                step=7,
+                artifact_label="model",
+            )
 
-        self.assertEqual(len(model.calls), 1)
-        self.assertIn("final model sync", model.calls[0][1])
+        push_mock.assert_called_once()
+        args, kwargs = push_mock.call_args
+        self.assertEqual(args[0], "org/repo")
+        self.assertIs(kwargs["model"], model)
+        self.assertIsNone(kwargs["tokenizer"])
+        self.assertIn("final model sync", kwargs["commit_message"])
 
     def test_reject_removed_sft_packing_setting_allows_missing_key(self) -> None:
         _reject_removed_sft_packing_setting(
