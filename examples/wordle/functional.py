@@ -527,6 +527,7 @@ def _score_prime_no_length_completion(
     }
 
 
+
 def score_completion(
     prompt_text: str,
     completion_text: str,
@@ -537,6 +538,7 @@ def score_completion(
     reward_max_output_tokens: Optional[int] = None,
     secret: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Backward-compat dispatcher used by the dashboard (server.py)."""
     profile = _resolve_reward_profile(task_cfg)
     if profile == _DEFAULT_REWARD_PROFILE:
         return _score_constraint_completion(
@@ -597,11 +599,12 @@ def _load_word_source(source: str) -> List[str]:
         return _filter_five_letter_words(handle.readlines())
 
 
-def get_wordlists(
+def load_valid_word_set(
     config: Dict[str, Any],
     *,
     word_source: Optional[str] = None,
-) -> Tuple[List[str], List[str]]:
+) -> set:
+    """Load and return the set of valid 5-letter words for Wordle."""
     task_cfg = config.get("task", {})
     if task_cfg.get("wordlists") is not None:
         raise ValueError(
@@ -611,7 +614,16 @@ def get_wordlists(
 
     explicit_word_source = str(word_source or "").strip()
     resolved_source = explicit_word_source or _DEFAULT_WORD_SOURCE_URL
-    words = _load_word_source(resolved_source)
+    return set(_load_word_source(resolved_source))
+
+
+def get_wordlists(
+    config: Dict[str, Any],
+    *,
+    word_source: Optional[str] = None,
+) -> Tuple[List[str], List[str]]:
+    """Backward-compat shim used by the dashboard (server.py)."""
+    words = sorted(load_valid_word_set(config, word_source=word_source))
     return words, words
 
 
@@ -640,24 +652,26 @@ def sample_history_rows(
 
 def generate_synthetic_wordle_dataset(
     config: Dict[str, Any],
-    seed: int,
-    n_samples: int,
     *,
+    seed: Optional[int] = None,
+    n_samples: Optional[int] = None,
     word_source: Optional[str] = None,
 ) -> Dataset:
-    solutions, allowed = get_wordlists(config, word_source=word_source)
-    valid_words = sorted(list(set(solutions) | set(allowed)))
-
-    rng = random.Random(seed)
     task_cfg = config.get("task", {})
+    resolved_seed = seed if seed is not None else config.get("training", {}).get("seed", 3407)
+    resolved_n_samples = n_samples if n_samples is not None else task_cfg.get("synthetic_samples", 1024)
+
+    valid_words = sorted(load_valid_word_set(config, word_source=word_source))
+
+    rng = random.Random(resolved_seed)
     min_turns = task_cfg.get("min_history_turns", 1)
     max_turns = task_cfg.get("max_history_turns", 4)
 
     rows = []
 
     i = 0
-    while len(rows) < n_samples:
-        secret = rng.choice(solutions)
+    while len(rows) < resolved_n_samples:
+        secret = rng.choice(valid_words)
         history_len = rng.randint(min_turns, max_turns)
         history_rows = sample_history_rows(
             valid_words=valid_words, secret=secret, history_len=history_len, rng=rng
@@ -705,24 +719,6 @@ def _validate_eval_exact_turns(turns: Any) -> List[int]:
 # ==============================================================================
 # RL PLUGIN HOOKS
 # ==============================================================================
-
-
-def get_rl_dataset(
-    config: Dict[str, Any],
-    *,
-    word_source: Optional[str] = None,
-) -> Dataset:
-    """Returns the dataset for GRPO training (just prompts)."""
-    task_cfg = config.get("task", {})
-    n_samples = task_cfg.get("synthetic_samples", 1024)
-    seed = config.get("training", {}).get("seed", 3407)
-
-    return generate_synthetic_wordle_dataset(
-        config,
-        seed,
-        n_samples,
-        word_source=word_source,
-    )
 
 
 def _extract_prompt_text(prompt_obj: Any) -> str:
@@ -784,8 +780,7 @@ def get_constraint_reward_funcs(
         task_cfg=task_cfg,
     )
 
-    solutions, allowed = get_wordlists(config, word_source=word_source)
-    valid_set = set(solutions) | set(allowed)
+    valid_set = load_valid_word_set(config, word_source=word_source)
 
     def reward_format_exact(
         prompts: Sequence[Any], completions: Sequence[Any], **kwargs
@@ -834,8 +829,7 @@ def get_prime_reward_funcs(
     rewards_cfg = task_cfg.get("rewards", {})
     format_reward = float(rewards_cfg.get("format", 0.2))
 
-    solutions, allowed = get_wordlists(config, word_source=word_source)
-    valid_set = set(solutions) | set(allowed)
+    valid_set = load_valid_word_set(config, word_source=word_source)
 
     def reward_format_exact(
         prompts: Sequence[Any], completions: Sequence[Any], **kwargs
@@ -871,14 +865,6 @@ def get_prime_reward_funcs(
     return [reward_format_exact, reward_wordle_prime]
 
 
-def get_reward_funcs(config: Dict[str, Any], tokenizer: Any) -> List[Any]:
-    """Backward-compatible reward dispatcher used by named runs."""
-    task_cfg = config.get("task", {})
-    reward_profile = _resolve_reward_profile(task_cfg)
-    if reward_profile == _PRIME_NO_LENGTH_REWARD_PROFILE:
-        return get_prime_reward_funcs(config, tokenizer)
-    return get_constraint_reward_funcs(config, tokenizer)
-
 
 # ==============================================================================
 # EVALS PLUGIN HOOKS
@@ -899,8 +885,8 @@ def get_eval_dataset(
     if exact_turns is None:
         return generate_synthetic_wordle_dataset(
             config,
-            seed,
-            n_samples,
+            seed=seed,
+            n_samples=n_samples,
             word_source=word_source,
         )
 
@@ -918,8 +904,8 @@ def get_eval_dataset(
         local_seed = int(seed) + idx
         local_ds = generate_synthetic_wordle_dataset(
             local_cfg,
-            local_seed,
-            per_turn,
+            seed=local_seed,
+            n_samples=per_turn,
             word_source=word_source,
         )
         for row in local_ds:
@@ -938,8 +924,8 @@ def get_eval_dataset(
         local_seed = int(seed) + len(rows)
         local_ds = generate_synthetic_wordle_dataset(
             local_cfg,
-            local_seed,
-            1,
+            seed=local_seed,
+            n_samples=1,
             word_source=word_source,
         )
         copied = dict(local_ds[0])
@@ -960,8 +946,7 @@ def _compute_constraint_metrics(
     word_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     del dataset_rows
-    solutions, allowed = get_wordlists(config, word_source=word_source)
-    valid_set = set(solutions) | set(allowed)
+    valid_set = load_valid_word_set(config, word_source=word_source)
     task_cfg = config.get("task", {})
     reward_max_output_tokens = resolve_reward_max_output_tokens(
         config,
@@ -1047,8 +1032,7 @@ def _compute_prime_no_length_metrics(
     *,
     word_source: Optional[str] = None,
 ) -> Dict[str, Any]:
-    solutions, allowed = get_wordlists(config, word_source=word_source)
-    valid_set = set(solutions) | set(allowed)
+    valid_set = load_valid_word_set(config, word_source=word_source)
     task_cfg = config.get("task", {})
 
     total = len(completions)
@@ -1122,36 +1106,6 @@ def _compute_prime_no_length_metrics(
     }
 
 
-def compute_metrics(
-    prompts: List[str],
-    completions: List[str],
-    dataset_rows: Dataset,
-    config: Dict[str, Any],
-    tokenizer: Any,
-    *,
-    word_source: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Scores completions and returns an aggregated metric dictionary."""
-    task_cfg = config.get("task", {})
-    reward_profile = _resolve_reward_profile(task_cfg)
-    if reward_profile == _PRIME_NO_LENGTH_REWARD_PROFILE:
-        return _compute_prime_no_length_metrics(
-            prompts,
-            completions,
-            dataset_rows,
-            config,
-            tokenizer,
-            word_source=word_source,
-        )
-    return _compute_constraint_metrics(
-        prompts,
-        completions,
-        dataset_rows,
-        config,
-        tokenizer,
-        word_source=word_source,
-    )
-
 
 def sft_chat_dataset() -> SFTDatasetTemplate:
     return hub_chat_sft_dataset()
@@ -1159,11 +1113,8 @@ def sft_chat_dataset() -> SFTDatasetTemplate:
 
 def rl_mixed_dataset(*, word_source: Optional[str] = None) -> RLDatasetTemplate:
     return RLDatasetTemplate(
-        build=lambda config: get_rl_dataset(
-            _config_with_overrides(
-                config,
-                _turn_window_override(1, 5),
-            ),
+        build=lambda config: generate_synthetic_wordle_dataset(
+            merge_config_overrides(config, {"task": {"min_history_turns": 1, "max_history_turns": 5}}),
             word_source=word_source,
         ),
         factory_ref=template_factory_ref(
@@ -1179,13 +1130,11 @@ def rl_turn_dataset(
     *,
     word_source: Optional[str] = None,
 ) -> RLDatasetTemplate:
-    history_len = _history_len_for_turn(turn)
+    _validate_turn(turn)
+    history_len = turn - 1
     return RLDatasetTemplate(
-        build=lambda config: get_rl_dataset(
-            _config_with_overrides(
-                config,
-                _turn_window_override(history_len, history_len),
-            ),
+        build=lambda config: generate_synthetic_wordle_dataset(
+            merge_config_overrides(config, {"task": {"min_history_turns": history_len, "max_history_turns": history_len}}),
             word_source=word_source,
         ),
         factory_ref=template_factory_ref(
@@ -1200,10 +1149,7 @@ def rl_turn_dataset(
 def eval_mixed_dataset(*, word_source: Optional[str] = None) -> EvalDatasetTemplate:
     return EvalDatasetTemplate(
         build=lambda config: get_eval_dataset(
-            _config_with_overrides(
-                config,
-                _turn_window_override(1, 5),
-            ),
+            merge_config_overrides(config, {"task": {"min_history_turns": 1, "max_history_turns": 5}}),
             word_source=word_source,
         ),
         factory_ref=template_factory_ref(
@@ -1219,17 +1165,17 @@ def eval_turn_dataset(
     *,
     word_source: Optional[str] = None,
 ) -> EvalDatasetTemplate:
-    history_len = _history_len_for_turn(turn)
+    _validate_turn(turn)
+    history_len = turn - 1
     return EvalDatasetTemplate(
         build=lambda config: get_eval_dataset(
-            _config_with_overrides(
-                config,
-                _turn_window_override(
-                    history_len,
-                    history_len,
-                    eval_exact_turns=[int(turn)],
-                ),
-            ),
+            merge_config_overrides(config, {
+                "task": {
+                    "min_history_turns": history_len,
+                    "max_history_turns": history_len,
+                    "eval_exact_turns": [int(turn)],
+                },
+            }),
             word_source=word_source,
         ),
         factory_ref=template_factory_ref(
@@ -1307,6 +1253,12 @@ def prime_metrics(*, word_source: Optional[str] = None) -> EvalMetricsTemplate:
     )
 
 
+def _validate_turn(turn: int) -> None:
+    if int(turn) < 1 or int(turn) > 6:
+        raise ValueError(f"Wordle turn must be within 1..6, got {turn}.")
+
+
+# Public API defaults — inline these in experiment.py overrides if preferred.
 def sft_defaults() -> Dict[str, Any]:
     return {
         "training": {
@@ -1336,35 +1288,6 @@ def eval_defaults() -> Dict[str, Any]:
     }
 
 
-def _config_with_overrides(
-    config: Dict[str, Any],
-    *overrides: Dict[str, Any],
-) -> Dict[str, Any]:
-    return merge_config_overrides(config, *overrides)
-
-
-def _turn_window_override(
-    min_turns: int,
-    max_turns: int,
-    *,
-    eval_exact_turns: Optional[List[int]] = None,
-) -> Dict[str, Any]:
-    override: Dict[str, Any] = {
-        "task": {
-            "min_history_turns": int(min_turns),
-            "max_history_turns": int(max_turns),
-        }
-    }
-    if eval_exact_turns is not None:
-        override["task"]["eval_exact_turns"] = list(eval_exact_turns)
-    return override
-
-
-def _history_len_for_turn(turn: int) -> int:
-    resolved_turn = int(turn)
-    if resolved_turn < 1 or resolved_turn > 6:
-        raise ValueError(f"Wordle turn must be within 1..6, got {turn}.")
-    return max(0, resolved_turn - 1)
 TASK = TemplateTaskPlugin(environment_name="wordle")
 
 SEEDS = {
