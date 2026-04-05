@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import functools
 import importlib
+import inspect
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from datasets import Dataset
@@ -80,6 +82,116 @@ def template_factory_ref(
         factory=str(factory).strip(),
         kwargs=dict(kwargs),
     )
+
+
+def sft_dataset_template(
+    factory: Callable[..., SFTDatasetTemplate],
+) -> Callable[..., SFTDatasetTemplate]:
+    return _decorate_template_factory(
+        factory,
+        expected_type=SFTDatasetTemplate,
+        label="SFT dataset template",
+    )
+
+
+def rl_dataset_template(
+    factory: Callable[..., RLDatasetTemplate],
+) -> Callable[..., RLDatasetTemplate]:
+    return _decorate_template_factory(
+        factory,
+        expected_type=RLDatasetTemplate,
+        label="RL dataset template",
+    )
+
+
+def rl_reward_template(
+    factory: Callable[..., RLRewardTemplate],
+) -> Callable[..., RLRewardTemplate]:
+    return _decorate_template_factory(
+        factory,
+        expected_type=RLRewardTemplate,
+        label="RL reward template",
+    )
+
+
+def eval_dataset_template(
+    factory: Callable[..., EvalDatasetTemplate],
+) -> Callable[..., EvalDatasetTemplate]:
+    return _decorate_template_factory(
+        factory,
+        expected_type=EvalDatasetTemplate,
+        label="Eval dataset template",
+    )
+
+
+def eval_metrics_template(
+    factory: Callable[..., EvalMetricsTemplate],
+) -> Callable[..., EvalMetricsTemplate]:
+    return _decorate_template_factory(
+        factory,
+        expected_type=EvalMetricsTemplate,
+        label="Eval metrics template",
+    )
+
+
+def _decorate_template_factory(
+    factory: Callable[..., Any],
+    *,
+    expected_type: type,
+    label: str,
+) -> Callable[..., Any]:
+    signature = inspect.signature(factory)
+    _validate_template_factory_signature(
+        signature,
+        factory=factory,
+        label=label,
+    )
+
+    @functools.wraps(factory)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        template = factory(*args, **kwargs)
+        validated_template = _require_instance(
+            template,
+            expected_type,
+            name=label,
+            allow_none=False,
+        )
+        if validated_template.factory_ref is not None:
+            return validated_template
+
+        bound_call = signature.bind(*args, **kwargs)
+        call_kwargs = dict(bound_call.arguments)
+        return replace(
+            validated_template,
+            factory_ref=template_factory_ref(
+                factory.__module__,
+                factory.__name__,
+                **call_kwargs,
+            ),
+        )
+
+    return wrapped
+
+
+def _validate_template_factory_signature(
+    signature: inspect.Signature,
+    *,
+    factory: Callable[..., Any],
+    label: str,
+) -> None:
+    disallowed_kinds = {
+        inspect.Parameter.POSITIONAL_ONLY: "positional-only parameters",
+        inspect.Parameter.VAR_POSITIONAL: "*args",
+        inspect.Parameter.VAR_KEYWORD: "**kwargs",
+    }
+    for parameter in signature.parameters.values():
+        problem = disallowed_kinds.get(parameter.kind)
+        if problem is None:
+            continue
+        raise TypeError(
+            f"{label} factory {factory.__module__}.{factory.__name__} cannot use "
+            f"{problem} because remote template rebuild calls it back with named kwargs."
+        )
 
 
 def has_explicit_stage_templates(

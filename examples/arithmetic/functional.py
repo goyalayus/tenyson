@@ -6,14 +6,12 @@ from typing import Any
 
 from datasets import Dataset
 
-from tenyson.core.stage_templates import (
+from tenyson import (
     EvalDatasetTemplate,
     EvalMetricsTemplate,
-    template_factory_ref,
+    eval_dataset_template,
+    eval_metrics_template,
 )
-
-
-_FUNCTIONAL_MODULE = "examples.arithmetic.functional"  # e.g. "examples.arithmetic.functional"
 
 _DEFAULT_EVAL_SAMPLES = 100  # e.g. 100 eval rows
 _DEFAULT_EVAL_SEED = 7  # e.g. 7
@@ -246,6 +244,7 @@ def compute_addition_metrics(
     }
 
 
+@eval_dataset_template
 def three_digit_addition_eval_dataset() -> EvalDatasetTemplate:
     return EvalDatasetTemplate(
         # config example: {"task": {"eval_samples": 100, "eval_seed": 7}}
@@ -255,18 +254,11 @@ def three_digit_addition_eval_dataset() -> EvalDatasetTemplate:
             ),  # e.g. 100
             seed=int(config.get("task", {}).get("eval_seed", _DEFAULT_EVAL_SEED)),  # e.g. 7
         ),
-        factory_ref=template_factory_ref(
-            _FUNCTIONAL_MODULE,
-            "three_digit_addition_eval_dataset",
-        ),  # e.g. TemplateFactoryRef(module="examples.arithmetic.functional", factory="three_digit_addition_eval_dataset")
     )
 
 
+@eval_metrics_template
 def three_digit_addition_metrics() -> EvalMetricsTemplate:
     return EvalMetricsTemplate(
         compute=compute_addition_metrics,
-        factory_ref=template_factory_ref(
-            _FUNCTIONAL_MODULE,
-            "three_digit_addition_metrics",
-        ),  # e.g. TemplateFactoryRef(module="examples.arithmetic.functional", factory="three_digit_addition_metrics")
     )

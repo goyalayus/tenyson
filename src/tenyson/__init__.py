@@ -33,6 +33,11 @@ __all__ = [
     "RLRewardTemplate",
     "EvalDatasetTemplate",
     "EvalMetricsTemplate",
+    "sft_dataset_template",
+    "rl_dataset_template",
+    "rl_reward_template",
+    "eval_dataset_template",
+    "eval_metrics_template",
 ]
 
 _EXPORTS = {
@@ -68,6 +73,11 @@ _EXPORTS = {
     "RLRewardTemplate": ("tenyson.core.stage_templates", "RLRewardTemplate"),
     "EvalDatasetTemplate": ("tenyson.core.stage_templates", "EvalDatasetTemplate"),
     "EvalMetricsTemplate": ("tenyson.core.stage_templates", "EvalMetricsTemplate"),
+    "sft_dataset_template": ("tenyson.core.stage_templates", "sft_dataset_template"),
+    "rl_dataset_template": ("tenyson.core.stage_templates", "rl_dataset_template"),
+    "rl_reward_template": ("tenyson.core.stage_templates", "rl_reward_template"),
+    "eval_dataset_template": ("tenyson.core.stage_templates", "eval_dataset_template"),
+    "eval_metrics_template": ("tenyson.core.stage_templates", "eval_metrics_template"),
 }
 
 if TYPE_CHECKING:
@@ -99,6 +109,11 @@ if TYPE_CHECKING:
         RLRewardTemplate,
         RLDatasetTemplate,
         SFTDatasetTemplate,
+        eval_dataset_template,
+        eval_metrics_template,
+        rl_dataset_template,
+        rl_reward_template,
+        sft_dataset_template,
     )
     from tenyson.reporting.builder import ReportBuilder
     from tenyson.reporting.fixed import ExperimentReport
