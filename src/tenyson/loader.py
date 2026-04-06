@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from tenyson.core.environment import EnvironmentDefinition, EnvironmentTaskAdapter
-from tenyson.core.plugin import TaskPlugin
+from tenyson.core.plugin import TaskPlugin, TemplateTaskPlugin
 
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -63,10 +63,24 @@ def _load_environment_definition_from_module(module: ModuleType) -> EnvironmentD
 def _load_task_instance_from_module(module: ModuleType) -> TaskPlugin | None:
     task = getattr(module, "TASK", None)
     if task is None:
-        return None
+        return _maybe_build_template_task_from_module_path(module)
     if not isinstance(task, TaskPlugin):
         raise TypeError("TASK must be a TaskPlugin instance.")
     return task
+
+
+def _maybe_build_template_task_from_module_path(module: ModuleType) -> TaskPlugin | None:
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        return None
+    module_path = os.path.abspath(str(module_file))
+    module_stem = os.path.splitext(os.path.basename(module_path))[0].strip().lower()
+    if module_stem != "functional":
+        return None
+    environment_name = os.path.basename(os.path.dirname(module_path)).strip()
+    if not environment_name:
+        return None
+    return TemplateTaskPlugin(environment_name=environment_name)
 
 
 def load_task_from_module(
