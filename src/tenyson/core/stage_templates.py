@@ -17,7 +17,7 @@ SFTFormattingBuilder = Callable[[Dict[str, Any], Any], Optional[Callable[..., An
 SFTCollatorBuilder = Callable[[Dict[str, Any], Any], Optional[Any]]
 RLDatasetBuilder = Callable[[Dict[str, Any]], Dataset]
 RLRewardBuilder = Callable[[Dict[str, Any], Any], List[Callable[..., Any]]]
-EvalDatasetBuilder = Callable[[Dict[str, Any]], Dataset]
+EvalDatasetBuilder = Callable[..., Dataset]
 EvalMetricsBuilder = Callable[
     [List[str], List[str], Dataset, Dict[str, Any], Any],
     Dict[str, Any],
@@ -70,6 +70,10 @@ class EvalDatasetTemplate:
 class EvalMetricsTemplate:
     compute: EvalMetricsBuilder
     factory_ref: Optional[TemplateFactoryRef] = None
+
+
+EvalDatasetLike = EvalDatasetTemplate | EvalDatasetBuilder
+EvalMetricsLike = EvalMetricsTemplate | EvalMetricsBuilder
 
 
 def template_factory_ref(
@@ -134,6 +138,92 @@ def eval_metrics_template(
     )
 
 
+def eval_dataset_fn(
+    function: EvalDatasetBuilder,
+) -> EvalDatasetBuilder:
+    """Mark a plain function as a Tenyson eval-dataset hook.
+
+    This decorator exists for readability first. A function like
+    `build_three_digit_addition_dataset(...)` looks like an ordinary helper in a
+    task file, but Tenyson can call it as an eval-dataset hook and fill its
+    named kwargs from `config["evaluation"]`.
+
+    The decorator makes that role visible at the definition site and validates
+    the supported builder signature early.
+    """
+    _validate_eval_dataset_function_signature(
+        function,
+        label="eval dataset builder",
+    )
+    setattr(function, "__tenyson_eval_dataset_fn__", True)
+    return function
+
+
+def eval_metrics_fn(
+    function: EvalMetricsBuilder,
+) -> EvalMetricsBuilder:
+    """Mark a plain function as a Tenyson eval-metrics hook.
+
+    This decorator exists for readability first. A function like
+    `compute_addition_metrics(...)` looks like an ordinary helper in a task file,
+    but Tenyson actually calls it through a fixed 5-argument hook contract:
+    `(prompts, completions, dataset_rows, config, tokenizer)`.
+
+    The decorator makes that role visible at the definition site and validates
+    the signature early, instead of letting a bad hook fail later at runtime.
+    """
+    _validate_eval_metrics_function_signature(
+        function,
+        label="eval metrics function",
+    )
+    setattr(function, "__tenyson_eval_metrics_fn__", True)
+    return function
+
+
+def coerce_eval_dataset_template(
+    value: Optional[EvalDatasetLike],
+) -> Optional[EvalDatasetTemplate]:
+    if value is None or isinstance(value, EvalDatasetTemplate):
+        return value
+    if not callable(value):
+        raise TypeError(
+            "eval dataset must be an EvalDatasetTemplate or a callable builder."
+        )
+    _validate_eval_dataset_function_signature(
+        value,
+        label="eval dataset builder",
+    )
+    return EvalDatasetTemplate(
+        build=value,
+        factory_ref=_callable_template_factory_ref(
+            value,
+            label="eval dataset builder",
+        ),
+    )
+
+
+def coerce_eval_metrics_template(
+    value: Optional[EvalMetricsLike],
+) -> Optional[EvalMetricsTemplate]:
+    if value is None or isinstance(value, EvalMetricsTemplate):
+        return value
+    if not callable(value):
+        raise TypeError(
+            "eval metrics must be an EvalMetricsTemplate or a callable metrics function."
+        )
+    _validate_eval_metrics_function_signature(
+        value,
+        label="eval metrics function",
+    )
+    return EvalMetricsTemplate(
+        compute=value,
+        factory_ref=_callable_template_factory_ref(
+            value,
+            label="eval metrics function",
+        ),
+    )
+
+
 def _decorate_template_factory(
     factory: Callable[..., Any],
     *,
@@ -192,6 +282,81 @@ def _validate_template_factory_signature(
             f"{label} factory {factory.__module__}.{factory.__name__} cannot use "
             f"{problem} because remote template rebuild calls it back with named kwargs."
         )
+
+
+def _validate_eval_metrics_function_signature(
+    function: Callable[..., Any],
+    *,
+    label: str,
+) -> None:
+    signature = inspect.signature(function)
+    parameters = list(signature.parameters.values())
+
+    if len(parameters) != 5:
+        raise TypeError(
+            f"{label} must accept exactly 5 positional parameters: "
+            "prompts, completions, dataset_rows, config, tokenizer."
+        )
+
+    for parameter in parameters:
+        if parameter.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            raise TypeError(
+                f"{label} must use only normal positional parameters. "
+                "Do not use positional-only, keyword-only, *args, or **kwargs."
+            )
+
+
+def _validate_eval_dataset_function_signature(
+    function: Callable[..., Any],
+    *,
+    label: str,
+) -> None:
+    signature = inspect.signature(function)
+    parameters = list(signature.parameters.values())
+
+    if _is_legacy_eval_config_builder(parameters):
+        return
+
+    for parameter in parameters:
+        if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                f"{label} cannot use positional-only parameters."
+            )
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            raise TypeError(
+                f"{label} cannot use *args."
+            )
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            raise TypeError(
+                f"{label} cannot use **kwargs."
+            )
+
+
+def _callable_template_factory_ref(
+    value: Callable[..., Any],
+    *,
+    label: str,
+) -> TemplateFactoryRef:
+    module_name = str(getattr(value, "__module__", "") or "").strip()
+    function_name = str(getattr(value, "__name__", "") or "").strip()
+    qualname = str(getattr(value, "__qualname__", "") or "").strip()
+
+    if not module_name or not function_name:
+        raise TypeError(
+            f"{label} must be a module-level importable function."
+        )
+    if "<locals>" in qualname or function_name == "<lambda>":
+        raise TypeError(
+            f"{label} must be a module-level named function, not a lambda or nested function."
+        )
+
+    return template_factory_ref(
+        "tenyson.core.stage_templates",
+        "_eval_template_from_callable_ref",
+        module_name=module_name,
+        function_name=function_name,
+        template_kind=label,
+    )
 
 
 def has_explicit_stage_templates(
@@ -458,7 +623,7 @@ class _StageTemplateTaskAdapter(TaskPlugin):
     def get_eval_dataset(self, config: Dict[str, Any]) -> Dataset:
         if self._eval_dataset is None:
             return self._base_task.get_eval_dataset(config)
-        dataset = self._eval_dataset.build(config)
+        dataset = _call_eval_dataset_builder(self._eval_dataset.build, config)
         return _require_dataset(dataset, label="eval dataset")
 
     def compute_metrics(
@@ -592,6 +757,48 @@ def _load_template_from_payload(
     )
 
 
+def _eval_template_from_callable_ref(
+    *,
+    module_name: str,
+    function_name: str,
+    template_kind: str,
+) -> EvalDatasetTemplate | EvalMetricsTemplate:
+    module = importlib.import_module(str(module_name).strip())
+    function = getattr(module, str(function_name).strip())
+
+    if not callable(function):
+        raise TypeError(
+            f"{template_kind} {module_name}.{function_name} is not callable."
+        )
+
+    if template_kind == "eval dataset builder":
+        return EvalDatasetTemplate(
+            build=function,
+            factory_ref=template_factory_ref(
+                "tenyson.core.stage_templates",
+                "_eval_template_from_callable_ref",
+                module_name=module_name,
+                function_name=function_name,
+                template_kind=template_kind,
+            ),
+        )
+    if template_kind == "eval metrics function":
+        return EvalMetricsTemplate(
+            compute=function,
+            factory_ref=template_factory_ref(
+                "tenyson.core.stage_templates",
+                "_eval_template_from_callable_ref",
+                module_name=module_name,
+                function_name=function_name,
+                template_kind=template_kind,
+            ),
+        )
+
+    raise ValueError(
+        f"Unsupported eval template kind {template_kind!r}."
+    )
+
+
 def _require_dataset(dataset: Any, *, label: str) -> Dataset:
     if not isinstance(dataset, Dataset):
         raise TypeError(
@@ -604,3 +811,65 @@ def _require_optional_dataset(dataset: Any, *, label: str) -> Optional[Dataset]:
     if dataset is None:
         return None
     return _require_dataset(dataset, label=label)
+
+
+def _call_eval_dataset_builder(
+    builder: EvalDatasetBuilder,
+    config: Dict[str, Any],
+) -> Any:
+    signature = inspect.signature(builder)
+    parameters = list(signature.parameters.values())
+
+    if not parameters:
+        return builder()
+
+    if _is_legacy_eval_config_builder(parameters):
+        legacy_parameter = parameters[0]
+        if legacy_parameter.kind == inspect.Parameter.KEYWORD_ONLY:
+            return builder(config=config)
+        return builder(config)
+
+    evaluation_config = config.get("evaluation", {})
+    if not isinstance(evaluation_config, Mapping):
+        raise TypeError('config["evaluation"] must be a mapping.')
+
+    builder_kwargs: Dict[str, Any] = {}
+    for parameter in parameters:
+        if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                "Eval dataset builders cannot use positional-only parameters."
+            )
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            raise TypeError(
+                "Eval dataset builders cannot use *args."
+            )
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            continue
+
+        parameter_name = parameter.name
+        if parameter_name in evaluation_config:
+            builder_kwargs[parameter_name] = evaluation_config[parameter_name]
+            continue
+        if parameter.default is not inspect.Signature.empty:
+            builder_kwargs[parameter_name] = parameter.default
+            continue
+        raise ValueError(
+            f'eval dataset builder {builder.__module__}.{builder.__name__} expected '
+            f'evaluation["{parameter_name}"] to be set.'
+        )
+
+    return builder(**builder_kwargs)
+
+
+def _is_legacy_eval_config_builder(
+    parameters: Sequence[inspect.Parameter],
+) -> bool:
+    if len(parameters) != 1:
+        return False
+    parameter = parameters[0]
+    if parameter.name != "config":
+        return False
+    return parameter.kind in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }

@@ -5,16 +5,7 @@ from random import Random
 from typing import Any
 
 from datasets import Dataset
-
-from tenyson import (
-    EvalDatasetTemplate,
-    EvalMetricsTemplate,
-    eval_dataset_template,
-    eval_metrics_template,
-)
-
-_DEFAULT_EVAL_SAMPLES = 100  # e.g. 100 eval rows
-_DEFAULT_EVAL_SEED = 7  # e.g. 7
+from tenyson import eval_dataset_fn, eval_metrics_fn
 
 _STRICT_ANSWER_RE = re.compile(
     r"^\s*<answer>\s*([0-9]+)\s*</answer>\s*$",
@@ -25,54 +16,6 @@ _ANSWER_TAG_RE = re.compile(
     r"<answer>\s*([0-9]+)\s*</answer>",
     re.IGNORECASE | re.DOTALL,
 )  # tag-extraction regex for text like "reasoning... <answer>906</answer>"
-
-
-def build_three_digit_addition_dataset(
-    *,
-    sample_count: int,
-    # sample_count example:
-    # 100
-    seed: int,
-    # seed example:
-    # 7
-) -> Dataset:
-    """Build a synthetic eval set of unique 3-digit addition problems.
-
-    Each row looks like:
-    {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
-    """
-    rng = Random(seed)  # e.g. Random(7)
-    rows: list[dict[str, int | str]] = []
-    # rows example:
-    # [{"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}]
-    seen_problems: set[tuple[int, int]] = set()  # {(314, 592), (408, 177)}
-
-    while len(rows) < sample_count:
-        left = rng.randint(100, 999)  # e.g. 314
-        right = rng.randint(100, 999)  # e.g. 592
-        problem = (left, right)  # e.g. (314, 592)
-        if problem in seen_problems:
-            continue
-
-        seen_problems.add(problem)
-        rows.append(
-            {
-                "id": len(rows),
-                "left": left,
-                "right": right,
-                "expected_answer": str(left + right),
-                "prompt": (
-                    "You are solving a 3-digit addition problem.\n"
-                    "Work it out carefully.\n"
-                    "Reply with the final sum inside <answer>...</answer>.\n"
-                    "Do not return anything else.\n\n"
-                    f"Problem: {left} + {right}"
-                ),
-            }
-        )
-
-    return Dataset.from_list(rows)
-
 
 def parse_answer(completion_text: str) -> str | None:
     # completion_text example:
@@ -170,9 +113,62 @@ def summarize_addition_results(
     }
 
 
+@eval_dataset_fn
+def build_three_digit_addition_dataset(
+    *,
+    sample_count: int,
+    # sample_count example:
+    # 100
+    seed: int,
+    # seed example:
+    # 7
+) -> Dataset:
+    """Build a synthetic eval set of unique 3-digit addition problems.
+
+    `@eval_dataset_fn` is here to make the Tenyson hook contract visible in this
+    file. This function is not just a normal helper: the eval runner can call it
+    as a dataset hook and fill its named kwargs from `config["evaluation"]`.
+
+    Each row looks like:
+    {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
+    """
+    rng = Random(seed)  # e.g. Random(7)
+    rows: list[dict[str, int | str]] = []
+    # rows example:
+    # [{"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}]
+    seen_problems: set[tuple[int, int]] = set()  # {(314, 592), (408, 177)}
+
+    while len(rows) < sample_count:
+        left = rng.randint(100, 999)  # e.g. 314
+        right = rng.randint(100, 999)  # e.g. 592
+        problem = (left, right)  # e.g. (314, 592)
+        if problem in seen_problems:
+            continue
+
+        seen_problems.add(problem)
+        rows.append(
+            {
+                "id": len(rows),
+                "left": left,
+                "right": right,
+                "expected_answer": str(left + right),
+                "prompt": (
+                    "You are solving a 3-digit addition problem.\n"
+                    "Work it out carefully.\n"
+                    "Reply with the final sum inside <answer>...</answer>.\n"
+                    "Do not return anything else.\n\n"
+                    f"Problem: {left} + {right}"
+                ),
+            }
+        )
+
+    return Dataset.from_list(rows)
+
+
+@eval_metrics_fn
 def compute_addition_metrics(
-    prompts: list[str],
-    # prompts example:
+    _prompts: list[str],
+    # _prompts example:
     # ["You are solving a 3-digit addition problem...\n\nProblem: 314 + 592"]
     completions: list[str],
     # completions example:
@@ -180,17 +176,22 @@ def compute_addition_metrics(
     dataset_rows: Dataset,
     # each row looks like:
     # {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
-    config: dict[str, Any],
-    # config example:
-    # {"task": {"eval_samples": 100, "eval_seed": 7}}
-    tokenizer: Any,
-    # tokenizer example:
+    _config: dict[str, Any],
+    # _config example:
+    # {"evaluation": {"sample_count": 100, "seed": 7}}
+    _tokenizer: Any,
+    # _tokenizer example:
     # a Hugging Face tokenizer object for the eval model, e.g. Qwen tokenizer
 ) -> dict[str, Any]:
     """Compute eval metrics for 3-digit addition.
 
+    `@eval_metrics_fn` is here to make the Tenyson hook contract visible in this
+    file. This function is not just a normal helper: the eval runner calls it
+    with `(prompts, completions, dataset_rows, config, tokenizer)`, and the
+    decorator validates that signature early.
+
     config example:
-    {"task": {"eval_samples": 100, "eval_seed": 7}}
+    {"evaluation": {"sample_count": 100, "seed": 7}}
 
     Returns:
     {
@@ -216,8 +217,6 @@ def compute_addition_metrics(
         ],
     }
     """
-    del prompts, config, tokenizer
-
     detailed_results: list[dict[str, Any]] = []
     # detailed_results example:
     # [{"id": 0, "left": 314, "right": 592, "expected_answer": "906",
@@ -242,23 +241,3 @@ def compute_addition_metrics(
         "metrics": metrics,
         "detailed_results": detailed_results,
     }
-
-
-@eval_dataset_template
-def three_digit_addition_eval_dataset() -> EvalDatasetTemplate:
-    return EvalDatasetTemplate(
-        # config example: {"task": {"eval_samples": 100, "eval_seed": 7}}
-        build=lambda config: build_three_digit_addition_dataset(
-            sample_count=int(
-                config.get("task", {}).get("eval_samples", _DEFAULT_EVAL_SAMPLES)
-            ),  # e.g. 100
-            seed=int(config.get("task", {}).get("eval_seed", _DEFAULT_EVAL_SEED)),  # e.g. 7
-        ),
-    )
-
-
-@eval_metrics_template
-def three_digit_addition_metrics() -> EvalMetricsTemplate:
-    return EvalMetricsTemplate(
-        compute=compute_addition_metrics,
-    )

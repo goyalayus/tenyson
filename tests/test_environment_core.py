@@ -15,6 +15,9 @@ from tenyson.core.stage_templates import (
     RLRewardTemplate,
     RLDatasetTemplate,
     bind_stage_templates_from_config,
+    eval_dataset_fn,
+    eval_dataset_template,
+    eval_metrics_fn,
     template_factory_ref,
 )
 from tenyson.experiment import AdapterRef, ConfigTemplates, ExperimentSession
@@ -65,6 +68,30 @@ def _serialized_eval_metrics_template() -> EvalMetricsTemplate:
             "count": len(prompts),
         },
         factory_ref=template_factory_ref(__name__, "_serialized_eval_metrics_template"),
+    )
+
+
+@eval_dataset_fn
+def _dataset_from_sample_count(*, sample_count: int) -> Dataset:
+    return Dataset.from_dict({"value": [f"sample-count:{sample_count}"]})
+
+
+@eval_metrics_fn
+def _plain_eval_metrics(
+    prompts,
+    completions,
+    dataset_rows,
+    config,
+    tokenizer,
+):
+    del dataset_rows, config, tokenizer
+    return {"source": "plain", "count": len(prompts), "completions": len(completions)}
+
+
+@eval_dataset_template
+def _decorated_eval_dataset_template() -> EvalDatasetTemplate:
+    return EvalDatasetTemplate(
+        build=_dataset_from_sample_count
     )
 
 
@@ -226,6 +253,330 @@ class EnvironmentCoreTests(unittest.TestCase):
         self.assertEqual(output, ["formatted:user"])
         tokenizer.apply_chat_template.assert_called_once()
 
+    def test_eval_dataset_template_reads_named_kwargs_from_evaluation_section(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "plain_eval_builder",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=_decorated_eval_dataset_template(),
+            overrides={"evaluation": {"sample_count": 12}},
+        )
+
+        self.assertEqual(
+            stage.task.get_eval_dataset(stage.config)[0]["value"],
+            "sample-count:12",
+        )
+
+    def test_eval_metrics_fn_rejects_bad_signature_early(self) -> None:
+        with self.assertRaisesRegex(
+            TypeError,
+            "must accept exactly 5 positional parameters",
+        ):
+            @eval_metrics_fn
+            def _bad_metrics(completions, dataset_rows):
+                del completions, dataset_rows
+                return {"metrics": {}}
+
+    def test_eval_dataset_fn_rejects_var_kwargs_early(self) -> None:
+        with self.assertRaisesRegex(
+            TypeError,
+            "cannot use \\*\\*kwargs",
+        ):
+            @eval_dataset_fn
+            def _bad_dataset_builder(**kwargs):
+                del kwargs
+                return _dataset_for("bad")
+
+    def test_eval_stage_accepts_plain_module_level_functions(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "plain_functions",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=_dataset_from_sample_count,
+            metrics=_plain_eval_metrics,
+            overrides={"evaluation": {"sample_count": 11}},
+        )
+
+        self.assertEqual(
+            stage.task.get_eval_dataset(stage.config)[0]["value"],
+            "sample-count:11",
+        )
+        self.assertEqual(
+            stage.task.compute_metrics(
+                prompts=["a", "b"],
+                completions=["x", "y"],
+                dataset_rows=_dataset_for("plain"),
+                config=stage.config,
+                tokenizer=None,
+            ),
+            {"source": "plain", "count": 2, "completions": 2},
+        )
+
+        payload = stage.config.get(STAGE_TEMPLATE_CONFIG_KEY)
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(
+            payload["eval_dataset"]["factory"],
+            "_eval_template_from_callable_ref",
+        )
+        self.assertEqual(
+            payload["eval_metrics"]["factory"],
+            "_eval_template_from_callable_ref",
+        )
+
+        rebound_task = bind_stage_templates_from_config(DummyTask(), stage.config)
+        self.assertEqual(
+            rebound_task.get_eval_dataset(stage.config)[0]["value"],
+            "sample-count:11",
+        )
+        self.assertEqual(
+            rebound_task.compute_metrics(
+                prompts=["a"],
+                completions=["x"],
+                dataset_rows=_dataset_for("plain"),
+                config=stage.config,
+                tokenizer=None,
+            ),
+            {"source": "plain", "count": 1, "completions": 1},
+        )
+
+    def test_eval_stage_rejects_lambda_dataset_builder(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        with self.assertRaisesRegex(TypeError, "module-level named function"):
+            session.eval(
+                "lambda_dataset",
+                adapter=AdapterRef(repo_id="org/base", revision="main"),
+                dataset=lambda *, sample_count: _dataset_for(f"lambda:{sample_count}"),
+            )
+
+    def test_eval_dataset_template_requires_missing_evaluation_parameter(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "missing_eval_parameter",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=_decorated_eval_dataset_template(),
+            overrides={"evaluation": {}},
+        )
+
+        with self.assertRaisesRegex(ValueError, 'evaluation\\["sample_count"\\]'):
+            stage.task.get_eval_dataset(stage.config)
+
+    def test_legacy_eval_dataset_builder_with_config_still_works(self) -> None:
+        @eval_dataset_template
+        def _legacy_eval_dataset_template() -> EvalDatasetTemplate:
+            return EvalDatasetTemplate(
+                build=lambda config: _dataset_for(
+                    f'legacy:{config["evaluation"]["sample_count"]}'
+                )
+            )
+
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "legacy_eval_builder",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=_legacy_eval_dataset_template(),
+            overrides={"evaluation": {"sample_count": 5}},
+        )
+
+        self.assertEqual(
+            stage.task.get_eval_dataset(stage.config)[0]["value"],
+            "legacy:5",
+        )
+
     def test_explicit_stage_templates_override_task_behavior_without_default_run_overrides(self) -> None:
         class DummyTask(TaskPlugin):
             def get_run_config_overrides(self, run_type, *, variant=None):
@@ -366,6 +717,68 @@ class EnvironmentCoreTests(unittest.TestCase):
                 tokenizer=None,
             ),
             {"source": "serialized", "count": 3},
+        )
+
+    def test_decorated_eval_template_auto_infers_factory_ref_for_round_trip(self) -> None:
+        class DummyTask(TaskPlugin):
+            def get_sft_dataset(self, config, tokenizer):
+                del config, tokenizer
+                return _dataset_for("base-sft")
+
+            def get_rl_dataset(self, config):
+                del config
+                return _dataset_for("base-rl")
+
+            def get_reward_funcs(self, config, tokenizer):
+                del config, tokenizer
+                return [lambda prompts, completions, **kwargs: [0.0 for _ in completions]]
+
+            def get_eval_dataset(self, config):
+                del config
+                return _dataset_for("base-eval")
+
+            def compute_metrics(
+                self,
+                prompts,
+                completions,
+                dataset_rows,
+                config,
+                tokenizer,
+            ):
+                del prompts, completions, dataset_rows, config, tokenizer
+                return {"source": "base"}
+
+        session = ExperimentSession(
+            task=DummyTask(),
+            templates=ConfigTemplates(
+                {
+                    "sft": {"training": {}, "task": {}},
+                    "rl": {"training": {}, "task": {}, "model": {}},
+                    "eval": {"evaluation": {}, "task": {}, "model": {}},
+                }
+            ),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.eval(
+            "decorated_eval",
+            adapter=AdapterRef(repo_id="org/base", revision="main"),
+            dataset=_decorated_eval_dataset_template(),
+            overrides={"evaluation": {"sample_count": 9}},
+        )
+
+        payload = stage.config.get(STAGE_TEMPLATE_CONFIG_KEY)
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["eval_dataset"]["module"], __name__)
+        self.assertEqual(
+            payload["eval_dataset"]["factory"],
+            "_decorated_eval_dataset_template",
+        )
+
+        rebound_task = bind_stage_templates_from_config(DummyTask(), stage.config)
+        self.assertEqual(
+            rebound_task.get_eval_dataset(stage.config)[0]["value"],
+            "sample-count:9",
         )
 
 

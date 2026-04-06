@@ -25,13 +25,13 @@ from tenyson.reporting.builder import ReportBuilder
 def _templates() -> ConfigTemplates:
     return ConfigTemplates(
         {
-            "sft": {"training": {}, "task": {}},
+            "sft": {"training": {}, "task": {}, "model": {"name": "base-model"}},
             "rl": {
                 "training": {"epochs": 1},
                 "task": {"min_history_turns": 1},
                 "model": {"name": "base-model"},
             },
-            "eval": {"evaluation": {}, "task": {}, "model": {}},
+            "eval": {"evaluation": {}, "task": {}, "model": {"name": "base-model"}},
         }
     )
 
@@ -223,6 +223,7 @@ class ExperimentSessionTests(unittest.TestCase):
         self.assertEqual(
             stage.config["model"],
             {
+                "name": "base-model",
                 "init_artifact_type": "full_model",
                 "init_model_repo": "repo/full-model",
                 "init_model_revision": "sha456",
@@ -230,6 +231,48 @@ class ExperimentSessionTests(unittest.TestCase):
         )
         self.assertNotIn("init_adapter_repo", stage.config["model"])
         self.assertNotIn("init_adapter_revision", stage.config["model"])
+
+    def test_stage_building_allows_config_template_model_without_explicit_artifact(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+
+        stage = session.rl(
+            "baseline_rl",
+            run_name="baseline_rl",
+        )
+
+        self.assertEqual(
+            stage.config["model"],
+            {
+                "name": "base-model",
+            },
+        )
+
+    def test_stage_building_rejects_missing_artifact_when_config_has_no_model_source(self) -> None:
+        templates = ConfigTemplates(
+            {
+                "sft": {"training": {}, "task": {}, "model": {}},
+                "rl": {"training": {"epochs": 1}, "task": {"min_history_turns": 1}, "model": {}},
+                "eval": {"evaluation": {}, "task": {}, "model": {}},
+            }
+        )
+        session = ExperimentSession(
+            task=object(),
+            templates=templates,
+            cloud_factory=lambda: object(),
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            'has no model source for eval\\(\\)',
+        ):
+            session.eval(
+                "baseline_eval",
+                run_name="baseline_eval",
+            )
 
     def test_require_artifact_preserves_result_artifact_type(self) -> None:
         session = ExperimentSession(

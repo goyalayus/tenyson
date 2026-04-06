@@ -1,3 +1,8 @@
+evaluation:
+  batch_size: 32
+  sample_count: 100
+  seed: 7
+
 model:
   # Tenyson currently supports Qwen 3 family base models only.
   name: "unsloth/qwen3-4b-unsloth-bnb-4bit"

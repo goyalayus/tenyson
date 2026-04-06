@@ -27,12 +27,16 @@ from tenyson.core.controller_runtime import (
 from tenyson.core.environment import bind_environment_run
 from tenyson.core.stage_templates import (
     EvalDatasetTemplate,
+    EvalDatasetLike,
     EvalMetricsTemplate,
+    EvalMetricsLike,
     RLRewardTemplate,
     RLDatasetTemplate,
     SFTDatasetTemplate,
     STAGE_TEMPLATE_CONFIG_KEY,
     bind_stage_templates,
+    coerce_eval_dataset_template,
+    coerce_eval_metrics_template,
     has_explicit_stage_templates,
     serialize_stage_templates,
 )
@@ -166,18 +170,13 @@ def _resolve_stage_artifact(
     run_type: str,
     adapter: Optional[AdapterRef],
     artifact: Optional[AdapterRef],
-) -> AdapterRef:
+) -> Optional[AdapterRef]:
     if adapter is not None and artifact is not None:
         raise ValueError(
             f'Stage "{stage_id}" passed both adapter= and artifact= to {run_type}().'
         )
 
-    resolved = artifact if artifact is not None else adapter
-    if resolved is None:
-        raise TypeError(
-            f'Stage "{stage_id}" must provide adapter= or artifact= to {run_type}().'
-        )
-    return resolved
+    return artifact if artifact is not None else adapter
 
 
 def _apply_stage_artifact_config(
@@ -202,6 +201,31 @@ def _apply_stage_artifact_config(
 
     model_cfg["init_adapter_repo"] = artifact.repo_id
     model_cfg["init_adapter_revision"] = artifact.revision
+
+
+def _has_stage_model_source(config: Dict[str, Any]) -> bool:
+    model_cfg = config.get("model", {})
+    if not isinstance(model_cfg, Mapping):
+        return False
+
+    model_name = str(model_cfg.get("name") or "").strip()
+    init_adapter_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+    init_model_repo = str(model_cfg.get("init_model_repo") or "").strip()
+    return bool(model_name or init_adapter_repo or init_model_repo)
+
+
+def _require_stage_model_source(
+    *,
+    config: Dict[str, Any],
+    stage_id: str,
+    run_type: str,
+) -> None:
+    if _has_stage_model_source(config):
+        return
+    raise TypeError(
+        f'Stage "{stage_id}" has no model source for {run_type}(). '
+        "Either pass adapter=/artifact= or set model.name / model.init_* in the config."
+    )
 
 
 def _ensure_stage_attempt_token(stage: StageSpec) -> str:
@@ -1298,8 +1322,8 @@ class ExperimentSession:
         run_name: Optional[str] = None,
         output_dir: Optional[str] = None,
         overrides: Optional[Mapping[str, Any]] = None,
-        dataset: Optional[EvalDatasetTemplate] = None,
-        metrics: Optional[EvalMetricsTemplate] = None,
+        dataset: Optional[EvalDatasetLike] = None,
+        metrics: Optional[EvalMetricsLike] = None,
     ) -> StageSpec:
         resolved_artifact = _resolve_stage_artifact(
             stage_id=stage_id,
@@ -1307,6 +1331,8 @@ class ExperimentSession:
             adapter=adapter,
             artifact=artifact,
         )
+        resolved_dataset = coerce_eval_dataset_template(dataset)
+        resolved_metrics = coerce_eval_metrics_template(metrics)
         return self._build_stage(
             stage_id=stage_id,
             base=base,
@@ -1322,8 +1348,8 @@ class ExperimentSession:
             sft_dataset=None,
             rl_dataset=None,
             rl_reward=None,
-            eval_dataset=dataset,
-            eval_metrics=metrics,
+            eval_dataset=resolved_dataset,
+            eval_metrics=resolved_metrics,
         )
 
     def run_stage(self, stage: StageSpec, *, cloud: Optional[Any] = None) -> JobResult:
@@ -1569,6 +1595,11 @@ class ExperimentSession:
             section_cfg["output_dir"] = f"./outputs/{resolved_run_name}"
 
         _apply_stage_artifact_config(config, artifact)
+        _require_stage_model_source(
+            config=config,
+            stage_id=stage_id,
+            run_type=run_type,
+        )
         if resolved_environment_run is not None:
             bind_environment_run(config, resolved_environment_run)
         serialized_stage_templates = serialize_stage_templates(
