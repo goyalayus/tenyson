@@ -330,6 +330,7 @@ class SFTJob:
                 experiment_id,
                 run_name,
                 "sft",
+                attempt_token=attempt_token,
             )
         except Exception as exc:  # noqa: BLE001
             print(
@@ -600,6 +601,7 @@ class SFTJob:
                 experiment_id=experiment_id,
                 phase="sft",
                 client=telemetry_client,
+                attempt_token=attempt_token,
             )
         )
         if report_to == "wandb" or (

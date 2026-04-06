@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -77,6 +78,20 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(task, "spec-task")
         load_task_from_spec_mock.assert_called_once_with("module.path:Task")
         load_task_mock.assert_not_called()
+
+    def test_task_file_spec_adds_parent_directory_to_sys_path_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            sys,
+            "path",
+            ["/already-present"],
+        ):
+            task_spec = os.path.join(tmpdir, "functional.py")
+
+            runner_module._maybe_add_task_module_parent_to_sys_path(task_spec)
+            runner_module._maybe_add_task_module_parent_to_sys_path(task_spec)
+
+            self.assertEqual(sys.path[0], tmpdir)
+            self.assertEqual(sys.path.count(tmpdir), 1)
 
     def test_main_builds_rl_job_and_applies_resume_checkpoint(self) -> None:
         with patch.object(runner_module, "require_gpu_provider_runtime"), patch.object(

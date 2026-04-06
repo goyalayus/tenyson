@@ -446,10 +446,10 @@ class EvalStopTests(unittest.TestCase):
         ), patch.object(
             telemetry_module,
             "start_run_heartbeat",
-        ), patch.object(
+        ) as start_run_heartbeat_mock, patch.object(
             telemetry_module,
             "beat_run_heartbeat",
-        ), patch.object(
+        ) as beat_run_heartbeat_mock, patch.object(
             telemetry_module,
             "run_stop_requested",
             side_effect=[False, True],
@@ -488,6 +488,20 @@ class EvalStopTests(unittest.TestCase):
         self.assertEqual(len(task.last_rows), 1)
         self.assertEqual(generate_batch_mock.call_count, 1)
         self.assertEqual(run_stop_requested_mock.call_count, 2)
+        start_run_heartbeat_mock.assert_called_once_with(
+            fake_client,
+            "wordle_exp",
+            "eval_test",
+            "eval",
+            attempt_token="attempt-eval",
+        )
+        beat_run_heartbeat_mock.assert_called_once_with(
+            client=fake_client,
+            experiment_id="wordle_exp",
+            run_id="eval_test",
+            phase="eval",
+            attempt_token="attempt-eval",
+        )
         run_stop_requested_mock.assert_called_with(
             fake_client,
             experiment_id="wordle_exp",

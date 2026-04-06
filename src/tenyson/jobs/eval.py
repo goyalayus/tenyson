@@ -375,6 +375,7 @@ class EvalJob:
                 experiment_id,
                 run_name,
                 "eval",
+                attempt_token=attempt_token,
             )
         except Exception as exc:  # noqa: BLE001
             print(
@@ -415,6 +416,7 @@ class EvalJob:
                         experiment_id=experiment_id,
                         run_id=run_name,
                         phase="eval",
+                        attempt_token=attempt_token,
                     )
                     last_heartbeat_at = now
                     heartbeat_warned = False

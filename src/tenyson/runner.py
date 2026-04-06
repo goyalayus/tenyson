@@ -18,6 +18,24 @@ def _resolve_task(spec: str):
     return load_task_from_spec(spec)
 
 
+def _maybe_add_task_module_parent_to_sys_path(spec: str) -> None:
+    """Make sibling imports from a task file importable on remote workers.
+
+    Example:
+    `examples/arithmetic/experiment.py` may import hooks with
+    `from functional import build_three_digit_addition_dataset`.
+    Those hook refs serialize as module `functional`, so the remote runner needs
+    the task file's parent directory on `sys.path` before it rebinds templates.
+    """
+    if not (spec.endswith(".py") or "/" in spec or "\\" in spec):
+        return
+
+    task_path = os.path.abspath(spec)
+    task_dir = os.path.dirname(task_path)
+    if task_dir and task_dir not in sys.path:
+        sys.path.insert(0, task_dir)
+
+
 def _maybe_fast_exit_after_cloud_rl_job(job_type: str, result: object) -> None:
     if job_type != "rl":
         return
@@ -55,6 +73,7 @@ def main() -> None:
     config = load_config(config_path)
     if args.resume_from_checkpoint and args.job_type in ("sft", "rl"):
         config.setdefault("training", {})["resume_from_checkpoint"] = args.resume_from_checkpoint
+    _maybe_add_task_module_parent_to_sys_path(args.task_module)
     task = _resolve_task(args.task_module)
     task = bind_stage_templates_from_config(task, config)
 

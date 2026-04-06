@@ -154,6 +154,7 @@ def _upsert_run_heartbeat(
     *,
     status: str,
     is_active: bool,
+    attempt_token: Optional[str] = None,
     provider: Optional[str] = None,
     reset_created_at: bool = False,
 ) -> None:
@@ -168,6 +169,8 @@ def _upsert_run_heartbeat(
             wandb_store.SUMMARY_EXPERIMENT_ID: str(experiment_id),
             wandb_store.SUMMARY_PHASE: str(phase),
             wandb_store.SUMMARY_RUN_NAME: str(run_id),
+            wandb_store.SUMMARY_ATTEMPT_TOKEN: str(attempt_token or "").strip()
+            or None,
             wandb_store.SUMMARY_STATUS: str(status),
             wandb_store.SUMMARY_IS_ACTIVE: bool(is_active),
             wandb_store.SUMMARY_PROVIDER: _heartbeat_provider(provider),
@@ -182,6 +185,7 @@ def start_run_heartbeat(
     run_id: str,
     phase: str,
     *,
+    attempt_token: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> None:
     _upsert_run_heartbeat(
@@ -191,6 +195,7 @@ def start_run_heartbeat(
         phase,
         status="running",
         is_active=True,
+        attempt_token=attempt_token,
         provider=provider,
         reset_created_at=True,
     )
@@ -202,6 +207,7 @@ def beat_run_heartbeat(
     run_id: str,
     phase: str,
     *,
+    attempt_token: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> None:
     _upsert_run_heartbeat(
@@ -211,6 +217,7 @@ def beat_run_heartbeat(
         phase,
         status="running",
         is_active=True,
+        attempt_token=attempt_token,
         provider=provider,
         reset_created_at=False,
     )
@@ -223,6 +230,7 @@ def finish_run_heartbeat(
     phase: str,
     *,
     status: str,
+    attempt_token: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> None:
     _upsert_run_heartbeat(
@@ -232,6 +240,7 @@ def finish_run_heartbeat(
         phase,
         status=status,
         is_active=False,
+        attempt_token=attempt_token,
         provider=provider,
         reset_created_at=False,
     )
@@ -741,6 +750,7 @@ class RunHeartbeatTelemetryCallback(TrainerCallback):
         phase: str,
         client: TelemetryClient,
         *,
+        attempt_token: Optional[str] = None,
         provider: Optional[str] = None,
         min_interval_seconds: float = 10.0,
     ):
@@ -748,6 +758,7 @@ class RunHeartbeatTelemetryCallback(TrainerCallback):
         self.experiment_id = experiment_id
         self.phase = phase
         self.client = client
+        self.attempt_token = str(attempt_token or "").strip() or None
         self.provider = provider
         self.min_interval_seconds = max(0.1, float(min_interval_seconds))
         self._last_beat_at = 0.0
@@ -763,6 +774,7 @@ class RunHeartbeatTelemetryCallback(TrainerCallback):
                 experiment_id=self.experiment_id,
                 run_id=self.run_id,
                 phase=self.phase,
+                attempt_token=self.attempt_token,
                 provider=self.provider,
             )
             self._last_beat_at = now
