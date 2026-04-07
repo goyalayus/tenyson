@@ -7,45 +7,94 @@ from typing import Any
 from datasets import Dataset
 from tenyson import eval_dataset_fn, eval_metrics_fn
 
-_STRICT_ANSWER_RE = re.compile(
-    r"^\s*<answer>\s*([0-9]+)\s*</answer>\s*$",
-    re.IGNORECASE | re.DOTALL,
-)  # full-match regex for replies like "<answer>906</answer>"
+_ANSWER_PREFIX = "<answer>"
+_ANSWER_SUFFIX = "</answer>"
 
-_ANSWER_TAG_RE = re.compile(
-    r"<answer>\s*([0-9]+)\s*</answer>",
+_STRICT_ANSWER_RE = re.compile(
+    rf"^\s*([0-9]+)\s*{re.escape(_ANSWER_SUFFIX)}\s*$",
     re.IGNORECASE | re.DOTALL,
-)  # tag-extraction regex for text like "reasoning... <answer>906</answer>"
+)  # full-match regex for the intended tail-only form like "6859</answer>"
+
+_ANSWER_TEXT_RE = re.compile(
+    rf"(?:{re.escape(_ANSWER_PREFIX)}\s*)?([0-9]+)\s*{re.escape(_ANSWER_SUFFIX)}",
+    re.IGNORECASE | re.DOTALL,
+)  # extraction regex for text like "906</answer>" or "reasoning... <answer>906</answer>"
+
+
+def build_addition_prompt(
+    digits: int,
+    left: int,
+    right: int,
+) -> str:
+    """Build the human-readable prompt shown to metrics, logs, and reviewers."""
+
+    # digits example:
+    # 4
+    # left example:
+    # 4312
+    # right example:
+    # 2547
+    return (
+        f"You are solving a {digits}-digit addition problem.\n"
+        "Do not show your working.\n"
+        f"Reply only with digits inside {_ANSWER_PREFIX}...{_ANSWER_SUFFIX}.\n\n"
+        f"Problem: {left} + {right}"
+    )
+
+
+def build_addition_messages(prompt_text: str) -> list[dict[str, str]]:
+    """Build the generation messages with the answer tag already opened."""
+
+    # prompt_text example:
+    # "You are solving a 4-digit addition problem...\nProblem: 4312 + 2547"
+    return [
+        {"role": "user", "content": prompt_text},
+        {"role": "assistant", "content": _ANSWER_PREFIX},
+    ]
+
 
 def parse_answer(completion_text: str) -> str | None:
+    """Extract the answer digits from either the tail-only or full-tag reply."""
+
     # completion_text example:
-    # "<answer>906</answer>"
-    match = _ANSWER_TAG_RE.search(completion_text)
+    # "6859</answer>" or "reasoning... <answer>6859</answer>"
+    match = _ANSWER_TEXT_RE.search(completion_text)
     # match example:
-    # regex match for "<answer>906</answer>", or None
+    # regex match for "6859</answer>" or "<answer>6859</answer>", or None
     if match is None:
         return None
+
     return str(int(match.group(1)))
+
+
+def has_strict_answer_format(completion_text: str) -> bool:
+    """Accept only the tail-only form because `<answer>` is prefilled."""
+
+    # completion_text example:
+    # "6859</answer>"
+    return _STRICT_ANSWER_RE.match(completion_text) is not None
 
 
 def score_addition_completion(
     completion_text: str,
     # completion_text example:
-    # "<answer>906</answer>"
-    row: dict[str, int | str],
+    # "6859</answer>" or "<answer>6859</answer>"
+    row: dict[str, Any],
     # row example:
-    # {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
+    # {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+    #  "prompt": "...", "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "<answer>"}]}
 ) -> dict[str, Any]:
     """Score one model completion against one addition problem.
 
     Returns:
-    {"id": 0, "left": 314, "right": 592, "expected_answer": "906",
-     "completion": "<answer>906</answer>", "parsed_answer": "906",
+    {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+     "completion": "6859</answer>", "parsed_answer": "6859",
      "format_ok": True, "exact_match": True, "absolute_error": 0}
     """
-    expected_answer = str(row["expected_answer"])  # e.g. "906"
-    parsed_answer = parse_answer(completion_text)  # e.g. "906" or None
-    format_ok = _STRICT_ANSWER_RE.match(completion_text) is not None  # e.g. True
+
+    expected_answer = str(row["expected_answer"])  # e.g. "6859"
+    parsed_answer = parse_answer(completion_text)  # e.g. "6859" or None
+    format_ok = has_strict_answer_format(completion_text)  # e.g. True
     absolute_error: int | None = None
     # absolute_error example:
     # 0 when parsed_answer is "906", or None when parsing fails
@@ -71,8 +120,8 @@ def score_addition_completion(
 def summarize_addition_results(
     row_results: list[dict[str, Any]],
     # row_results example:
-    # [{"id": 0, "left": 314, "right": 592, "expected_answer": "906",
-    #   "completion": "<answer>906</answer>", "parsed_answer": "906",
+    # [{"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+    #   "completion": "6859</answer>", "parsed_answer": "6859",
     #   "format_ok": True, "exact_match": True, "absolute_error": 0}]
     *,
     total_samples: int,
@@ -85,6 +134,7 @@ def summarize_addition_results(
     {"format_accuracy": 0.91, "exact_match_accuracy": 0.84,
      "avg_abs_error": 3.6, "parsed_answer_rate": 0.95, "total_samples": 100}
     """
+
     format_matches = 0  # e.g. 91
     exact_matches = 0  # e.g. 84
     parsed_answers = 0  # e.g. 95
@@ -92,8 +142,8 @@ def summarize_addition_results(
 
     for row in row_results:
         # row example:
-        # {"id": 0, "left": 314, "right": 592, "expected_answer": "906",
-        #  "completion": "<answer>906</answer>", "parsed_answer": "906",
+        # {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+        #  "completion": "6859</answer>", "parsed_answer": "6859",
         #  "format_ok": True, "exact_match": True, "absolute_error": 0}
         if bool(row["format_ok"]):
             format_matches += 1
@@ -113,9 +163,11 @@ def summarize_addition_results(
     }
 
 
-@eval_dataset_fn
-def build_three_digit_addition_dataset(
+def _build_addition_dataset(
     *,
+    digits: int,
+    # digits example:
+    # 4
     sample_count: int,
     # sample_count example:
     # 100
@@ -123,42 +175,48 @@ def build_three_digit_addition_dataset(
     # seed example:
     # 7
 ) -> Dataset:
-    """Build a synthetic eval set of unique 3-digit addition problems.
-
-    `@eval_dataset_fn` is here to make the Tenyson hook contract visible in this
-    file. This function is not just a normal helper: the eval runner can call it
-    as a dataset hook and fill its named kwargs from `config["evaluation"]`.
+    """Build a synthetic eval set of unique fixed-width addition problems.
 
     Each row looks like:
-    {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
+    {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+     "prompt": "...\nProblem: 4312 + 2547",
+     "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "<answer>"}]}
     """
+
+    min_value = 10 ** max(digits - 1, 0)  # e.g. 1000 for 4-digit
+    max_value = (10**digits) - 1  # e.g. 9999 for 4-digit
     rng = Random(seed)  # e.g. Random(7)
-    rows: list[dict[str, int | str]] = []
+    rows: list[dict[str, Any]] = []
     # rows example:
-    # [{"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}]
-    seen_problems: set[tuple[int, int]] = set()  # {(314, 592), (408, 177)}
+    # [{"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+    #   "prompt": "...\nProblem: 4312 + 2547",
+    #   "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "<answer>"}]}]
+    seen_problems: set[tuple[int, int]] = set()  # {(4312, 2547), (9081, 1776)}
 
     while len(rows) < sample_count:
-        left = rng.randint(100, 999)  # e.g. 314
-        right = rng.randint(100, 999)  # e.g. 592
-        problem = (left, right)  # e.g. (314, 592)
+        left = rng.randint(min_value, max_value)  # e.g. 4312
+        right = rng.randint(min_value, max_value)  # e.g. 2547
+        problem = (left, right)  # e.g. (4312, 2547)
+
         if problem in seen_problems:
             continue
 
         seen_problems.add(problem)
+        prompt_text = build_addition_prompt(digits, left, right)
+        # prompt_text example:
+        # "You are solving a 4-digit addition problem...\nProblem: 4312 + 2547"
+        messages = build_addition_messages(prompt_text)
+        # messages example:
+        # [{"role": "user", "content": "You are solving a 4-digit addition problem...\nProblem: 4312 + 2547"},
+        #  {"role": "assistant", "content": "<answer>"}]
         rows.append(
             {
                 "id": len(rows),
                 "left": left,
                 "right": right,
                 "expected_answer": str(left + right),
-                "prompt": (
-                    "You are solving a 3-digit addition problem.\n"
-                    "Work it out carefully.\n"
-                    "Reply with the final sum inside <answer>...</answer>.\n"
-                    "Do not return anything else.\n\n"
-                    f"Problem: {left} + {right}"
-                ),
+                "prompt": prompt_text,
+                "messages": messages,
             }
         )
 
@@ -169,13 +227,15 @@ def build_three_digit_addition_dataset(
 def compute_addition_metrics(
     _prompts: list[str],
     # _prompts example:
-    # ["You are solving a 3-digit addition problem...\n\nProblem: 314 + 592"]
+    # ["You are solving a 4-digit addition problem...\nProblem: 4312 + 2547"]
     completions: list[str],
     # completions example:
-    # ["<answer>906</answer>", "<answer>111</answer>"]
+    # ["6859</answer>", "1111</answer>"]
     dataset_rows: Dataset,
     # each row looks like:
-    # {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
+    # {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+    #  "prompt": "...\nProblem: 4312 + 2547",
+    #  "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "<answer>"}]}
     _config: dict[str, Any],
     # _config example:
     # {"evaluation": {"sample_count": 100, "seed": 7}}
@@ -183,11 +243,11 @@ def compute_addition_metrics(
     # _tokenizer example:
     # a Hugging Face tokenizer object for the eval model, e.g. Qwen tokenizer
 ) -> dict[str, Any]:
-    """Compute eval metrics for 3-digit addition.
+    """Compute eval metrics for addition.
 
-    `@eval_metrics_fn` is here to make the Tenyson hook contract visible in this
-    file. This function is not just a normal helper: the eval runner calls it
-    with `(prompts, completions, dataset_rows, config, tokenizer)`, and the
+    `@eval_metrics_fn` makes the Tenyson hook contract visible in this file.
+    The eval runner calls this with
+    `(prompts, completions, dataset_rows, config, tokenizer)`, and the
     decorator validates that signature early.
 
     config example:
@@ -205,11 +265,11 @@ def compute_addition_metrics(
         "detailed_results": [
             {
                 "id": 0,
-                "left": 314,
-                "right": 592,
-                "expected_answer": "906",
-                "completion": "<answer>906</answer>",
-                "parsed_answer": "906",
+                "left": 4312,
+                "right": 2547,
+                "expected_answer": "6859",
+                "completion": "6859</answer>",
+                "parsed_answer": "6859",
                 "format_ok": True,
                 "exact_match": True,
                 "absolute_error": 0,
@@ -217,16 +277,20 @@ def compute_addition_metrics(
         ],
     }
     """
+
     detailed_results: list[dict[str, Any]] = []
     # detailed_results example:
-    # [{"id": 0, "left": 314, "right": 592, "expected_answer": "906",
-    #   "completion": "<answer>906</answer>", "parsed_answer": "906",
+    # [{"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+    #   "completion": "6859</answer>", "parsed_answer": "6859",
     #   "format_ok": True, "exact_match": True, "absolute_error": 0}]
+
     for completion_text, row in zip(completions, dataset_rows):
         # completion_text example:
-        # "<answer>906</answer>"
+        # "6859</answer>"
         # row example:
-        # {"id": 0, "left": 314, "right": 592, "expected_answer": "906", "prompt": "..."}
+        # {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859",
+        #  "prompt": "...\nProblem: 4312 + 2547",
+        #  "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "<answer>"}]}
         detailed_results.append(score_addition_completion(completion_text, row))
 
     metrics = summarize_addition_results(
@@ -241,3 +305,51 @@ def compute_addition_metrics(
         "metrics": metrics,
         "detailed_results": detailed_results,
     }
+
+
+@eval_dataset_fn
+def build_three_digit_addition_dataset(
+    *,
+    sample_count: int,
+    # sample_count example:
+    # 100
+    seed: int,
+    # seed example:
+    # 7
+) -> Dataset:
+    """Build a synthetic eval set of unique 3-digit addition problems.
+
+    `@eval_dataset_fn` makes the Tenyson hook contract visible in this file.
+    The eval runner can call this function and fill its named kwargs from
+    `config["evaluation"]`.
+    """
+
+    return _build_addition_dataset(
+        digits=3,
+        sample_count=sample_count,
+        seed=seed,
+    )
+
+
+@eval_dataset_fn
+def build_four_digit_addition_dataset(
+    *,
+    sample_count: int,
+    # sample_count example:
+    # 100
+    seed: int,
+    # seed example:
+    # 7
+) -> Dataset:
+    """Build a synthetic eval set of unique 4-digit addition problems.
+
+    `@eval_dataset_fn` makes the Tenyson hook contract visible in this file.
+    The eval runner can call this function and fill its named kwargs from
+    `config["evaluation"]`.
+    """
+
+    return _build_addition_dataset(
+        digits=4,
+        sample_count=sample_count,
+        seed=seed,
+    )

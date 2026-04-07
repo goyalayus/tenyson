@@ -1,0 +1,15 @@
+pyyaml
+datasets
+unsloth
+vllm
+huggingface_hub
+sqlalchemy
+psycopg[binary]
+boto3
+wandb
+
+[cloud]
+modal
+
+[viz]
+matplotlib
