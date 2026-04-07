@@ -1,0 +1,11 @@
+{
+  "name": "wordle-hardening-20260327-2157",
+  "pid": 7623,
+  "command": [
+    "python3",
+    "examples/wordle/experiment.py"
+  ],
+  "cwd": "/home/ayush/Desktop/code/tenyson",
+  "log_path": "/home/ayush/Desktop/code/tenyson/.tenyson/controllers/wordle-hardening-20260327-2157.log",
+  "launched_at": "2026-03-27T18:07:59.004981+00:00"
+}
