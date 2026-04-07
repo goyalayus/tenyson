@@ -11,6 +11,13 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import uuid4
 
+from datasets import Dataset
+
+from tenyson.core.chat_generation import (
+    merge_stop_strings,
+    prepare_generation_prompts,
+    resolve_generation_stop_strings,
+)
 from tenyson.core.hf_adapter import (
     download_hf_lora_adapter,
     resolve_hf_lora_runtime_kwargs,
@@ -31,6 +38,8 @@ from tenyson.jobs.reporting_utils import normalize_report_to
 from tenyson.jobs.result import JobResult
 from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
 
+_RAW_PROMPT_COLUMN = "_tenyson_raw_prompt"
+
 
 def _resolve_grpo_max_completion_length(
     train_cfg: Dict[str, Any],
@@ -49,6 +58,8 @@ def _resolve_grpo_max_completion_length(
 def _build_vllm_generation_kwargs(
     tokenizer: Any,
     vllm_cfg: Dict[str, Any],
+    *,
+    stop_strings: Sequence[str] | None = None,
 ) -> Optional[Dict[str, Any]]:
     if not vllm_cfg.get("enabled", False):
         return None
@@ -56,9 +67,12 @@ def _build_vllm_generation_kwargs(
     generation_kwargs: Dict[str, Any] = {
         "include_stop_str_in_output": True,
     }
-    eos_token = getattr(tokenizer, "eos_token", None)
-    if eos_token is not None:
-        generation_kwargs["stop"] = [eos_token]
+    resolved_stop_strings = merge_stop_strings(
+        [tokenizer.eos_token] if getattr(tokenizer, "eos_token", None) is not None else [],
+        stop_strings or [],
+    )
+    if resolved_stop_strings:
+        generation_kwargs["stop"] = resolved_stop_strings
     return generation_kwargs
 
 
@@ -67,6 +81,7 @@ def _build_vllm_sampling_params_kwargs(
     vllm_cfg: Dict[str, Any],
     *,
     seed: int,
+    stop_strings: Sequence[str] | None = None,
 ) -> Optional[Dict[str, Any]]:
     if not vllm_cfg.get("enabled", False):
         return None
@@ -80,9 +95,12 @@ def _build_vllm_sampling_params_kwargs(
     min_p = vllm_cfg.get("min_p")
     if min_p is not None:
         sampling_kwargs["min_p"] = float(min_p)
-    eos_token = getattr(tokenizer, "eos_token", None)
-    if eos_token is not None:
-        sampling_kwargs["stop"] = [eos_token]
+    resolved_stop_strings = merge_stop_strings(
+        [tokenizer.eos_token] if getattr(tokenizer, "eos_token", None) is not None else [],
+        stop_strings or [],
+    )
+    if resolved_stop_strings:
+        sampling_kwargs["stop"] = resolved_stop_strings
     return sampling_kwargs
 
 
@@ -92,6 +110,7 @@ def _build_grpo_vllm_overrides(
     *,
     seed: int = 3407,
     prefer_explicit_sampling_params: bool = False,
+    stop_strings: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     if not vllm_cfg.get("enabled", False):
         return {}
@@ -108,6 +127,7 @@ def _build_grpo_vllm_overrides(
                 tokenizer,
                 vllm_cfg,
                 seed=seed,
+                stop_strings=stop_strings,
             )
             if sampling_kwargs is not None:
                 overrides["vllm_sampling_params"] = SamplingParams(**sampling_kwargs)
@@ -118,7 +138,11 @@ def _build_grpo_vllm_overrides(
         min_p = vllm_cfg.get("min_p")
         overrides["min_p"] = float(min_p) if min_p is not None else None
 
-        generation_kwargs = _build_vllm_generation_kwargs(tokenizer, vllm_cfg)
+        generation_kwargs = _build_vllm_generation_kwargs(
+            tokenizer,
+            vllm_cfg,
+            stop_strings=stop_strings,
+        )
         if generation_kwargs is not None:
             overrides["generation_kwargs"] = generation_kwargs
     return overrides
@@ -486,6 +510,103 @@ def _coerce_logged_text(value: Any) -> str:
     return str(value)
 
 
+def _resolve_reward_raw_prompts(
+    prompts: List[Any],
+    kwargs: Dict[str, Any],
+    prompt_lookup: Dict[str, str],
+) -> List[Any]:
+    raw_prompt_values = kwargs.get(_RAW_PROMPT_COLUMN)
+    if isinstance(raw_prompt_values, Sequence) and not isinstance(
+        raw_prompt_values,
+        (str, bytes),
+    ):
+        if len(raw_prompt_values) == len(prompts):
+            return list(raw_prompt_values)
+
+    return [
+        _restore_raw_prompt(prompt, prompt_lookup)
+        for prompt in prompts
+    ]
+
+
+def _restore_raw_prompt(
+    prompt: Any,
+    prompt_lookup: Dict[str, str],
+) -> Any:
+    lookup_key = _coerce_logged_text(prompt)
+    return prompt_lookup.get(lookup_key, prompt)
+
+
+def _normalize_reward_kwargs(
+    kwargs: Dict[str, Any],
+    raw_prompts: List[Any],
+) -> Dict[str, Any]:
+    normalized_kwargs = dict(kwargs)
+    normalized_kwargs["prompt"] = list(raw_prompts)
+    normalized_kwargs[_RAW_PROMPT_COLUMN] = list(raw_prompts)
+    return normalized_kwargs
+
+
+def _filter_reward_kwargs_for_callable(
+    signature: inspect.Signature,
+    kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    accepted_kwargs: Dict[str, Any] = {}
+    # accepted_kwargs example:
+    # {"answer": ["906", "1111"]}
+    for name, parameter in signature.parameters.items():
+        if name in {"prompts", "completions"}:
+            continue
+        if parameter.kind not in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            continue
+        if name in kwargs:
+            accepted_kwargs[name] = kwargs[name]
+
+    return accepted_kwargs
+
+
+def _prepare_rl_generation_dataset(
+    dataset: Dataset,
+    tokenizer: Any,
+    config: Dict[str, Any],
+) -> tuple[Dataset, Dict[str, str]]:
+    prepared_prompts = prepare_generation_prompts(
+        dataset,
+        tokenizer=tokenizer,
+        config=config,
+    )
+
+    updated_rows: List[Dict[str, Any]] = []
+    prompt_lookup: Dict[str, str] = {}
+    dataset_changed = False
+
+    for row, prepared_prompt in zip(dataset, prepared_prompts):
+        updated_row = dict(row)
+        updated_row["prompt"] = prepared_prompt.generation_prompt
+        updated_row[_RAW_PROMPT_COLUMN] = prepared_prompt.raw_prompt_text
+        updated_rows.append(updated_row)
+
+        original_prompt = row.get("prompt")
+        if (
+            original_prompt != prepared_prompt.generation_prompt
+            or row.get(_RAW_PROMPT_COLUMN) != prepared_prompt.raw_prompt_text
+        ):
+            dataset_changed = True
+
+        if prepared_prompt.generation_prompt != prepared_prompt.raw_prompt_text:
+            prompt_lookup[prepared_prompt.generation_prompt] = (
+                prepared_prompt.raw_prompt_text
+            )
+
+    if not dataset_changed:
+        return dataset, prompt_lookup
+
+    return Dataset.from_list(updated_rows), prompt_lookup
+
+
 class _RewardTelemetryCollector:
     def __init__(
         self,
@@ -629,20 +750,47 @@ def _wrap_reward_func_for_telemetry(
     *,
     component_name: str,
     collector: _RewardTelemetryCollector,
+    prompt_lookup: Optional[Dict[str, str]] = None,
 ) -> Callable[..., Any]:
+    resolved_prompt_lookup = dict(prompt_lookup or {})
+    reward_call_signature = inspect.signature(base_func)
+    reward_accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in reward_call_signature.parameters.values()
+    )
+
+    def _callable_reward_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if reward_accepts_kwargs:
+            return dict(kwargs)
+        return _filter_reward_kwargs_for_callable(reward_call_signature, kwargs)
+
     if asyncio.iscoroutinefunction(base_func):
 
         @functools.wraps(base_func)
         async def wrapped(
             prompts: List[Any], completions: List[Any], **kwargs: Any
         ) -> Any:
-            rewards = await base_func(prompts, completions, **kwargs)
+            raw_prompts = _resolve_reward_raw_prompts(
+                prompts,
+                kwargs,
+                resolved_prompt_lookup,
+            )
+            normalized_kwargs = _normalize_reward_kwargs(
+                kwargs,
+                raw_prompts,
+            )
+            callable_kwargs = _callable_reward_kwargs(normalized_kwargs)
+            rewards = await base_func(
+                raw_prompts,
+                completions,
+                **callable_kwargs,
+            )
             collector.record_component(
                 component_name=component_name,
-                prompts=prompts,
+                prompts=raw_prompts,
                 completions=completions,
                 rewards=rewards,
-                kwargs=kwargs,
+                kwargs=normalized_kwargs,
             )
             return rewards
 
@@ -650,13 +798,27 @@ def _wrap_reward_func_for_telemetry(
 
         @functools.wraps(base_func)
         def wrapped(prompts: List[Any], completions: List[Any], **kwargs: Any) -> Any:
-            rewards = base_func(prompts, completions, **kwargs)
+            raw_prompts = _resolve_reward_raw_prompts(
+                prompts,
+                kwargs,
+                resolved_prompt_lookup,
+            )
+            normalized_kwargs = _normalize_reward_kwargs(
+                kwargs,
+                raw_prompts,
+            )
+            callable_kwargs = _callable_reward_kwargs(normalized_kwargs)
+            rewards = base_func(
+                raw_prompts,
+                completions,
+                **callable_kwargs,
+            )
             collector.record_component(
                 component_name=component_name,
-                prompts=prompts,
+                prompts=raw_prompts,
                 completions=completions,
                 rewards=rewards,
-                kwargs=kwargs,
+                kwargs=normalized_kwargs,
             )
             return rewards
 
@@ -1046,6 +1208,11 @@ class RLJob:
 
         print("[RLJob] Loading RL dataset via TaskPlugin...", flush=True)
         dataset = self.task.get_rl_dataset(self.config)
+        dataset, prompt_lookup = _prepare_rl_generation_dataset(
+            dataset,
+            tokenizer,
+            self.config,
+        )
         print(f"[RLJob] Loaded {len(dataset)} examples.", flush=True)
         if _stop_requested_now():
             return _finalize_result(
@@ -1105,12 +1272,14 @@ class RLJob:
 
         accepted = set(inspect.signature(GRPOConfig.__init__).parameters.keys())
         use_explicit_vllm_sampling_params = "vllm_sampling_params" in accepted
+        configured_stop_strings = resolve_generation_stop_strings(self.config)
         cfg_kwargs.update(
             _build_grpo_vllm_overrides(
                 tokenizer,
                 effective_vllm_cfg,
                 seed=int(train_cfg.get("seed", 3407)),
                 prefer_explicit_sampling_params=use_explicit_vllm_sampling_params,
+                stop_strings=configured_stop_strings,
             )
         )
         if "vllm_sampling_params" in cfg_kwargs:
@@ -1193,6 +1362,7 @@ class RLJob:
                     reward_func,
                     component_name=component_name,
                     collector=reward_telemetry_collector,
+                    prompt_lookup=prompt_lookup,
                 )
                 for reward_func, component_name in zip(
                     reward_funcs,
