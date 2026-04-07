@@ -11,7 +11,6 @@ from urllib.request import urlopen
 from datasets import Dataset
 from tenyson.core.chat_sft import hub_chat_sft_dataset
 from tenyson.core.environment import merge_config_overrides
-from tenyson.core.plugin import TemplateTaskPlugin
 from tenyson.core.stage_templates import (
     EvalDatasetTemplate,
     EvalMetricsTemplate,
@@ -20,8 +19,6 @@ from tenyson.core.stage_templates import (
     SFTDatasetTemplate,
     template_factory_ref,
 )
-from tenyson.experiment import AdapterRef
-
 # ==============================================================================
 # PROMPTS
 # ==============================================================================
@@ -1256,43 +1253,3 @@ def prime_metrics(*, word_source: Optional[str] = None) -> EvalMetricsTemplate:
 def _validate_turn(turn: int) -> None:
     if int(turn) < 1 or int(turn) > 6:
         raise ValueError(f"Wordle turn must be within 1..6, got {turn}.")
-
-
-# Public API defaults — inline these in experiment.py overrides if preferred.
-def sft_defaults() -> Dict[str, Any]:
-    return {
-        "training": {
-            "loss_on_assistant_only": True,
-            "response_template": "<|im_start|>assistant\n",
-        },
-        "task": {
-            "sft_dataset": _DEFAULT_SFT_DATASET,
-        },
-    }
-
-
-def rl_defaults() -> Dict[str, Any]:
-    return {
-        "task": {
-            "synthetic_samples": 4096,
-        }
-    }
-
-
-def eval_defaults() -> Dict[str, Any]:
-    return {
-        "task": {
-            "eval_samples": 100,
-            "eval_seed": 42,
-        }
-    }
-
-
-TASK = TemplateTaskPlugin(environment_name="wordle")
-
-SEEDS = {
-    "experiment2_sft": AdapterRef(
-        repo_id="goyalayus/wordle-lora-20260324-163252-sft_main",
-        revision="30a33278640fcc5bcce216adce59984bfb8f7698",
-    )
-}

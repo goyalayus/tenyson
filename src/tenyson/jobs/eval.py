@@ -9,6 +9,12 @@ from tenyson.core.hf_adapter import (
     strict_load_hf_lora_adapter_weights,
 )
 from tenyson.core.hf_checkpoint import resolve_hf_repo_revision
+from tenyson.core.chat_generation import (
+    extract_raw_prompt_texts,
+    merge_stop_strings,
+    prepare_generation_prompts,
+    resolve_generation_stop_strings,
+)
 from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
@@ -288,8 +294,13 @@ class EvalJob:
             kwargs["top_k"] = int(vllm_cfg["top_k"])
         if vllm_cfg.get("min_p") is not None:
             kwargs["min_p"] = float(vllm_cfg["min_p"])
-        if getattr(tokenizer, "eos_token", None) is not None:
-            kwargs["stop"] = [tokenizer.eos_token]
+        stop_strings = merge_stop_strings(
+            [tokenizer.eos_token] if getattr(tokenizer, "eos_token", None) is not None else [],
+            resolve_generation_stop_strings(self.config),
+        )
+        if stop_strings:
+            kwargs["include_stop_str_in_output"] = True
+            kwargs["stop"] = stop_strings
         return SamplingParams(**kwargs)
 
     def _resolve_model_device(self, model: Any) -> Any:
@@ -325,7 +336,19 @@ class EvalJob:
         return [out.outputs[0].text for out in outputs]
 
     def _extract_prompts(self, dataset: Any) -> List[str]:
-        return [row["prompt"] for row in dataset]
+        return extract_raw_prompt_texts(dataset)
+
+    def _build_generation_prompts(
+        self,
+        dataset: Any,
+        tokenizer: Any,
+    ) -> List[str]:
+        prepared_prompts = prepare_generation_prompts(
+            dataset,
+            tokenizer=tokenizer,
+            config=self.config,
+        )
+        return [prompt.generation_prompt for prompt in prepared_prompts]
 
     def run(self) -> JobResult:
         require_gpu_provider_runtime()
@@ -395,6 +418,10 @@ class EvalJob:
 
             sampling_params = self._build_sampling_params(tokenizer)
             all_prompts: Sequence[str] = self._extract_prompts(dataset)
+            generation_prompts: Sequence[str] = self._build_generation_prompts(
+                dataset,
+                tokenizer,
+            )
 
             batch_size = int(self.config.get("evaluation", {}).get("batch_size", 32))
             batch_size = max(1, batch_size)
@@ -445,7 +472,7 @@ class EvalJob:
                 flush=True,
             )
             _heartbeat(force=True)
-            for start_idx in range(0, len(all_prompts), batch_size):
+            for start_idx in range(0, len(generation_prompts), batch_size):
                 if _should_stop():
                     stop_requested = True
                     print(
@@ -454,8 +481,9 @@ class EvalJob:
                         flush=True,
                     )
                     break
-                end_idx = min(start_idx + batch_size, len(all_prompts))
-                batch_prompts = list(all_prompts[start_idx:end_idx])
+                end_idx = min(start_idx + batch_size, len(generation_prompts))
+                batch_prompts = list(generation_prompts[start_idx:end_idx])
+                batch_raw_prompts = list(all_prompts[start_idx:end_idx])
 
                 batch_completions = self._generate_batch(
                     model,
@@ -464,7 +492,7 @@ class EvalJob:
                     sampling_params,
                 )
                 processed_completions.extend(batch_completions)
-                processed_prompts.extend(batch_prompts)
+                processed_prompts.extend(batch_raw_prompts)
                 _heartbeat(force=False)
 
                 if _should_stop():
@@ -479,7 +507,7 @@ class EvalJob:
 
             # Only pass the processed subset through to metrics.
             processed_samples = len(processed_prompts)
-            expected_samples = len(all_prompts)
+            expected_samples = len(generation_prompts)
             processed_dataset = dataset.select(range(processed_samples))
             results = self.task.compute_metrics(
                 processed_prompts,
