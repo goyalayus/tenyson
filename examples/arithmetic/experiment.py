@@ -1,5 +1,5 @@
 from functional import (
-    build_three_digit_addition_dataset,
+    build_four_digit_addition_dataset,
     compute_addition_metrics,
 )
 from tenyson import run_experiment
@@ -8,11 +8,18 @@ from tenyson import run_experiment
 def build(exp):
     exp.eval(
         "baseline",
-        dataset=build_three_digit_addition_dataset,
+        dataset=build_four_digit_addition_dataset,
         metrics=compute_addition_metrics,
         overrides={
+            "model": {
+                "name": "Qwen/Qwen3-0.6B",
+            },
+            "chat_template": {
+                "enable_thinking": False,
+                "stop_strings": ["</answer>"],
+            },
             "vllm": {
-                "max_tokens": 32,
+                "max_tokens": 64,
             },
         },
     )
