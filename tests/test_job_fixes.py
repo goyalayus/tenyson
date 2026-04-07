@@ -12,6 +12,7 @@ from datasets import Dataset
 import torch
 
 import tenyson.core.telemetry as telemetry_module
+from tenyson.core.chat_generation import prepare_generation_prompts
 from tenyson.core.chat_sft import load_hub_chat_sft_train_eval_split
 from tenyson.core.telemetry import RLRolloutTracker
 import tenyson.jobs.eval as eval_module
@@ -23,15 +24,18 @@ from tenyson.jobs.eval import (
     _resolve_eval_model_load_kwargs,
 )
 from tenyson.jobs.rl import (
+    _RAW_PROMPT_COLUMN,
     _build_grpo_vllm_overrides,
     _build_vllm_sampling_params_kwargs,
     _build_vllm_generation_kwargs,
     _ensure_trl_vllm_guided_decoding_compat,
     _ensure_trl_vllm_sampling_params_compat,
+    _prepare_rl_generation_dataset,
     _RewardTelemetryCollector,
     _require_rl_vllm_config,
     _resolve_unsloth_model_load_kwargs,
     _resolve_grpo_max_completion_length,
+    _wrap_reward_func_for_telemetry,
     RLJob,
 )
 from tenyson.jobs.reporting_utils import normalize_report_to
@@ -65,6 +69,169 @@ def _write_temp_word_source(tmpdir: str) -> str:
     payload = "\n".join(words) + "\n"
     source_path.write_text(payload, encoding="utf-8")
     return str(source_path)
+
+
+class _FakeChatTokenizer:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def apply_chat_template(self, messages, **kwargs):
+        recorded_messages = [dict(message) for message in messages]
+        self.calls.append(
+            {
+                "messages": recorded_messages,
+                **dict(kwargs),
+            }
+        )
+        last_user_message = next(
+            (
+                str(message["content"])
+                for message in reversed(recorded_messages)
+                if message.get("role") == "user"
+            ),
+            "",
+        )
+        last_assistant_message = next(
+            (
+                str(message["content"])
+                for message in reversed(recorded_messages)
+                if message.get("role") == "assistant"
+            ),
+            "",
+        )
+        if kwargs.get("continue_final_message"):
+            return (
+                f"CHAT_CONTINUE::{last_user_message}::assistant="
+                f"{last_assistant_message}::thinking="
+                f"{kwargs.get('enable_thinking', 'default')}"
+            )
+        return (
+            f"CHAT::{last_user_message}::thinking="
+            f"{kwargs.get('enable_thinking', 'default')}"
+        )
+
+
+class ChatGenerationPromptTests(unittest.TestCase):
+    def test_prepare_generation_prompts_wraps_plain_prompt_with_chat_template(self) -> None:
+        tokenizer = _FakeChatTokenizer()
+
+        prepared_prompts = prepare_generation_prompts(
+            [{"prompt": "What is 2 + 2?"}],
+            tokenizer,
+            {
+                "chat_template": {
+                    "enabled": True,
+                    "enable_thinking": False,
+                }
+            },
+        )
+
+        self.assertEqual(len(prepared_prompts), 1)
+        self.assertEqual(prepared_prompts[0].raw_prompt_text, "What is 2 + 2?")
+        self.assertEqual(
+            prepared_prompts[0].generation_prompt,
+            "CHAT::What is 2 + 2?::thinking=False",
+        )
+        self.assertEqual(
+            tokenizer.calls,
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "What is 2 + 2?"},
+                    ],
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                    "enable_thinking": False,
+                }
+            ],
+        )
+
+    def test_prepare_generation_prompts_uses_messages_for_generation_but_prompt_for_metrics(
+        self,
+    ) -> None:
+        tokenizer = _FakeChatTokenizer()
+
+        prepared_prompts = prepare_generation_prompts(
+            [
+                {
+                    "prompt": "raw metric prompt",
+                    "messages": [
+                        {"role": "system", "content": "You are helpful."},
+                        {"role": "user", "content": "What is 2 + 2?"},
+                    ],
+                }
+            ],
+            tokenizer,
+            {"chat_template": {"enabled": True}},
+        )
+
+        self.assertEqual(prepared_prompts[0].raw_prompt_text, "raw metric prompt")
+        self.assertEqual(
+            prepared_prompts[0].generation_prompt,
+            "CHAT::What is 2 + 2?::thinking=default",
+        )
+
+    def test_prepare_generation_prompts_continues_prefilled_assistant_message(
+        self,
+    ) -> None:
+        tokenizer = _FakeChatTokenizer()
+
+        prepared_prompts = prepare_generation_prompts(
+            [
+                {
+                    "prompt": "raw metric prompt",
+                    "messages": [
+                        {"role": "user", "content": "What is 314 + 592?"},
+                        {"role": "assistant", "content": "<answer>"},
+                    ],
+                }
+            ],
+            tokenizer,
+            {"chat_template": {"enabled": True, "enable_thinking": False}},
+        )
+
+        self.assertEqual(prepared_prompts[0].raw_prompt_text, "raw metric prompt")
+        self.assertEqual(
+            prepared_prompts[0].generation_prompt,
+            "CHAT_CONTINUE::What is 314 + 592?::assistant=<answer>::thinking=False",
+        )
+        self.assertEqual(
+            tokenizer.calls,
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "What is 314 + 592?"},
+                        {"role": "assistant", "content": "<answer>"},
+                    ],
+                    "tokenize": False,
+                    "add_generation_prompt": False,
+                    "continue_final_message": True,
+                    "enable_thinking": False,
+                }
+            ],
+        )
+
+
+class EvalChatTemplatePromptTests(unittest.TestCase):
+    def test_eval_job_keeps_raw_prompts_for_metrics_but_templates_generation(self) -> None:
+        tokenizer = _FakeChatTokenizer()
+        dataset = Dataset.from_list([{"prompt": "Prompt one"}])
+        job = EvalJob(
+            config={
+                "evaluation": {"run_name": "eval_test"},
+                "chat_template": {
+                    "enabled": True,
+                    "enable_thinking": False,
+                },
+            },
+            task=object(),
+        )
+
+        self.assertEqual(job._extract_prompts(dataset), ["Prompt one"])
+        self.assertEqual(
+            job._build_generation_prompts(dataset, tokenizer),
+            ["CHAT::Prompt one::thinking=False"],
+        )
 
 
 class WordleParserTests(unittest.TestCase):
@@ -473,6 +640,10 @@ class EvalStopTests(unittest.TestCase):
             return_value=["prompt-1", "prompt-2"],
         ), patch.object(
             job,
+            "_build_generation_prompts",
+            return_value=["prompt-1", "prompt-2"],
+        ), patch.object(
+            job,
             "_generate_batch",
             side_effect=[["completion-1"]],
         ) as generate_batch_mock:
@@ -729,6 +900,123 @@ class RewardTelemetryCollectorTests(unittest.TestCase):
         self.assertAlmostEqual(second_row["reward"], -0.5)
 
 
+class RLChatTemplatePromptTests(unittest.TestCase):
+    def test_prepare_rl_generation_dataset_rewrites_prompt_and_keeps_raw_prompt_column(
+        self,
+    ) -> None:
+        tokenizer = _FakeChatTokenizer()
+        dataset = Dataset.from_list(
+            [
+                {
+                    "prompt": "Prompt one",
+                    "difficulty": "easy",
+                }
+            ]
+        )
+
+        prepared_dataset, prompt_lookup = _prepare_rl_generation_dataset(
+            dataset,
+            tokenizer,
+            {
+                "chat_template": {
+                    "enabled": True,
+                    "enable_thinking": False,
+                }
+            },
+        )
+
+        self.assertEqual(len(prepared_dataset), 1)
+        self.assertEqual(
+            prepared_dataset[0]["prompt"],
+            "CHAT::Prompt one::thinking=False",
+        )
+        self.assertEqual(
+            prepared_dataset[0][_RAW_PROMPT_COLUMN],
+            "Prompt one",
+        )
+        self.assertEqual(
+            prompt_lookup,
+            {"CHAT::Prompt one::thinking=False": "Prompt one"},
+        )
+
+    def test_reward_wrapper_restores_raw_prompt_text_before_scoring_and_logging(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def reward_func(prompts, completions, **kwargs):
+            captured["prompts"] = list(prompts)
+            captured["completions"] = list(completions)
+            captured["prompt_kw"] = list(kwargs["prompt"])
+            captured["raw_prompt_kw"] = list(kwargs[_RAW_PROMPT_COLUMN])
+            return [0.75]
+
+        collector = _RewardTelemetryCollector(
+            experiment_id="wordle_exp",
+            run_id="rl_chat_test",
+            reward_component_names=["format_exact"],
+            rollout_tracker=RLRolloutTracker(),
+        )
+        wrapped_reward = _wrap_reward_func_for_telemetry(
+            reward_func,
+            component_name="format_exact",
+            collector=collector,
+            prompt_lookup={"CHAT::Prompt one::thinking=False": "Prompt one"},
+        )
+
+        rewards = wrapped_reward(
+            ["CHAT::Prompt one::thinking=False"],
+            ["<answer>4</answer>"],
+            trainer_state=SimpleNamespace(global_step=3),
+        )
+
+        self.assertEqual(rewards, [0.75])
+        self.assertEqual(captured["prompts"], ["Prompt one"])
+        self.assertEqual(captured["completions"], ["<answer>4</answer>"])
+        self.assertEqual(captured["prompt_kw"], ["Prompt one"])
+        self.assertEqual(captured["raw_prompt_kw"], ["Prompt one"])
+
+        payload = collector.build_results_payload()
+        self.assertEqual(payload["metrics"]["total_samples"], 1)
+        self.assertEqual(
+            payload["detailed_results"][0]["prompt"],
+            "Prompt one",
+        )
+
+    def test_reward_wrapper_filters_framework_only_kwargs_for_strict_reward_funcs(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def reward_func(prompts, completions):
+            captured["prompts"] = list(prompts)
+            captured["completions"] = list(completions)
+            return [0.25]
+
+        collector = _RewardTelemetryCollector(
+            experiment_id="wordle_exp",
+            run_id="rl_chat_test",
+            reward_component_names=["format_exact"],
+            rollout_tracker=RLRolloutTracker(),
+        )
+        wrapped_reward = _wrap_reward_func_for_telemetry(
+            reward_func,
+            component_name="format_exact",
+            collector=collector,
+            prompt_lookup={"CHAT::Prompt one::thinking=False": "Prompt one"},
+        )
+
+        rewards = wrapped_reward(
+            ["CHAT::Prompt one::thinking=False"],
+            ["<answer>4</answer>"],
+            trainer_state=SimpleNamespace(global_step=3),
+        )
+
+        self.assertEqual(rewards, [0.25])
+        self.assertEqual(captured["prompts"], ["Prompt one"])
+        self.assertEqual(captured["completions"], ["<answer>4</answer>"])
+
+
 class RLConfigHelpersTests(unittest.TestCase):
     def test_resolve_grpo_max_completion_length_uses_vllm_fallback(self) -> None:
         length = _resolve_grpo_max_completion_length(
@@ -757,6 +1045,21 @@ class RLConfigHelpersTests(unittest.TestCase):
             {"include_stop_str_in_output": True, "stop": ["<eos>"]},
         )
 
+    def test_build_vllm_generation_kwargs_appends_custom_stop_strings(self) -> None:
+        kwargs = _build_vllm_generation_kwargs(
+            SimpleNamespace(eos_token="<eos>"),
+            {"enabled": True},
+            stop_strings=["</answer>"],
+        )
+
+        self.assertEqual(
+            kwargs,
+            {
+                "include_stop_str_in_output": True,
+                "stop": ["<eos>", "</answer>"],
+            },
+        )
+
     def test_build_vllm_sampling_params_kwargs_matches_reference_shape(self) -> None:
         kwargs = _build_vllm_sampling_params_kwargs(
             SimpleNamespace(eos_token="<eos>"),
@@ -778,6 +1081,31 @@ class RLConfigHelpersTests(unittest.TestCase):
                 "seed": 1234,
                 "include_stop_str_in_output": True,
                 "stop": ["<eos>"],
+            },
+        )
+
+    def test_build_vllm_sampling_params_kwargs_appends_custom_stop_strings(
+        self,
+    ) -> None:
+        kwargs = _build_vllm_sampling_params_kwargs(
+            SimpleNamespace(eos_token="<eos>"),
+            {
+                "enabled": True,
+                "top_p": 0.95,
+                "top_k": -1,
+            },
+            seed=1234,
+            stop_strings=["</answer>"],
+        )
+
+        self.assertEqual(
+            kwargs,
+            {
+                "top_p": 0.95,
+                "top_k": -1,
+                "seed": 1234,
+                "include_stop_str_in_output": True,
+                "stop": ["<eos>", "</answer>"],
             },
         )
 
@@ -1137,6 +1465,53 @@ class EvalFallbackTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Eval requires vLLM"):
             job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
+
+    def test_build_sampling_params_appends_custom_stop_strings(self) -> None:
+        module_name = "vllm"
+        original_module = sys.modules.get(module_name)
+
+        class FakeSamplingParams:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_module = ModuleType("vllm")
+        fake_module.SamplingParams = FakeSamplingParams
+        sys.modules[module_name] = fake_module
+        try:
+            job = EvalJob(
+                config={
+                    "evaluation": {"run_name": "eval_test"},
+                    "vllm": {
+                        "enabled": True,
+                        "max_tokens": 64,
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                    },
+                    "chat_template": {
+                        "stop_strings": ["</answer>"],
+                    },
+                },
+                task=object(),
+            )
+            job._vllm_runtime_enabled = True
+
+            params = job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
+
+            self.assertEqual(
+                params.kwargs,
+                {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "max_tokens": 64,
+                    "include_stop_str_in_output": True,
+                    "stop": ["<eos>", "</answer>"],
+                },
+            )
+        finally:
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
 
     def test_generate_batch_refuses_transformers_fallback(self) -> None:
         job = EvalJob(
