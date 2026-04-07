@@ -1,27 +1,28 @@
 from functional import (
     constraint_metrics,
     constraint_reward,
-    eval_defaults,
     eval_mixed_dataset,
     eval_turn_dataset,
-    rl_defaults,
     rl_mixed_dataset,
     rl_turn_dataset,
     sft_chat_dataset,
-    sft_defaults,
 )
 from tenyson import run_experiment
 
 
 def build(exp):
-    sft_overrides = sft_defaults()
-    rl_overrides = rl_defaults()
-    eval_overrides = eval_defaults()
-
     exp.sft(
         "sft_main",
         dataset=sft_chat_dataset(),
-        overrides=sft_overrides,
+        overrides={
+            "training": {
+                "loss_on_assistant_only": True,
+                "response_template": "<|im_start|>assistant\n",
+            },
+            "task": {
+                "sft_dataset": "goyalayus/wordle-reasoning-sft-prefix-keep-think",
+            },
+        },
     )
     sft_adapter = exp.adapter("sft_main")
 
@@ -30,7 +31,12 @@ def build(exp):
         adapter=sft_adapter,
         dataset=eval_mixed_dataset(),
         metrics=constraint_metrics(),
-        overrides=eval_overrides,
+        overrides={
+            "task": {
+                "eval_samples": 100,
+                "eval_seed": 42,
+            },
+        },
     )
 
     def build_mixed(branch):
@@ -39,14 +45,23 @@ def build(exp):
             adapter=sft_adapter,
             dataset=rl_mixed_dataset(),
             reward=constraint_reward(),
-            overrides=rl_overrides,
+            overrides={
+                "task": {
+                    "synthetic_samples": 4096,
+                },
+            },
         )
         branch.eval(
             "mixed_final_eval",
             adapter=branch.adapter("mixed_rl"),
             dataset=eval_mixed_dataset(),
             metrics=constraint_metrics(),
-            overrides=eval_overrides,
+            overrides={
+                "task": {
+                    "eval_samples": 100,
+                    "eval_seed": 42,
+                },
+            },
         )
 
     def build_curriculum(branch):
@@ -55,14 +70,23 @@ def build(exp):
             adapter=sft_adapter,
             dataset=rl_turn_dataset(2),
             reward=constraint_reward(),
-            overrides=rl_overrides,
+            overrides={
+                "task": {
+                    "synthetic_samples": 4096,
+                },
+            },
         )
         branch.eval(
             "curr_eval_after_t2_turn2",
             adapter=branch.adapter("curr_rl_t2"),
             dataset=eval_turn_dataset(2),
             metrics=constraint_metrics(),
-            overrides=eval_overrides,
+            overrides={
+                "task": {
+                    "eval_samples": 100,
+                    "eval_seed": 42,
+                },
+            },
         )
 
         branch.rl(
@@ -70,7 +94,11 @@ def build(exp):
             adapter=branch.adapter("curr_rl_t2"),
             dataset=rl_turn_dataset(3),
             reward=constraint_reward(),
-            overrides=rl_overrides,
+            overrides={
+                "task": {
+                    "synthetic_samples": 4096,
+                },
+            },
         )
         branch.run_parallel(
             "curr_eval_after_t3",
@@ -80,14 +108,24 @@ def build(exp):
                     adapter=branch.adapter("curr_rl_t3"),
                     dataset=eval_turn_dataset(2),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
                 branch.eval_stage(
                     "curr_eval_after_t3_turn3",
                     adapter=branch.adapter("curr_rl_t3"),
                     dataset=eval_turn_dataset(3),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
             ],
         )
@@ -97,7 +135,11 @@ def build(exp):
             adapter=branch.adapter("curr_rl_t3"),
             dataset=rl_turn_dataset(4),
             reward=constraint_reward(),
-            overrides=rl_overrides,
+            overrides={
+                "task": {
+                    "synthetic_samples": 4096,
+                },
+            },
         )
         branch.run_parallel(
             "curr_eval_after_t4",
@@ -107,14 +149,24 @@ def build(exp):
                     adapter=branch.adapter("curr_rl_t4"),
                     dataset=eval_turn_dataset(3),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
                 branch.eval_stage(
                     "curr_eval_after_t4_turn4",
                     adapter=branch.adapter("curr_rl_t4"),
                     dataset=eval_turn_dataset(4),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
             ],
         )
@@ -124,7 +176,11 @@ def build(exp):
             adapter=branch.adapter("curr_rl_t4"),
             dataset=rl_turn_dataset(5),
             reward=constraint_reward(),
-            overrides=rl_overrides,
+            overrides={
+                "task": {
+                    "synthetic_samples": 4096,
+                },
+            },
         )
         branch.run_parallel(
             "curr_eval_after_t5",
@@ -134,14 +190,24 @@ def build(exp):
                     adapter=branch.adapter("curr_rl_t5"),
                     dataset=eval_turn_dataset(4),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
                 branch.eval_stage(
                     "curr_eval_after_t5_turn5",
                     adapter=branch.adapter("curr_rl_t5"),
                     dataset=eval_turn_dataset(5),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
             ],
         )
@@ -151,7 +217,11 @@ def build(exp):
             adapter=branch.adapter("curr_rl_t5"),
             dataset=rl_turn_dataset(6),
             reward=constraint_reward(),
-            overrides=rl_overrides,
+            overrides={
+                "task": {
+                    "synthetic_samples": 4096,
+                },
+            },
         )
         branch.run_parallel(
             "curr_eval_after_t6",
@@ -161,14 +231,24 @@ def build(exp):
                     adapter=branch.adapter("curr_rl_t6"),
                     dataset=eval_turn_dataset(5),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
                 branch.eval_stage(
                     "curr_eval_after_t6_turn6",
                     adapter=branch.adapter("curr_rl_t6"),
                     dataset=eval_turn_dataset(6),
                     metrics=constraint_metrics(),
-                    overrides=eval_overrides,
+                    overrides={
+                        "task": {
+                            "eval_samples": 100,
+                            "eval_seed": 42,
+                        },
+                    },
                 ),
             ],
         )
@@ -178,7 +258,12 @@ def build(exp):
             adapter=branch.adapter("curr_rl_t6"),
             dataset=eval_mixed_dataset(),
             metrics=constraint_metrics(),
-            overrides=eval_overrides,
+            overrides={
+                "task": {
+                    "eval_samples": 100,
+                    "eval_seed": 42,
+                },
+            },
         )
 
     exp.run_branches(
