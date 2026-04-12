@@ -1,0 +1,97 @@
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+10
+
+11
+
+Indian Institute of Technology Roorkee
+Department of Physics
+MTE Thesis Report
+Analysis of Structure Light Interaction and Electrical
+Response in PEABr Two Dimensional Hybrid Perovskite
+Layers
+Submitted by Kunal Sharma
+Program Bachelor and Master of Science in Physics Fifth
+Year
+Session 2025-26
+Supervisor Monojit Bag
+Department Physics Department at IIT Roorkee
+March 2026
+Table of Contents
+Abstract
+1. Introduction
+2. Literature Background
+3. Methodology and Experimental Setup
+4. Data Analysis and Results
+5. Discussion
+6. Conclusion
+References
+Abstract
+In this work, the PEABr-based two-dimensional hybrid perovskite thin film is investigated using X-ray diffraction, UV-Vis absorption, scanning electron microscopy, dark and illuminated current-voltage measurements, and transient zero-bias photocurrent. From the XRD pattern, the structure shows well-defined low-angle reflections, which is characteristic of structural ordering. From the UV-Vis absorption spectrum, the film shows considerable absorption in the ultraviolet region. From the scanning electron microscopy images, the film is seen to be compact and polycrystalline with some possible defects. When the film is illuminated with 380 nm light, the current is seen to increase considerably compared to the dark current. From the transient measurements, the current is seen to be generated repeatedly.
+1. Introduction
+Hybrid perovskite materials have gained substantial interest in the field of optoelectronics because of their large optical absorption and relative simplicity in thin film processing. The layered and low-dimensional structures of these materials have special importance because these structures often display improved environmental stability and correlations between structure and transport. Hybrid perovskite materials have shown immense potential in ultraviolet photodetectors, in which the performance and properties of these materials can be simultaneously analyzed.
+This report aims to determine whether the film under investigation behaves like an ordered, photoactive semiconductor. The available file names indicate that the film under investigation might be a two-dimensional hybrid perovskite based on PEABr. This assumption can be made based on the diffraction pattern. However, because there are no available notes on the synthesis of the material and device fabrication, the assignment of the material remains speculative, and only the results can be discussed.
+The basic question in this report is: does the same film, which demonstrates an ordered structure in XRD and large absorbance in UV-Vis, display an electrical response to ultraviolet light? The rest of the report follows this basic hypothesis.
+2. Literature Background
+Two-dimensional hybrid perovskites are typically composed of inorganic metal halide layers with intervening bulky organic spacer cations. Such layered structures are responsible for high-intensity low-angle XRD peaks, anisotropic charge transport, and significant optical properties (Smith et al., 2014; Saparov and Mitzi, 2016; Smith et al., 2018). In thin-film-based photodetectors, however, absorption is not enough on its own, as evident in layer-based perovskite photodetectors and similar devices (Zhou et al., 2016; Qian et al., 2019; Li et al., 2022; Wang et al., 2023). An efficient photodetector film will show a low dark current at zero bias, a definite increase in current with illumination, and a similar response curve with alternating illumination conditions. Such properties, however, can be hindered by structural defects, which increase non-radiative recombination rates or disrupt charge transport pathways. Therefore, XRD, SEM, UV-Vis, and I–V measurements are most effectively analyzed in concert with one another, as opposed to individually in isolation.
+3. Methodology and Experimental Setup
+The structural data is obtained from the given XRD scan in text format. The optical absorption is obtained from the given UV-Vis data set consisting of two closely overlapping curves. The surface morphology is obtained from the given SEM image obtained at 5.00 kX magnification and a 5 μm scale bar. The electrical data is obtained from the given current-voltage scan in the dark and under 380 nm illumination in the range of -1 V to +1 V. Two time-dependent current data obtained at zero bias are used to analyze the photocurrent response.
+As the details of the fabrication process are not given in the data set, some details are not available in the data set. As a result, analysis is limited to what is directly available in the data set. For the XRD data set, the spacing is obtained by applying Bragg’s law given by nλ = 2d sin θ, where Cu Kα is used as the source in XRD (λ = 1.5406 Å). For comparing the electrical data, the current is measured at around -1.0 V, -0.5 V, 0 V, 0.5 V, and 1 V.
+The data set related to photocurrent has ‘100 mhz’ in the filename; however, the data is related to time-dependent current response, as the data is obtained over a time range of tens of seconds. As a result, the filename is not related directly to the data; however, the discussion is related to time-dependent current response.
+4. Data Analysis and Results
+4.1 X-ray Diffraction
+The pattern is characterized by a strong low-angle reflection at 5.84 degrees. The pattern also includes other reflections at 11.15, 16.49, 21.86, 27.28, and 32.75 degrees. The sequence of these reflections is characteristic of a layered structure. The initial strong reflection is due to a d-spacing of about 15.12 Å. This is physically reasonable for a material with significant interlayer distance. The presence of other reflections confirms the crystalline nature of the film and indicates that it is not an amorphous material.
+Table 1. Peak positions identified from the XRD analysis.
+2θ (deg) Relative intensity (a.u.) d-spacing (Å)
+5.84 5236120.0 15.12
+11.15 734237.3 7.93
+16.49 348061.3 5.37
+21.86 141605.3 4.06
+27.28 379802.7 3.27
+32.75 156052.0 2.73
+Figure 1. X-ray diffraction results plotted from the raw measurements.
+4.2 UV-Vis Absorption
+The UV-Vis data set includes two data points that are very close to each other. This is a reasonable level of reproducibility for optical measurements. The average absorbance peaks are around 289 nm. The absorption is significant around 379-405 nm, which is close to the 380 nm illumination source for the I-V measurement. This is a good indicator for electrical measurement purposes since the excitation source is within the absorption spectrum. The actual process of finding the band gap is not carried out since the thickness of the film and absorption coefficients are not provided.
+Figure 2. Average UV-Vis absorbance curve from 300 to 800 nm.
+4.3 SEM Morphology
+The compact film, as indicated in the SEM micrograph, has plate-like or faceted grains distributed on the surface. From the scale bar, which is 5 μm, we can determine that the lateral dimension of the grains is on the order of 1-3 μm. The film appears to be mostly continuous, with some darker areas that appear to be voids, possibly affecting transport channels. However, the surface does not appear to be cracked or broken, as indicated by the strong light-induced electrical response, although the presence of such defects will affect carrier collection.
+Figure 3. SEM micrograph of the thin film sample.
+4.4 Dark and Illuminated Current-Voltage Response
+The I-V plot confirms that there is a significant difference between the dark state and the illuminated state. At zero bias voltage, the current in the dark state is very small. When the device is subjected to 380 nm illumination, the current is much higher. At 0.5 V bias voltage, the current in the dark state is 1.176 x 10^-6 A, while in the illuminated state, it is 1.701 x 10^-4 A. At 1.0 V bias voltage, the current in the dark state is 2.558 x 10^-5 A, while in the illuminated state, it is 1.337 x 10^-3 A. The significant increase in current in the illuminated state compared to the dark state confirms the photoactivity of the material upon ultraviolet illumination. The increase in current upon illumination is due to the absorption of ultraviolet light by the material, which is converted into electrical current.
+The I-V plot also confirms that there is significant asymmetry in the current in the positive bias state compared to the negative bias state. Without the device schematic, it is not possible to ascertain the cause of the current asymmetry. However, it can be attributed to differences in the barrier potentials of the contacts. 
+Figure 4. Current-Voltage response in the dark state and in the state of illumination.
+4.5 Photocurrent
+The transient zero bias current response has shown modulation of current over time. The current response over time confirms that the photoresponse of the device is of the switching type. The current response over time remains in the nanoampere range over the specified time of 0-69 s. The current response does not remain rectangular over time. The current response over time can be due to several factors. The current response over time can also be due to the trapping of charge in the material. However, the modulation of current over time confirms that the material can produce current in the absence of bias voltage. The generation of current in the absence of bias voltage confirms that the material can separate some of the photogenerated current carriers due to built-in voltage.
+Figure 5. Time-dependent zero-bias photocurrent traces up to 69 s for 20 mW/cm^2 and 30 mW/cm^2 illumination.
+5. Discussion
+All the results obtained from the structural, optical, and electrical measurements point towards the same direction. From the XRD pattern, it is clear that the film is not amorphous. From the UV-Vis spectrum, it is evident that the film is capable of absorbing ultraviolet light, including the wavelength used for illumination. From the UV-Vis spectrum, it is evident that the film is capable of absorbing ultraviolet light, including the wavelength used for illumination. From the UV-Vis spectrum, it is evident that the film is capable of absorbing ultraviolet light, including the wavelength used for illumination.
+From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is desirable for electrical transport.
+5. Discussion
+All the results obtained from the structural, optical, and electrical measurements point towards the same direction. From the XRD pattern, it is clear that the film is not amorphous. From the UV-Vis spectrum, it is evident that the film is capable of absorbing ultraviolet light, including the wavelength used for illumination. From the UV-Vis spectrum, it is evident that the film is capable of absorbing ultraviolet light, including the wavelength used for illumination. From the UV-Vis spectrum, it is evident that the film is capable of absorbing ultraviolet light, including the wavelength used for illumination.
+From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is desirable for electrical transport. From the morphology, it is evident that the film is continuous, which is
+Overall, the film looks promising for use in ultraviolet response-based semiconducting devices. However, the current data set is more suited for mid-term characterization rather than a conclusive statement on device performance. For example, responsivity, detectivity, and response speed cannot be calculated from the data since the optical power and active area are unknown. More data, such as film thickness, active area, calibrated optical power, and multiple measurements from multiple films, would be required for more conclusive evaluation of transport and detector performance.
+6. Conclusion
+The thin film material has been found to have a structured order, exhibit optical activity in the ultraviolet region of the electromagnetic spectrum, and display electrical activity in response to 380 nm illumination. The film has been found to have a layered crystalline structure by XRD, significant ultraviolet absorption by UV-Vis spectroscopy, a predominantly polycrystalline film surface by SEM, and a significant increase in current in response to illumination by electrical measurements. Transient response has been found to confirm the presence of a measurable zero bias photocurrent response.
+The film has been found to have significant promise for use in ultraviolet response-based semiconducting devices. Further work should look to combine these characterization techniques with more device-based information, such as composition, contact information, film thickness, active area, calibrated optical power, and multiple measurements from multiple films.
+References
+Smith, I. C.; Hoke, E. T.; Solis-Ibarra, D.; McGehee, M. D.; Karunadasa, H. I. A Layered Hybrid Perovskite Solar-Cell Absorber with Enhanced Moisture Stability. Angewandte Chemie International Edition 2014, 53 (42), 11232-11235. https://doi.org/10.1002/anie.201406466.
+Saparov, B.; Mitzi, D. B. Organic-Inorganic Perovskites: Structural Versatility for Functional Materials Design. Chemical Reviews 2016, 116 (7), 4558-4596. https://doi.org/10.1021/acs.chemrev.5b00715.
+Zhou, J.; Chu, Y.; Huang, J. Photodetectors Based on Two-Dimensional Layer-Structured Hybrid Lead Iodide Perovskite Semiconductors. ACS Applied Materials and Interfaces 2016, 8 (39), 25660-25666. https://doi.org/10.1021/acsami.6b09489.
+Smith, M. D.; Crace, E. J.; Jaffe, A.; Karunadasa, H. I. The Diversity of Layered Halide Perovskites. Annual Review of Materials Research 2018, 48, 111-136. https://doi.org/10.1146/annurev-matsci-070317-124406.
+Qian, L.; Sun, Y.; Sun, M.; Fang, Z.; Li, L.; Xie, D.; Li, C.; Ding, L. 2D Perovskite Microsheets for High-Performance Photodetectors. Journal of Materials Chemistry C 2019, 7 (18), 5353-5358. https

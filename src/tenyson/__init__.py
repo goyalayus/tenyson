@@ -26,6 +26,8 @@ __all__ = [
     "run_pipeline",
     "run_experiment",
     "shared_overrides_from_env",
+    "chat_sft_dataset_fn",
+    "bind_chat_sft_dataset",
     "hub_chat_sft_dataset",
     "merge_config_overrides",
     "SFTDatasetTemplate",
@@ -33,6 +35,8 @@ __all__ = [
     "RLRewardTemplate",
     "EvalDatasetTemplate",
     "EvalMetricsTemplate",
+    "EvalMetricsContext",
+    "bind_eval_dataset",
     "eval_dataset_fn",
     "eval_metrics_fn",
     "sft_dataset_template",
@@ -68,6 +72,8 @@ _EXPORTS = {
     "run_pipeline": ("tenyson.pipeline", "run_pipeline"),
     "run_experiment": ("tenyson.core.experiment_runner", "run_experiment"),
     "shared_overrides_from_env": ("tenyson.core.run_config", "shared_overrides_from_env"),
+    "chat_sft_dataset_fn": ("tenyson.core.chat_sft", "chat_sft_dataset_fn"),
+    "bind_chat_sft_dataset": ("tenyson.core.chat_sft", "bind_chat_sft_dataset"),
     "hub_chat_sft_dataset": ("tenyson.core.chat_sft", "hub_chat_sft_dataset"),
     "merge_config_overrides": ("tenyson.core.environment", "merge_config_overrides"),
     "SFTDatasetTemplate": ("tenyson.core.stage_templates", "SFTDatasetTemplate"),
@@ -75,6 +81,8 @@ _EXPORTS = {
     "RLRewardTemplate": ("tenyson.core.stage_templates", "RLRewardTemplate"),
     "EvalDatasetTemplate": ("tenyson.core.stage_templates", "EvalDatasetTemplate"),
     "EvalMetricsTemplate": ("tenyson.core.stage_templates", "EvalMetricsTemplate"),
+    "EvalMetricsContext": ("tenyson.core.stage_templates", "EvalMetricsContext"),
+    "bind_eval_dataset": ("tenyson.core.stage_templates", "bind_eval_dataset"),
     "eval_dataset_fn": ("tenyson.core.stage_templates", "eval_dataset_fn"),
     "eval_metrics_fn": ("tenyson.core.stage_templates", "eval_metrics_fn"),
     "sft_dataset_template": ("tenyson.core.stage_templates", "sft_dataset_template"),
@@ -104,15 +112,23 @@ if TYPE_CHECKING:
     from tenyson.loader import load_config, load_task, load_task_from_spec
     from tenyson.pipeline import run_pipeline
     from tenyson.core.experiment_runner import run_experiment
-    from tenyson.core.chat_sft import hub_chat_sft_dataset
+    from tenyson.core.chat_sft import (
+        bind_chat_sft_dataset,
+        chat_sft_dataset_fn,
+        hub_chat_sft_dataset,
+    )
     from tenyson.core.run_config import shared_overrides_from_env
     from tenyson.core.environment import merge_config_overrides
     from tenyson.core.stage_templates import (
         EvalDatasetTemplate,
+        EvalMetricsContext,
         EvalMetricsTemplate,
         RLRewardTemplate,
         RLDatasetTemplate,
         SFTDatasetTemplate,
+        bind_eval_dataset,
+        bind_chat_sft_dataset,
+        chat_sft_dataset_fn,
         eval_dataset_fn,
         eval_metrics_fn,
         eval_dataset_template,
