@@ -107,6 +107,8 @@ _IGNORABLE_TRACKED_GIT_PATH_SUFFIXES = (
     ".rst",
     ".txt",
 )
+_TENYSON_SNAPSHOT_REMOTE_REF_PREFIX = "refs/heads/tenyson/runs/"
+_TENYSON_SNAPSHOT_LOCAL_REF_PREFIX = "refs/tenyson/snapshots/"
 
 
 @dataclass(frozen=True)
@@ -149,7 +151,7 @@ def _drain_subprocess_stream(
             pass
 
 
-def _tracked_git_status_paths(status_output: str) -> List[str]:
+def _git_status_paths(status_output: str) -> List[str]:
     paths: List[str] = []
     for raw_line in str(status_output or "").splitlines():
         line = raw_line.rstrip()
@@ -164,6 +166,10 @@ def _tracked_git_status_paths(status_output: str) -> List[str]:
         if normalized_path:
             paths.append(normalized_path)
     return paths
+
+
+def _tracked_git_status_paths(status_output: str) -> List[str]:
+    return _git_status_paths(status_output)
 
 
 def _is_ignorable_tracked_git_path(path: str) -> bool:
@@ -183,6 +189,19 @@ def _blocking_tracked_git_paths(status_output: str) -> List[str]:
         for path in _tracked_git_status_paths(status_output)
         if not _is_ignorable_tracked_git_path(path)
     ]
+
+
+def _blocking_git_paths(status_output: str) -> List[str]:
+    return [
+        path for path in _git_status_paths(status_output) if not _is_ignorable_tracked_git_path(path)
+    ]
+
+
+def _summarize_git_paths(paths: List[str]) -> str:
+    path_summary = ", ".join(paths[:5])
+    if len(paths) > 5:
+        path_summary = f"{path_summary}, +{len(paths) - 5} more"
+    return path_summary
 
 
 def _run_subprocess_with_streaming_logs(
@@ -555,6 +574,125 @@ def _run_git_command(repo_root: str, *args: str) -> str:
     return (result.stdout or "").strip()
 
 
+def _run_git_command_with_env(
+    repo_root: str,
+    env: Dict[str, str],
+    *args: str,
+) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        details = stderr or stdout or f"exit code {result.returncode}"
+        raise RuntimeError(f"Git command failed ({' '.join(args)}): {details}")
+    return (result.stdout or "").strip()
+
+
+def _remote_has_commit(
+    repo_root: str,
+    remote_name: str,
+    commit: str,
+) -> bool:
+    normalized_commit = str(commit or "").strip()
+    if not normalized_commit:
+        return False
+
+    ls_remote_output = _run_git_command(repo_root, "ls-remote", remote_name)
+    for raw_line in ls_remote_output.splitlines():
+        parts = raw_line.split()
+        if not parts:
+            continue
+        if parts[0] == normalized_commit:
+            return True
+    return False
+
+
+def _snapshot_commit_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    author_name = (
+        str(env.get("GIT_AUTHOR_NAME") or env.get("GIT_COMMITTER_NAME") or "").strip()
+        or "Tenyson"
+    )
+    author_email = (
+        str(env.get("GIT_AUTHOR_EMAIL") or env.get("GIT_COMMITTER_EMAIL") or "").strip()
+        or "tenyson@localhost"
+    )
+    env["GIT_AUTHOR_NAME"] = author_name
+    env["GIT_AUTHOR_EMAIL"] = author_email
+    env["GIT_COMMITTER_NAME"] = str(env.get("GIT_COMMITTER_NAME") or author_name)
+    env["GIT_COMMITTER_EMAIL"] = str(env.get("GIT_COMMITTER_EMAIL") or author_email)
+    return env
+
+
+def _build_snapshot_remote_ref(commit: str) -> str:
+    normalized_commit = str(commit or "").strip()
+    return f"{_TENYSON_SNAPSHOT_REMOTE_REF_PREFIX}{normalized_commit}"
+
+
+def _build_snapshot_local_ref(commit: str) -> str:
+    normalized_commit = str(commit or "").strip()
+    return f"{_TENYSON_SNAPSHOT_LOCAL_REF_PREFIX}{normalized_commit}"
+
+
+def _push_commit_to_remote_ref(
+    repo_root: str,
+    *,
+    remote_name: str,
+    commit: str,
+    remote_ref: str,
+) -> None:
+    local_ref = _build_snapshot_local_ref(commit)
+    _run_git_command(repo_root, "update-ref", local_ref, commit)
+    try:
+        _run_git_command(repo_root, "push", remote_name, f"{local_ref}:{remote_ref}")
+    finally:
+        with contextlib.suppress(Exception):
+            _run_git_command(repo_root, "update-ref", "-d", local_ref)
+
+
+def _create_snapshot_commit(
+    repo_root: str,
+    *,
+    parent_commit: str,
+) -> str:
+    snapshot_env = _snapshot_commit_env()
+    with tempfile.NamedTemporaryFile(
+        prefix="tenyson-git-index-",
+        delete=False,
+    ) as temp_index:
+        index_path = temp_index.name
+
+    try:
+        snapshot_env["GIT_INDEX_FILE"] = index_path
+        _run_git_command_with_env(repo_root, snapshot_env, "read-tree", parent_commit)
+        _run_git_command_with_env(repo_root, snapshot_env, "add", "-A")
+        snapshot_tree = _run_git_command_with_env(repo_root, snapshot_env, "write-tree")
+        snapshot_message = (
+            "[tenyson snapshot] "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+        return _run_git_command_with_env(
+            repo_root,
+            snapshot_env,
+            "commit-tree",
+            snapshot_tree,
+            "-p",
+            parent_commit,
+            "-m",
+            snapshot_message,
+        )
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(index_path)
+
+
 class ModalManager(BaseCloudManager):
     """
     Modal-based cloud manager.
@@ -740,27 +878,61 @@ class ModalManager(BaseCloudManager):
                 "Set TENYSON_GIT_REPO_URL if your git remote uses an unsupported format."
             )
 
-        tracked_status = _run_git_command(
+        requested_commit = str(os.getenv("TENYSON_GIT_COMMIT") or "").strip()
+        if requested_commit:
+            if _remote_has_commit(repo_root, remote_name, requested_commit):
+                return GitRepoSource(clone_url=clone_url, commit=requested_commit)
+            raise RuntimeError(
+                "TENYSON_GIT_COMMIT is set, but that commit is not reachable on the remote. "
+                "Push it first or unset TENYSON_GIT_COMMIT so Tenyson can snapshot the current "
+                f"workspace. Missing remote commit: {requested_commit}"
+            )
+
+        head_commit = _run_git_command(repo_root, "rev-parse", "HEAD")
+        working_status = _run_git_command(
             repo_root,
             "status",
             "--porcelain",
-            "--untracked-files=no",
+            "--untracked-files=all",
         )
-        blocking_paths = _blocking_tracked_git_paths(tracked_status)
-        if blocking_paths:
-            path_summary = ", ".join(blocking_paths[:5])
-            if len(blocking_paths) > 5:
-                path_summary = f"{path_summary}, +{len(blocking_paths) - 5} more"
-            raise RuntimeError(
-                "Modal execution is git-backed only. Commit tracked changes before launching "
-                "so the remote worker can run the exact pushed code. "
-                f"Blocking tracked changes: {path_summary}"
-            )
+        blocking_paths = _blocking_git_paths(working_status)
 
-        commit = str(os.getenv("TENYSON_GIT_COMMIT") or "").strip() or _run_git_command(
-            repo_root, "rev-parse", "HEAD"
+        if not blocking_paths and _remote_has_commit(repo_root, remote_name, head_commit):
+            return GitRepoSource(clone_url=clone_url, commit=head_commit)
+
+        if not blocking_paths:
+            snapshot_ref = _build_snapshot_remote_ref(head_commit)
+            print(
+                "[TENYSON] Pushing unpushed HEAD to a scratch ref for Modal launch: "
+                f"{head_commit} -> {snapshot_ref}",
+                flush=True,
+            )
+            _push_commit_to_remote_ref(
+                repo_root,
+                remote_name=remote_name,
+                commit=head_commit,
+                remote_ref=snapshot_ref,
+            )
+            return GitRepoSource(clone_url=clone_url, commit=head_commit)
+
+        snapshot_commit = _create_snapshot_commit(
+            repo_root,
+            parent_commit=head_commit,
         )
-        return GitRepoSource(clone_url=clone_url, commit=commit)
+        snapshot_ref = _build_snapshot_remote_ref(snapshot_commit)
+        print(
+            "[TENYSON] Pushing a workspace snapshot to a scratch ref for Modal launch: "
+            f"{snapshot_commit} -> {snapshot_ref} "
+            f"(paths: {_summarize_git_paths(blocking_paths)})",
+            flush=True,
+        )
+        _push_commit_to_remote_ref(
+            repo_root,
+            remote_name=remote_name,
+            commit=snapshot_commit,
+            remote_ref=snapshot_ref,
+        )
+        return GitRepoSource(clone_url=clone_url, commit=snapshot_commit)
 
     def _resolve_git_source(self, repo_root: str) -> GitRepoSource:
         with self._git_source_lock:
