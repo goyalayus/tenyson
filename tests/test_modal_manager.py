@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import io
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -131,8 +132,9 @@ class ModalManagerEnvTests(unittest.TestCase):
             mapping = {
                 ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
                 ("rev-parse", "HEAD"): "abc123",
+                ("ls-remote", "origin"): "abc123\trefs/heads/main",
             }
-            if args == ("status", "--porcelain", "--untracked-files=no"):
+            if args == ("status", "--porcelain", "--untracked-files=all"):
                 status_calls += 1
                 if status_calls > 1:
                     return " M README.md"
@@ -300,8 +302,9 @@ class ModalGitSourceTests(unittest.TestCase):
         def fake_git(repo_root: str, *args: str) -> str:
             mapping = {
                 ("remote", "get-url", "origin"): "git@github.com:goyalayus/tenyson.git",
-                ("status", "--porcelain", "--untracked-files=no"): "",
+                ("status", "--porcelain", "--untracked-files=all"): "",
                 ("rev-parse", "HEAD"): "abc123",
+                ("ls-remote", "origin"): "abc123\trefs/heads/main",
             }
             return mapping[args]
 
@@ -313,21 +316,34 @@ class ModalGitSourceTests(unittest.TestCase):
         self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
         self.assertEqual(source.commit, "abc123")
 
-    def test_resolve_git_source_rejects_dirty_tracked_changes(self) -> None:
+    def test_resolve_git_source_pushes_clean_unpushed_head_to_snapshot_ref(self) -> None:
         manager = ModalManager()
 
         def fake_git(repo_root: str, *args: str) -> str:
             mapping = {
                 ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
-                ("status", "--porcelain", "--untracked-files=no"): " M src/tenyson/cloud/modal.py",
+                ("status", "--porcelain", "--untracked-files=all"): "",
+                ("rev-parse", "HEAD"): "abc123",
+                ("ls-remote", "origin"): "def456\trefs/heads/main",
             }
             return mapping[args]
 
-        with patch("tenyson.cloud.modal._run_git_command", side_effect=fake_git), patch.dict(
-            os.environ, {}, clear=True
-        ):
-            with self.assertRaisesRegex(RuntimeError, "git-backed only"):
-                manager._resolve_git_source("/repo")
+        with patch(
+            "tenyson.cloud.modal._run_git_command",
+            side_effect=fake_git,
+        ), patch(
+            "tenyson.cloud.modal._push_commit_to_remote_ref",
+        ) as push_commit, patch.dict(os.environ, {}, clear=True):
+            source = manager._resolve_git_source("/repo")
+
+        push_commit.assert_called_once_with(
+            "/repo",
+            remote_name="origin",
+            commit="abc123",
+            remote_ref="refs/heads/tenyson/runs/abc123",
+        )
+        self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
+        self.assertEqual(source.commit, "abc123")
 
     def test_resolve_git_source_allows_ignorable_tracked_docs_changes(self) -> None:
         manager = ModalManager()
@@ -338,9 +354,10 @@ class ModalGitSourceTests(unittest.TestCase):
                 (
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ): " M README.md\n M docs/probe.md",
                 ("rev-parse", "HEAD"): "abc123",
+                ("ls-remote", "origin"): "abc123\trefs/heads/main",
             }
             return mapping[args]
 
@@ -352,7 +369,7 @@ class ModalGitSourceTests(unittest.TestCase):
         self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
         self.assertEqual(source.commit, "abc123")
 
-    def test_resolve_git_source_still_rejects_non_ignorable_changes_mixed_with_docs(self) -> None:
+    def test_resolve_git_source_snapshots_dirty_tracked_changes(self) -> None:
         manager = ModalManager()
 
         def fake_git(repo_root: str, *args: str) -> str:
@@ -361,16 +378,62 @@ class ModalGitSourceTests(unittest.TestCase):
                 (
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ): " M README.md\n M src/tenyson/cloud/modal.py",
+                ("rev-parse", "HEAD"): "abc123",
             }
             return mapping[args]
 
-        with patch("tenyson.cloud.modal._run_git_command", side_effect=fake_git), patch.dict(
-            os.environ, {}, clear=True
-        ):
-            with self.assertRaisesRegex(RuntimeError, "src/tenyson/cloud/modal.py"):
-                manager._resolve_git_source("/repo")
+        with patch(
+            "tenyson.cloud.modal._run_git_command",
+            side_effect=fake_git,
+        ), patch(
+            "tenyson.cloud.modal._create_snapshot_commit",
+            return_value="snap123",
+        ) as create_snapshot, patch(
+            "tenyson.cloud.modal._push_commit_to_remote_ref",
+        ) as push_commit, patch.dict(os.environ, {}, clear=True):
+            source = manager._resolve_git_source("/repo")
+
+        create_snapshot.assert_called_once_with("/repo", parent_commit="abc123")
+        push_commit.assert_called_once_with(
+            "/repo",
+            remote_name="origin",
+            commit="snap123",
+            remote_ref="refs/heads/tenyson/runs/snap123",
+        )
+        self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
+        self.assertEqual(source.commit, "snap123")
+
+    def test_resolve_git_source_snapshots_untracked_code_files(self) -> None:
+        manager = ModalManager()
+
+        def fake_git(repo_root: str, *args: str) -> str:
+            mapping = {
+                ("remote", "get-url", "origin"): "https://github.com/goyalayus/tenyson.git",
+                ("status", "--porcelain", "--untracked-files=all"): "?? src/new_helper.py",
+                ("rev-parse", "HEAD"): "abc123",
+            }
+            return mapping[args]
+
+        with patch(
+            "tenyson.cloud.modal._run_git_command",
+            side_effect=fake_git,
+        ), patch(
+            "tenyson.cloud.modal._create_snapshot_commit",
+            return_value="snap456",
+        ), patch(
+            "tenyson.cloud.modal._push_commit_to_remote_ref",
+        ) as push_commit, patch.dict(os.environ, {}, clear=True):
+            source = manager._resolve_git_source("/repo")
+
+        push_commit.assert_called_once_with(
+            "/repo",
+            remote_name="origin",
+            commit="snap456",
+            remote_ref="refs/heads/tenyson/runs/snap456",
+        )
+        self.assertEqual(source.commit, "snap456")
 
     def test_resolve_git_source_uses_frozen_env_snapshot_without_git_commands(self) -> None:
         manager = ModalManager()
@@ -388,6 +451,98 @@ class ModalGitSourceTests(unittest.TestCase):
 
         self.assertEqual(source.clone_url, "https://github.com/goyalayus/tenyson.git")
         self.assertEqual(source.commit, "abc123")
+
+
+class ModalGitSnapshotIntegrationTests(unittest.TestCase):
+    def _init_repo_pair(self):
+        remote_dir = tempfile.TemporaryDirectory()
+        repo_dir = tempfile.TemporaryDirectory()
+        remote_path = Path(remote_dir.name)
+        repo_path = Path(repo_dir.name)
+
+        subprocess.run(["git", "init", "--bare", str(remote_path)], check=True)
+        subprocess.run(["git", "init", str(repo_path)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo_path), "config", "user.name", "Tenyson Tests"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_path), "config", "user.email", "tests@example.com"],
+            check=True,
+        )
+        (repo_path / "app.py").write_text("print('initial')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo_path), "add", "app.py"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo_path), "commit", "-m", "initial"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(repo_path), "branch", "-M", "main"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo_path), "remote", "add", "origin", str(remote_path)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_path), "push", "-u", "origin", "main"],
+            check=True,
+        )
+        return remote_dir, repo_dir, remote_path, repo_path
+
+    def test_snapshot_commit_captures_untracked_code_without_touching_head(self) -> None:
+        remote_dir, repo_dir, remote_path, repo_path = self._init_repo_pair()
+        self.addCleanup(remote_dir.cleanup)
+        self.addCleanup(repo_dir.cleanup)
+
+        (repo_path / "src").mkdir()
+        (repo_path / "src" / "new_helper.py").write_text(
+            "VALUE = 7\n",
+            encoding="utf-8",
+        )
+        original_head = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        manager = ModalManager()
+        with patch.dict(
+            os.environ,
+            {"TENYSON_GIT_REPO_URL": "https://example.invalid/repo.git"},
+            clear=False,
+        ):
+            source = manager._resolve_git_source(str(repo_path))
+
+        self.assertEqual(source.clone_url, "https://example.invalid/repo.git")
+        self.assertNotEqual(source.commit, original_head)
+
+        head_after = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(head_after, original_head)
+
+        checkout_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(checkout_dir.cleanup)
+        checkout_path = Path(checkout_dir.name)
+        subprocess.run(
+            ["git", "clone", str(remote_path), str(checkout_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout_path), "checkout", "--detach", source.commit],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            (checkout_path / "src" / "new_helper.py").read_text(encoding="utf-8"),
+            "VALUE = 7\n",
+        )
 
 
 class ModalSubprocessStreamingTests(unittest.TestCase):
