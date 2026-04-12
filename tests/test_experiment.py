@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import tenyson.experiment as experiment_module
@@ -486,6 +487,59 @@ class ExperimentSessionTests(unittest.TestCase):
 
         self.assertEqual(branch_results["left"]["left_stage"].run_id, "left_run")
         self.assertEqual(branch_results["right"]["right_stage"].run_id, "right_run")
+
+    def test_run_branches_accepts_direct_stage_sequences_with_deferred_adapter(self) -> None:
+        session = ExperimentSession(
+            task=object(),
+            templates=_templates(),
+            cloud_factory=lambda: object(),
+        )
+        sft_stage = session.sft("sft_main", run_name="sft_run")
+        eval_stage = session.eval(
+            "eval_after_sft",
+            artifact=experiment_module._DeferredStageArtifactRef("sft_main"),
+            run_name="eval_run",
+        )
+        launched_configs: list[dict[str, Any]] = []
+
+        def fake_run_pipeline(steps, cloud, on_failure):
+            del cloud, on_failure
+            _label, config, _job_class, _task = steps[0]
+            launched_configs.append(copy.deepcopy(config))
+            training = config.get("training", {})
+            evaluation = config.get("evaluation", {})
+            run_id = training.get("run_name") or evaluation.get("run_name")
+            if run_id == "sft_run":
+                return [
+                    _result(
+                        "sft_run",
+                        hf_repo_id="repo/id",
+                        hf_revision="sha123",
+                    )
+                ]
+            return [_result("eval_run")]
+
+        with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
+            branch_results = session.run_branches(
+                {
+                    "sft_branch": [sft_stage, eval_stage],
+                }
+            )
+
+        self.assertEqual(branch_results["sft_branch"]["sft_main"].run_id, "sft_run")
+        self.assertEqual(
+            branch_results["sft_branch"]["eval_after_sft"].run_id,
+            "eval_run",
+        )
+        self.assertEqual(len(launched_configs), 2)
+        self.assertEqual(
+            launched_configs[1]["model"]["init_adapter_repo"],
+            "repo/id",
+        )
+        self.assertEqual(
+            launched_configs[1]["model"]["init_adapter_revision"],
+            "sha123",
+        )
 
     def test_run_stage_updates_report_when_result_finishes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

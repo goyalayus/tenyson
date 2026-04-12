@@ -7,16 +7,14 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from datasets import Dataset
 
 from tenyson.core.plugin import TaskPlugin
+from tenyson.core.stage_templates import EvalMetricsBuilder, call_eval_metrics_builder
 
 
 DatasetFactory = Callable[[Dict[str, Any], Any], Optional[Dataset]]
 FormattingFactory = Callable[[Dict[str, Any], Any], Optional[Callable[..., Any]]]
 CollatorFactory = Callable[[Dict[str, Any], Any], Optional[Any]]
 RewardFactory = Callable[[Dict[str, Any], Any], List[Callable[..., Any]]]
-MetricFactory = Callable[
-    [List[str], List[str], Dataset, Dict[str, Any], Any],
-    Dict[str, Any],
-]
+MetricFactory = EvalMetricsBuilder
 RunFamilyConfigFactory = Callable[[Any], Mapping[str, Any]]
 
 _ENV_META_KEY = "_tenyson"
@@ -330,7 +328,8 @@ class EnvironmentTaskAdapter(TaskPlugin):
             raise ValueError(
                 f'Environment "{self.environment.name}" does not define eval metrics.'
             )
-        return spec.rubric.compute_metrics(
+        return call_eval_metrics_builder(
+            spec.rubric.compute_metrics,
             prompts,
             completions,
             dataset_rows,

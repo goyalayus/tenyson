@@ -18,10 +18,12 @@ SFTCollatorBuilder = Callable[[Dict[str, Any], Any], Optional[Any]]
 RLDatasetBuilder = Callable[[Dict[str, Any]], Dataset]
 RLRewardBuilder = Callable[[Dict[str, Any], Any], List[Callable[..., Any]]]
 EvalDatasetBuilder = Callable[..., Dataset]
-EvalMetricsBuilder = Callable[
+LegacyEvalMetricsBuilder = Callable[
     [List[str], List[str], Dataset, Dict[str, Any], Any],
     Dict[str, Any],
 ]
+ContextEvalMetricsBuilder = Callable[["EvalMetricsContext"], Dict[str, Any]]
+EvalMetricsBuilder = LegacyEvalMetricsBuilder | ContextEvalMetricsBuilder
 STAGE_TEMPLATE_CONFIG_KEY = "_tenyson_stage_templates"
 
 
@@ -70,6 +72,27 @@ class EvalDatasetTemplate:
 class EvalMetricsTemplate:
     compute: EvalMetricsBuilder
     factory_ref: Optional[TemplateFactoryRef] = None
+
+
+@dataclass(frozen=True)
+class EvalMetricsContext:
+    prompts: List[str]
+    # prompts example:
+    # ["You are solving a 4-digit addition problem...\nProblem: 4312 + 2547"]
+    completions: List[str]
+    # completions example:
+    # ["6859</answer>", "1111</answer>"]
+    dataset_rows: Dataset
+    # dataset_rows example:
+    # Dataset with rows like
+    # {"id": 0, "left": 4312, "right": 2547, "expected_answer": "6859", ...}
+    config: Dict[str, Any]
+    # config example:
+    # {"evaluation": {"batch_size": 32},
+    #  "chat_template": {"enable_thinking": False, "stop_strings": ["</answer>"]}}
+    tokenizer: Any
+    # tokenizer example:
+    # a Hugging Face tokenizer object for the eval model
 
 
 EvalDatasetLike = EvalDatasetTemplate | EvalDatasetBuilder
@@ -144,7 +167,7 @@ def eval_dataset_fn(
     """Mark a plain function as a Tenyson eval-dataset hook.
 
     This decorator exists for readability first. A function like
-    `build_three_digit_addition_dataset(...)` looks like an ordinary helper in a
+    `build_addition_dataset(...)` looks like an ordinary helper in a
     task file, but Tenyson can call it as an eval-dataset hook and fill its
     named kwargs from `config["evaluation"]`.
 
@@ -159,6 +182,49 @@ def eval_dataset_fn(
     return function
 
 
+def bind_eval_dataset(
+    builder: EvalDatasetBuilder,
+    /,
+    **bound_kwargs: Any,
+) -> EvalDatasetTemplate:
+    """Bind fixed kwargs onto an eval dataset builder and keep it cloud-safe.
+
+    Example:
+    `dataset=bind_eval_dataset(
+        build_addition_dataset,
+        digits=4,
+        sample_count=100,
+        seed=7,
+    )`
+
+    The bound kwargs are fixed at the experiment call site. Any remaining
+    builder parameters are still read from `config["evaluation"]` on the worker.
+    """
+
+    if not callable(builder):
+        raise TypeError(
+            "eval dataset binding expects a callable builder."
+        )
+
+    _validate_eval_dataset_function_signature(
+        builder,
+        label="eval dataset builder",
+    )
+    _validate_bound_callable_kwargs(
+        builder,
+        label="eval dataset builder",
+        bound_kwargs=bound_kwargs,
+    )
+    return EvalDatasetTemplate(
+        build=_bind_callable_kwargs(builder, bound_kwargs),
+        factory_ref=_callable_template_factory_ref(
+            builder,
+            label="eval dataset builder",
+            bound_kwargs=bound_kwargs or None,
+        ),
+    )
+
+
 def eval_metrics_fn(
     function: EvalMetricsBuilder,
 ) -> EvalMetricsBuilder:
@@ -166,11 +232,18 @@ def eval_metrics_fn(
 
     This decorator exists for readability first. A function like
     `compute_addition_metrics(...)` looks like an ordinary helper in a task file,
-    but Tenyson actually calls it through a fixed 5-argument hook contract:
+    but Tenyson actually calls it as an eval-metrics hook.
+
+    The preferred signature is:
+    `def compute_metrics(ctx: EvalMetricsContext) -> dict[str, Any]`
+
+    The older 5-argument signature is still supported for backward
+    compatibility:
     `(prompts, completions, dataset_rows, config, tokenizer)`.
 
     The decorator makes that role visible at the definition site and validates
-    the signature early, instead of letting a bad hook fail later at runtime.
+    the supported signature early, instead of letting a bad hook fail later at
+    runtime.
     """
     _validate_eval_metrics_function_signature(
         function,
@@ -292,10 +365,14 @@ def _validate_eval_metrics_function_signature(
     signature = inspect.signature(function)
     parameters = list(signature.parameters.values())
 
+    if _is_eval_metrics_context_signature(parameters):
+        return
+
     if len(parameters) != 5:
         raise TypeError(
-            f"{label} must accept exactly 5 positional parameters: "
-            "prompts, completions, dataset_rows, config, tokenizer."
+            f"{label} must accept either one EvalMetricsContext parameter "
+            "or exactly 5 positional parameters: prompts, completions, "
+            "dataset_rows, config, tokenizer."
         )
 
     for parameter in parameters:
@@ -304,6 +381,18 @@ def _validate_eval_metrics_function_signature(
                 f"{label} must use only normal positional parameters. "
                 "Do not use positional-only, keyword-only, *args, or **kwargs."
             )
+
+
+def _is_eval_metrics_context_signature(
+    parameters: Sequence[inspect.Parameter],
+) -> bool:
+    if len(parameters) != 1:
+        return False
+    parameter = parameters[0]
+    return parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
 
 
 def _validate_eval_dataset_function_signature(
@@ -336,6 +425,7 @@ def _callable_template_factory_ref(
     value: Callable[..., Any],
     *,
     label: str,
+    bound_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> TemplateFactoryRef:
     module_name = str(getattr(value, "__module__", "") or "").strip()
     function_name = str(getattr(value, "__name__", "") or "").strip()
@@ -356,7 +446,35 @@ def _callable_template_factory_ref(
         module_name=module_name,
         function_name=function_name,
         template_kind=label,
+        **({"bound_kwargs": dict(bound_kwargs)} if bound_kwargs else {}),
     )
+
+
+def _bind_callable_kwargs(
+    value: Callable[..., Any],
+    bound_kwargs: Mapping[str, Any],
+) -> Callable[..., Any]:
+    if not bound_kwargs:
+        return value
+    return functools.partial(value, **dict(bound_kwargs))
+
+
+def _validate_bound_callable_kwargs(
+    value: Callable[..., Any],
+    *,
+    label: str,
+    bound_kwargs: Mapping[str, Any],
+) -> None:
+    if not bound_kwargs:
+        return
+
+    try:
+        inspect.signature(value).bind_partial(**dict(bound_kwargs))
+    except TypeError as exc:
+        raise TypeError(
+            f"{label} received invalid bound kwargs for "
+            f"{value.__module__}.{value.__name__}: {exc}"
+        ) from exc
 
 
 def has_explicit_stage_templates(
@@ -642,7 +760,8 @@ class _StageTemplateTaskAdapter(TaskPlugin):
                 config,
                 tokenizer,
             )
-        metrics = self._eval_metrics.compute(
+        metrics = call_eval_metrics_builder(
+            self._eval_metrics.compute,
             prompts,
             completions,
             dataset_rows,
@@ -762,6 +881,7 @@ def _eval_template_from_callable_ref(
     module_name: str,
     function_name: str,
     template_kind: str,
+    bound_kwargs: Mapping[str, Any] | None = None,
 ) -> EvalDatasetTemplate | EvalMetricsTemplate:
     module = importlib.import_module(str(module_name).strip())
     function = getattr(module, str(function_name).strip())
@@ -771,26 +891,31 @@ def _eval_template_from_callable_ref(
             f"{template_kind} {module_name}.{function_name} is not callable."
         )
 
+    resolved_bound_kwargs = dict(bound_kwargs or {})
+    callable_for_stage = _bind_callable_kwargs(function, resolved_bound_kwargs)
+
     if template_kind == "eval dataset builder":
         return EvalDatasetTemplate(
-            build=function,
+            build=callable_for_stage,
             factory_ref=template_factory_ref(
                 "tenyson.core.stage_templates",
                 "_eval_template_from_callable_ref",
                 module_name=module_name,
                 function_name=function_name,
                 template_kind=template_kind,
+                **({"bound_kwargs": resolved_bound_kwargs} if resolved_bound_kwargs else {}),
             ),
         )
     if template_kind == "eval metrics function":
         return EvalMetricsTemplate(
-            compute=function,
+            compute=callable_for_stage,
             factory_ref=template_factory_ref(
                 "tenyson.core.stage_templates",
                 "_eval_template_from_callable_ref",
                 module_name=module_name,
                 function_name=function_name,
                 template_kind=template_kind,
+                **({"bound_kwargs": resolved_bound_kwargs} if resolved_bound_kwargs else {}),
             ),
         )
 
@@ -859,6 +984,39 @@ def _call_eval_dataset_builder(
         )
 
     return builder(**builder_kwargs)
+
+
+def call_eval_metrics_builder(
+    builder: EvalMetricsBuilder,
+    prompts: List[str],
+    completions: List[str],
+    dataset_rows: Dataset,
+    config: Dict[str, Any],
+    tokenizer: Any,
+) -> Any:
+    signature = inspect.signature(builder)
+    parameters = list(signature.parameters.values())
+    context = EvalMetricsContext(
+        prompts=list(prompts),
+        completions=list(completions),
+        dataset_rows=dataset_rows,
+        config=config,
+        tokenizer=tokenizer,
+    )
+
+    if _is_eval_metrics_context_signature(parameters):
+        parameter = parameters[0]
+        if parameter.kind == inspect.Parameter.KEYWORD_ONLY:
+            return builder(**{parameter.name: context})
+        return builder(context)
+
+    return builder(
+        prompts,
+        completions,
+        dataset_rows,
+        config,
+        tokenizer,
+    )
 
 
 def _is_legacy_eval_config_builder(
