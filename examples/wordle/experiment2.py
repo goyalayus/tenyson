@@ -4,14 +4,19 @@ from functional import (
     prime_reward,
     rl_turn_dataset,
 )
-from tenyson import run_experiment
+from tenyson import AdapterRef, run_experiment
+
+
+EXPERIMENT2_SFT = AdapterRef(
+    repo_id="goyalayus/wordle-lora-20260324-163252-sft_main",
+    revision="30a33278640fcc5bcce216adce59984bfb8f7698",
+)
 
 
 def build(exp):
-    seed = exp.seed("experiment2_sft")
     exp.eval(
         "baseline",
-        adapter=seed,
+        adapter=EXPERIMENT2_SFT,
         dataset=eval_turn_dataset(6),
         metrics=prime_metrics(),
         overrides={
@@ -23,7 +28,7 @@ def build(exp):
     )
     exp.rl(
         "train",
-        adapter=seed,
+        adapter=EXPERIMENT2_SFT,
         dataset=rl_turn_dataset(6),
         reward=prime_reward(),
         overrides={

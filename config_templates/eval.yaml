@@ -1,7 +1,17 @@
 evaluation:
   batch_size: 32
-  sample_count: 100
-  seed: 7
+
+chat_template:
+  # Render eval prompts through the tokenizer's chat template before
+  # generation. Raw prompt text is still preserved for metrics/UI payloads.
+  enabled: true
+  # Leave null to use the tokenizer's default thinking behavior.
+  # Set false for direct-answer tasks like arithmetic.
+  enable_thinking: null
+  # Optional literal stop strings passed into generation. This is useful when
+  # a task prefills the start of an assistant reply, like "<answer>", and
+  # wants generation to stop after the closing tag.
+  stop_strings: []
 
 model:
   # Tenyson currently supports Qwen 3 family base models only.

@@ -240,7 +240,6 @@ class SFTJob:
             load_in_8bit=model_cfg.get("load_in_8bit", False),
             fast_inference=model_cfg.get("fast_inference", False),
             full_finetuning=full_finetuning,
-            trust_remote_code=True,
         )
 
         normalize_tokenizer_special_tokens(tokenizer)
