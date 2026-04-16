@@ -110,7 +110,7 @@ class FunctionalManifestTests(unittest.TestCase):
 
 
 class BootstrapRuntimeTests(unittest.TestCase):
-    def test_bootstrap_local_experiment_loads_root_env_and_adds_base_dir_to_sys_path(self) -> None:
+    def test_bootstrap_local_experiment_loads_root_env_and_overrides_shell_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
             anchor = project_root / "examples" / "demo" / "experiment.py"
@@ -126,10 +126,15 @@ class BootstrapRuntimeTests(unittest.TestCase):
             with patch(
                 "tenyson.core.experiment_runtime.ensure_local_controller_environment",
                 return_value=[],
-            ), patch.dict(os.environ, {}, clear=True):
+            ), patch.dict(
+                os.environ,
+                {"TENYSON_EXPERIMENT_ID": "from_shell_env"},
+                clear=True,
+            ):
                 original_sys_path = list(sys.path)
                 try:
                     context = bootstrap_local_experiment(anchor)
+                    resolved_experiment_id = os.environ["TENYSON_EXPERIMENT_ID"]
                 finally:
                     sys.path[:] = original_sys_path
 
@@ -137,6 +142,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertEqual(context.env_path, project_root / ".env")
         self.assertEqual(context.loaded_env, {"TENYSON_EXPERIMENT_ID": "from_root_env"})
         self.assertEqual(context.base_dir, anchor.parent)
+        self.assertEqual(resolved_experiment_id, "from_root_env")
 
 
 class RunExperimentTests(unittest.TestCase):

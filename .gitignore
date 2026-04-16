@@ -13,5 +13,6 @@ history_len
 examples/wordle/final_report.md
 
 # Local run environment secrets
+.env
 examples/wordle/.env
 examples/wordle/run.env

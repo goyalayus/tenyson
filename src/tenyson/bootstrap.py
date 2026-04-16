@@ -60,13 +60,13 @@ def missing_controller_packages(
 def load_env_file(
     path: str | Path,
     *,
-    override: bool = False,
+    override: bool = True,
 ) -> dict[str, str]:
     """
     Load simple dotenv-style KEY=VALUE assignments into os.environ.
 
     Blank lines and `#` comments are ignored.
-    Existing environment variables are preserved unless override=True.
+    By default, dotenv values override any pre-existing shell environment values.
     """
     env_path = Path(path)
     if not env_path.is_file():

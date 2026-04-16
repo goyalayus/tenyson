@@ -93,7 +93,7 @@ class BootstrapTests(unittest.TestCase):
 
         self.assertEqual(loaded, {"TENYSON_WANDB_ENTITY": "ayush_g"})
 
-    def test_load_env_file_preserves_existing_env_by_default(self) -> None:
+    def test_load_env_file_overrides_existing_env_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
@@ -108,10 +108,10 @@ class BootstrapTests(unittest.TestCase):
                 loaded = load_env_file(env_file)
                 current = os.environ["TENYSON_EXPERIMENT_ID"]
 
-        self.assertEqual(current, "from_shell")
-        self.assertEqual(loaded, {})
+        self.assertEqual(current, "from_file")
+        self.assertEqual(loaded, {"TENYSON_EXPERIMENT_ID": "from_file"})
 
-    def test_load_env_file_can_override_existing_env(self) -> None:
+    def test_load_env_file_can_preserve_existing_env_when_override_is_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
@@ -123,11 +123,11 @@ class BootstrapTests(unittest.TestCase):
                 {"TENYSON_EXPERIMENT_ID": "from_shell"},
                 clear=False,
             ):
-                loaded = load_env_file(env_file, override=True)
+                loaded = load_env_file(env_file, override=False)
                 current = os.environ["TENYSON_EXPERIMENT_ID"]
 
-        self.assertEqual(current, "from_file")
-        self.assertEqual(loaded, {"TENYSON_EXPERIMENT_ID": "from_file"})
+        self.assertEqual(current, "from_shell")
+        self.assertEqual(loaded, {})
 
     def test_install_sigterm_handler_raises_keyboardinterrupt(self) -> None:
         previous_handler = signal.getsignal(signal.SIGTERM)
