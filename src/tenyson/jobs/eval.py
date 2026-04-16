@@ -34,6 +34,8 @@ def _resolve_eval_fast_inference_requested(
     model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
 ) -> bool:
+    if _should_force_transformers_eval_for_adapter(model_cfg):
+        return False
     if "fast_inference" in model_cfg:
         return bool(model_cfg.get("fast_inference", False))
     return bool(vllm_cfg.get("enabled", False))
@@ -68,10 +70,20 @@ def _resolve_init_artifact_type(model_cfg: Dict[str, Any]) -> str:
     return artifact_type
 
 
+def _should_force_transformers_eval_for_adapter(
+    model_cfg: Dict[str, Any],
+) -> bool:
+    if _resolve_init_artifact_type(model_cfg) != "adapter":
+        return False
+    return bool(str(model_cfg.get("init_adapter_repo") or "").strip())
+
+
 def _require_eval_vllm_config(
     model_cfg: Dict[str, Any],
     vllm_cfg: Dict[str, Any],
 ) -> None:
+    if _should_force_transformers_eval_for_adapter(model_cfg):
+        return
     if not bool(vllm_cfg.get("enabled", False)):
         raise ValueError(
             "Eval requires vLLM. Set vllm.enabled=true for eval runs."
@@ -151,8 +163,16 @@ class EvalJob:
     def _build_model_and_tokenizer(self):
         model_cfg = self.config.get("model", {})
         vllm_cfg = self.config.get("vllm", {})
+        force_transformers_eval = _should_force_transformers_eval_for_adapter(model_cfg)
         _require_eval_vllm_config(model_cfg, vllm_cfg)
-        _configure_eval_unsloth_runtime_env(vllm_cfg)
+        if force_transformers_eval:
+            print(
+                "[EvalJob] Init adapter detected; disabling fast inference so eval "
+                "uses the loaded adapter weights directly.",
+                flush=True,
+            )
+        else:
+            _configure_eval_unsloth_runtime_env(vllm_cfg)
         from unsloth import FastLanguageModel
 
         init_artifact_type = _resolve_init_artifact_type(model_cfg)
@@ -278,10 +298,7 @@ class EvalJob:
                 vllm_cfg,
             )
         if not vllm_cfg.get("enabled", False) or not runtime_vllm_enabled:
-            raise RuntimeError(
-                "Eval requires vLLM, but the runtime is not currently configured "
-                "for vLLM fast inference."
-            )
+            return None
 
         from vllm import SamplingParams
 
@@ -303,6 +320,57 @@ class EvalJob:
             kwargs["stop"] = stop_strings
         return SamplingParams(**kwargs)
 
+    def _build_transformers_generate_kwargs(self, tokenizer: Any) -> Dict[str, Any]:
+        vllm_cfg = self.config.get("vllm", {})
+        temperature = float(vllm_cfg.get("temperature", 0.0))
+        kwargs: Dict[str, Any] = {
+            "max_new_tokens": int(vllm_cfg.get("max_tokens", 1024)),
+            "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+            "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        }
+        do_sample = temperature > 0.0
+        kwargs["do_sample"] = do_sample
+        if do_sample:
+            kwargs["temperature"] = temperature
+            kwargs["top_p"] = float(vllm_cfg.get("top_p", 1.0))
+            if "top_k" in vllm_cfg:
+                kwargs["top_k"] = int(vllm_cfg["top_k"])
+            if vllm_cfg.get("min_p") is not None:
+                kwargs["min_p"] = float(vllm_cfg["min_p"])
+        return kwargs
+
+    def _truncate_completion_text(self, text: str, tokenizer: Any) -> str:
+        text = str(text)
+        stop_markers: list[tuple[str, bool]] = []
+        for marker in resolve_generation_stop_strings(self.config):
+            normalized = str(marker)
+            if normalized:
+                stop_markers.append((normalized, True))
+        for marker in (
+            getattr(tokenizer, "eos_token", None),
+            getattr(tokenizer, "pad_token", None),
+        ):
+            normalized = str(marker or "")
+            if normalized:
+                stop_markers.append((normalized, False))
+
+        earliest_index: int | None = None
+        earliest_marker = ""
+        include_marker = False
+        for marker, include in stop_markers:
+            index = text.find(marker)
+            if index < 0:
+                continue
+            if earliest_index is None or index < earliest_index:
+                earliest_index = index
+                earliest_marker = marker
+                include_marker = include
+        if earliest_index is None:
+            return text
+        if include_marker:
+            return text[: earliest_index + len(earliest_marker)]
+        return text[:earliest_index]
+
     def _resolve_model_device(self, model: Any) -> Any:
         if getattr(model, "device", None) is not None:
             return model.device
@@ -322,18 +390,32 @@ class EvalJob:
         batch_prompts: Sequence[str],
         sampling_params: Any,
     ) -> List[str]:
-        if sampling_params is None:
-            raise RuntimeError(
-                "Eval requires vLLM SamplingParams. Refusing to fall back to "
-                "Transformers generation."
+        if sampling_params is not None:
+            outputs = model.fast_generate(
+                list(batch_prompts),
+                sampling_params=sampling_params,
+                use_tqdm=True,
             )
+            return [out.outputs[0].text for out in outputs]
 
-        outputs = model.fast_generate(
+        device = self._resolve_model_device(model)
+        inputs = tokenizer(
             list(batch_prompts),
-            sampling_params=sampling_params,
-            use_tqdm=True,
+            return_tensors="pt",
+            padding=True,
         )
-        return [out.outputs[0].text for out in outputs]
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        outputs = model.generate(
+            **inputs,
+            **self._build_transformers_generate_kwargs(tokenizer),
+        )
+        prompt_width = inputs["input_ids"].shape[1]
+        completions: List[str] = []
+        for row_index in range(outputs.shape[0]):
+            new_tokens = outputs[row_index][prompt_width:]
+            decoded = tokenizer.decode(new_tokens, skip_special_tokens=False)
+            completions.append(self._truncate_completion_text(decoded, tokenizer))
+        return completions
 
     def _extract_prompts(self, dataset: Any) -> List[str]:
         return extract_raw_prompt_texts(dataset)
@@ -465,8 +547,13 @@ class EvalJob:
                     attempt_token=attempt_token,
                 )
 
-            backend = "vLLM"
-            temperature = sampling_params.temperature
+            runtime_vllm_enabled = sampling_params is not None
+            backend = "vLLM" if runtime_vllm_enabled else "Transformers"
+            temperature = (
+                sampling_params.temperature
+                if runtime_vllm_enabled
+                else float(self.config.get("vllm", {}).get("temperature", 0.0))
+            )
             print(
                 f"[EvalJob] Starting batched generation with {backend} (temp={temperature})...",
                 flush=True,
