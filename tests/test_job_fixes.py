@@ -22,6 +22,7 @@ from tenyson.jobs.eval import (
     _require_eval_vllm_config,
     _resolve_eval_fast_inference_requested,
     _resolve_eval_model_load_kwargs,
+    _should_force_transformers_eval_for_adapter,
 )
 from tenyson.jobs.rl import (
     _RAW_PROMPT_COLUMN,
@@ -1434,6 +1435,29 @@ class EvalFallbackTests(unittest.TestCase):
 
         self.assertFalse(requested)
 
+    def test_resolve_eval_fast_inference_forces_transformers_for_init_adapter(self) -> None:
+        requested = _resolve_eval_fast_inference_requested(
+            {
+                "fast_inference": True,
+                "init_adapter_repo": "org/adapter",
+            },
+            {"enabled": True},
+        )
+
+        self.assertFalse(requested)
+
+    def test_should_force_transformers_eval_for_adapter_detects_seed_adapter(self) -> None:
+        self.assertTrue(
+            _should_force_transformers_eval_for_adapter(
+                {"init_adapter_repo": "org/adapter"}
+            )
+        )
+        self.assertFalse(
+            _should_force_transformers_eval_for_adapter(
+                {"init_artifact_type": "full_model", "init_model_repo": "org/full"}
+            )
+        )
+
     def test_resolve_eval_model_load_kwargs_omits_gpu_memory_without_fast_inference(self) -> None:
         kwargs = _resolve_eval_model_load_kwargs(
             {"fast_inference": False},
@@ -1449,6 +1473,12 @@ class EvalFallbackTests(unittest.TestCase):
                 {"enabled": False},
             )
 
+    def test_require_eval_vllm_config_allows_seed_adapter_without_vllm(self) -> None:
+        _require_eval_vllm_config(
+            {"init_adapter_repo": "org/adapter"},
+            {"enabled": False},
+        )
+
     def test_require_eval_vllm_config_rejects_disabled_fast_inference(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires vLLM fast inference"):
             _require_eval_vllm_config(
@@ -1456,15 +1486,14 @@ class EvalFallbackTests(unittest.TestCase):
                 {"enabled": True},
             )
 
-    def test_build_sampling_params_requires_vllm_runtime(self) -> None:
+    def test_build_sampling_params_returns_none_without_vllm_runtime(self) -> None:
         job = EvalJob(
             config={"evaluation": {"run_name": "eval_test"}, "vllm": {"enabled": True}},
             task=object(),
         )
         job._vllm_runtime_enabled = False
 
-        with self.assertRaisesRegex(RuntimeError, "Eval requires vLLM"):
-            job._build_sampling_params(SimpleNamespace(eos_token="<eos>"))
+        self.assertIsNone(job._build_sampling_params(SimpleNamespace(eos_token="<eos>")))
 
     def test_build_sampling_params_appends_custom_stop_strings(self) -> None:
         module_name = "vllm"
@@ -1513,7 +1542,7 @@ class EvalFallbackTests(unittest.TestCase):
             else:
                 sys.modules[module_name] = original_module
 
-    def test_generate_batch_refuses_transformers_fallback(self) -> None:
+    def test_generate_batch_uses_transformers_fallback_when_sampling_params_missing(self) -> None:
         job = EvalJob(
             config={
                 "evaluation": {"run_name": "eval_test"},
@@ -1522,13 +1551,14 @@ class EvalFallbackTests(unittest.TestCase):
             task=object(),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "Refusing to fall back"):
-            job._generate_batch(
-                _DummyModel(),
-                _DummyTokenizer(),
-                ["ab", "c"],
-                sampling_params=None,
-            )
+        completions = job._generate_batch(
+            _DummyModel(),
+            _DummyTokenizer(),
+            ["ab", "c"],
+            sampling_params=None,
+        )
+
+        self.assertEqual(completions, ["XY", "Z"])
 
     def test_build_model_and_tokenizer_fails_when_vllm_startup_breaks(self) -> None:
         module_name = "unsloth"
@@ -1656,6 +1686,96 @@ class EvalFallbackTests(unittest.TestCase):
         self.assertTrue(calls[0]["fast_inference"])
         self.assertTrue(getattr(model, "for_inference_called", False))
         adapter_download_mock.assert_not_called()
+        normalize_mock.assert_called_once()
+
+    def test_build_model_and_tokenizer_forces_transformers_runtime_for_init_adapter(
+        self,
+    ) -> None:
+        module_name = "unsloth"
+        original_module = sys.modules.get(module_name)
+        calls = []
+
+        class FakeModel:
+            def train(self, mode):
+                self.mode = mode
+                return self
+
+        class FakeFastLanguageModel:
+            @staticmethod
+            def from_pretrained(**kwargs):
+                calls.append(kwargs)
+                return FakeModel(), SimpleNamespace()
+
+            @staticmethod
+            def get_peft_model(model, **kwargs):
+                model.peft_kwargs = kwargs
+                return model
+
+            @staticmethod
+            def for_inference(model):
+                setattr(model, "for_inference_called", True)
+                return model
+
+        adapter = SimpleNamespace(
+            repo_id="org/adapter",
+            resolved_revision="rev-123",
+            weights_in_repo="adapter_model.safetensors",
+        )
+
+        sys.modules[module_name] = SimpleNamespace(
+            FastLanguageModel=FakeFastLanguageModel
+        )
+        try:
+            job = EvalJob(
+                config={
+                    "evaluation": {"run_name": "eval_test"},
+                    "model": {
+                        "name": "Qwen/Qwen3-4B",
+                        "load_in_4bit": True,
+                        "fast_inference": True,
+                        "init_adapter_repo": "org/adapter",
+                        "init_adapter_revision": "main",
+                    },
+                    "vllm": {"enabled": True, "gpu_memory_utilization": 0.8},
+                },
+                task=object(),
+            )
+
+            with unittest.mock.patch.object(
+                eval_module,
+                "download_hf_lora_adapter",
+                return_value=adapter,
+            ), unittest.mock.patch.object(
+                eval_module,
+                "resolve_hf_lora_runtime_kwargs",
+                return_value={
+                    "r": 16,
+                    "target_modules": ["up_proj", "gate_proj", "down_proj"],
+                    "lora_alpha": 32,
+                    "lora_dropout": 0.0,
+                    "bias": "none",
+                },
+            ), unittest.mock.patch.object(
+                eval_module,
+                "strict_load_hf_lora_adapter_weights",
+                return_value=7,
+            ) as strict_load_mock, unittest.mock.patch.object(
+                eval_module,
+                "normalize_tokenizer_special_tokens",
+            ) as normalize_mock:
+                model, _tokenizer = job._build_model_and_tokenizer()
+        finally:
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["fast_inference"])
+        self.assertNotIn("gpu_memory_utilization", calls[0])
+        self.assertFalse(job._vllm_runtime_enabled)
+        self.assertTrue(getattr(model, "for_inference_called", False))
+        strict_load_mock.assert_called_once()
         normalize_mock.assert_called_once()
 
 
