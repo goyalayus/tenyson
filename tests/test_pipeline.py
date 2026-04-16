@@ -49,7 +49,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="sft_main",
                 config=config,
                 job_type="sft",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -75,7 +74,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="sft_main",
                 config=config,
                 job_type="sft",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -111,7 +109,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="rl_main",
                 config=config,
                 job_type="rl",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -142,7 +139,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="sft_main",
                 config=config,
                 job_type="sft",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -168,7 +164,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="eval_baseline_mixed",
                 config=config,
                 job_type="eval",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -176,7 +171,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("resume_from_checkpoint", config["training"])
         self.assertIn("[continue]", stderr.getvalue())
 
-    def test_prompt_failure_action_abort_policy_returns_abort(self) -> None:
+    def test_prompt_failure_action_abort_choice_returns_abort(self) -> None:
         config = {"training": {"resume_from_checkpoint": "repo:old"}}
         last_result = JobResult(
             run_id="wordle_sft_main",
@@ -186,12 +181,15 @@ class PipelineTests(unittest.TestCase):
             hf_revision="rev",
         )
 
-        with patch.object(sys, "stderr", io.StringIO()):
+        with patch.object(sys, "stdin", io.StringIO("abort\n")), patch.object(
+            sys,
+            "stderr",
+            io.StringIO(),
+        ):
             action = pipeline_module._prompt_failure_action(
                 step_label="sft_main",
                 config=config,
                 job_type="sft",
-                on_failure="abort",
                 last_result=last_result,
             )
 
@@ -218,7 +216,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="sft_main",
                 config=config,
                 job_type="sft",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -244,7 +241,6 @@ class PipelineTests(unittest.TestCase):
                 step_label="sft_main",
                 config=config,
                 job_type="sft",
-                on_failure="wait",
                 last_result=last_result,
             )
 
@@ -375,7 +371,6 @@ class PipelineTests(unittest.TestCase):
             results = pipeline_module.run_pipeline(
                 [("sft_main", config, SFTJob, object())],
                 cloud,
-                on_failure="wait",
             )
 
         self.assertEqual([result.status for result in results], ["failed", "success"])
@@ -422,7 +417,6 @@ class PipelineTests(unittest.TestCase):
                     ("rl_main", rl_config, RLJob, object()),
                 ],
                 cloud,
-                on_failure="wait",
             )
 
         self.assertEqual([result.status for result in results], ["partial", "success"])
@@ -432,7 +426,7 @@ class PipelineTests(unittest.TestCase):
         prompt_mock.assert_called_once()
         self.assertEqual(len(cloud.jobs), 2)
 
-    def test_run_pipeline_abort_policy_returns_after_failed_step_without_prompt(self) -> None:
+    def test_run_pipeline_returns_after_failed_step_when_operator_aborts(self) -> None:
         cloud = SequencedCloud(
             [
                 JobResult(
@@ -451,21 +445,17 @@ class PipelineTests(unittest.TestCase):
         with patch.object(pipeline_module, "notify_failure") as notify_failure_mock, patch.object(
             pipeline_module,
             "_prompt_failure_action",
+            return_value="abort",
         ) as prompt_mock:
             results = pipeline_module.run_pipeline(
                 [("sft_main", config, SFTJob, object())],
                 cloud,
-                on_failure="abort",
             )
 
         self.assertEqual([result.status for result in results], ["failed"])
         notify_failure_mock.assert_called_once()
-        prompt_mock.assert_not_called()
+        prompt_mock.assert_called_once()
         self.assertEqual(len(cloud.jobs), 1)
-
-    def test_normalize_on_failure_policy_rejects_unknown_value(self) -> None:
-        with self.assertRaisesRegex(ValueError, "on_failure must be either"):
-            pipeline_module._normalize_on_failure_policy("maybe")
 
     def test_before_step_can_mutate_config_before_execution(self) -> None:
         cloud = SequencedCloud(
@@ -487,7 +477,6 @@ class PipelineTests(unittest.TestCase):
         pipeline_module.run_pipeline(
             [("sft_main", config, SFTJob, object())],
             cloud,
-            on_failure="abort",
             before_step=before_step,
         )
 

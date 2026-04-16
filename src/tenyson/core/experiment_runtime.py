@@ -91,14 +91,6 @@ def resolve_recovery_experiment_id(
     return str(os.getenv(env_var, "")).strip() or None
 
 
-def resolve_on_failure_policy(
-    *,
-    env_var: str = "TENYSON_ON_FAILURE",
-    default: str = "wait",
-) -> str:
-    return str(os.getenv(env_var, default)).strip() or default
-
-
 def default_report_filename(anchor_file: str | Path) -> str:
     stem = _slug(Path(anchor_file).resolve().stem)
     if stem == "experiment":
@@ -248,7 +240,6 @@ def create_modal_experiment_session(
     context: LocalExperimentContext,
     task: Any,
     report: Optional[Any] = None,
-    on_failure: Optional[str] = None,
     parallel: bool = True,
     recovery_experiment_id: Optional[str] = None,
     recovery_restart_stages: Optional[Sequence[str]] = None,
@@ -265,7 +256,6 @@ def create_modal_experiment_session(
             gpu=str(os.getenv("TENYSON_MODAL_GPU", "A100")).strip() or "A100",
             timeout=env_int("TENYSON_MODAL_TIMEOUT", 86400),
         ),
-        on_failure=on_failure or resolve_on_failure_policy(),
         shared_overrides=shared_overrides_from_env(),
         parallel=parallel,
         report=report,

@@ -363,7 +363,7 @@ class ExperimentSessionTests(unittest.TestCase):
         )
         stage = session.sft("sft_main", run_name="wordle_sft_main")
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             return [_result("wrong_run")]
 
         with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
@@ -391,7 +391,7 @@ class ExperimentSessionTests(unittest.TestCase):
             run_name="wordle_curr_eval_after_t3_turn3",
         )
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             return [
                 _result("wordle_curr_eval_after_t3_turn3"),
                 _result("wordle_curr_eval_after_t3_turn2"),
@@ -422,7 +422,7 @@ class ExperimentSessionTests(unittest.TestCase):
         branch = session.branch(cloud=object())
         stage = branch.sft("sft_main", run_name="wordle_sft_main")
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             return [_result("wordle_sft_main", status="failed")]
 
         with patch.object(experiment_module, "run_pipeline", fake_run_pipeline):
@@ -440,7 +440,7 @@ class ExperimentSessionTests(unittest.TestCase):
         branch = session.branch(cloud=object())
         stage = branch.sft("sft_main", run_name="wordle_sft_main")
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             return [
                 _result(
                     "wordle_sft_main",
@@ -466,7 +466,7 @@ class ExperimentSessionTests(unittest.TestCase):
             cloud_factory=lambda: object(),
         )
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             _label, config, _job_class, _task = steps[0]
             training = config.get("training", {})
             evaluation = config.get("evaluation", {})
@@ -502,8 +502,8 @@ class ExperimentSessionTests(unittest.TestCase):
         )
         launched_configs: list[dict[str, Any]] = []
 
-        def fake_run_pipeline(steps, cloud, on_failure):
-            del cloud, on_failure
+        def fake_run_pipeline(steps, cloud):
+            del cloud
             _label, config, _job_class, _task = steps[0]
             launched_configs.append(copy.deepcopy(config))
             training = config.get("training", {})
@@ -563,7 +563,7 @@ class ExperimentSessionTests(unittest.TestCase):
             )
             stage = session.sft("sft_main", run_name="wordle_sft_main")
 
-            def fake_run_pipeline(steps, cloud, on_failure):
+            def fake_run_pipeline(steps, cloud):
                 return [
                     JobResult(
                         run_id="wordle_sft_main",
@@ -796,8 +796,8 @@ class ExperimentSessionTests(unittest.TestCase):
         first_stage = session.sft("sft_main", run_name="wordle_sft_main")
         second_stage = session.sft("sft_retry", run_name="wordle_sft_retry")
 
-        def fake_run_pipeline(steps, cloud, on_failure):
-            del cloud, on_failure
+        def fake_run_pipeline(steps, cloud):
+            del cloud
             _label, config, _job_class, _task = steps[0]
             run_id = config["training"]["run_name"]
             return [_result(run_id, status="success")]
@@ -846,7 +846,7 @@ class ExperimentSessionTests(unittest.TestCase):
             attempt_token="old-attempt-token",
         )
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             _label, config, _job_class, _task = steps[0]
             self.assertEqual(
                 config["training"]["resume_from_checkpoint"],
@@ -1023,7 +1023,7 @@ class ExperimentSessionTests(unittest.TestCase):
             stopped_early=True,
         )
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             _label, config, _job_class, _task = steps[0]
             self.assertNotIn("resume_from_checkpoint", config["training"])
             return [_result("wordle_sft_main", status="success")]
@@ -1077,8 +1077,8 @@ class ExperimentSessionTests(unittest.TestCase):
             expected_samples=25,
         )
 
-        def fake_run_pipeline(steps, cloud, on_failure):
-            del cloud, on_failure
+        def fake_run_pipeline(steps, cloud):
+            del cloud
             self.assertEqual(steps[0][0], "eval_baseline_mixed")
             return [
                 _result(
@@ -1150,7 +1150,7 @@ class ExperimentSessionTests(unittest.TestCase):
                 return ({}, dict(recovered.__dict__))
             return None
 
-        def fake_run_pipeline(steps, cloud, on_failure):
+        def fake_run_pipeline(steps, cloud):
             self.assertEqual(len(steps), 1)
             self.assertEqual(steps[0]["label"], "eval_pair")
             parallel_steps = steps[0]["parallel"]

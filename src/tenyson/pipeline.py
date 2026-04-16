@@ -1,5 +1,5 @@
 """
-Pipeline runner with human-in-the-loop on failure: wait for user to choose
+Pipeline runner with human-in-the-loop recovery: prompt the operator to
 resume from checkpoint, restart from scratch, continue after a manual stop,
 or abort.
 """
@@ -31,21 +31,6 @@ PipelineStep = Union[StepTuple, ParallelStage]
 
 _FAILURE_PROMPT_LOCK = threading.Lock()
 _FAILURE_PROMPT_NO_INPUT_WAIT_SECONDS = 5.0
-
-
-def _normalize_on_failure_policy(on_failure: Optional[str]) -> str:
-    """
-    Normalize the failure policy used after a step returns failed/stopped.
-
-    - `wait`: prompt the operator for resume/restart/continue/abort.
-    - `abort`: stop the pipeline immediately without prompting.
-    """
-    normalized = str(on_failure or "").strip().lower()
-    if not normalized:
-        return "wait"
-    if normalized in {"wait", "abort"}:
-        return normalized
-    raise ValueError("on_failure must be either 'wait' or 'abort'.")
 
 
 def _is_terminal_nonfailure(result: JobResult) -> bool:
@@ -147,13 +132,8 @@ def _prompt_failure_action(
     step_label: str,
     config: dict,
     job_type: str,
-    on_failure: str,
     last_result: JobResult,
 ) -> str:
-    on_failure = _normalize_on_failure_policy(on_failure)
-    if on_failure == "abort":
-        return "abort"
-
     train_cfg = config.get("training", {})
     hf_repo_id = str(getattr(last_result, "hf_repo_id", "") or "").strip()
     hf_revision = str(getattr(last_result, "hf_revision", "") or "").strip()
@@ -320,7 +300,6 @@ def _validate_pipeline_run_names(steps: List[PipelineStep]) -> None:
 def run_pipeline(
     steps: List[PipelineStep],
     cloud: Any,
-    on_failure: str = "wait",
     failure_log_dir: Optional[str] = None,
     failure_webhook_url: Optional[str] = None,
     db_url: Optional[str] = None,
@@ -339,15 +318,13 @@ def run_pipeline(
     When reporting is enabled (report_template_path + report_output_path),
     a report file is created at start and updated after each step.
 
-    When a step returns status "failed", print failure in red, call
-    notify_failure, then either abort immediately or wait for an operator
-    decision depending on `on_failure`. Works with both AWS and Modal.
+    When a step returns status "failed" or "stopped", print the failure in red,
+    notify, then wait for an operator decision. Works with both AWS and Modal.
     """
     if (report_template_path is None) != (report_output_path is None):
         raise ValueError(
             "report_template_path and report_output_path must both be set or both unset"
         )
-    on_failure = _normalize_on_failure_policy(on_failure)
     report_enabled = report_template_path is not None and report_output_path is not None
     if report_enabled and report_initial_data is None:
         raise ValueError(
@@ -430,19 +407,10 @@ def run_pipeline(
                             phase=job_type,
                         )
 
-                        if on_failure == "abort":
-                            abort_parallel_stage = True
-                            _abort_parallel_stage_runs(
-                                branches,
-                                source_run_id=getattr(result, "run_id", None),
-                            )
-                            return results
-
                         action = _prompt_failure_action(
                             step_label=label,
                             config=config,
                             job_type=job_type,
-                            on_failure=on_failure,
                             last_result=result,
                         )
                         if action == "abort":
@@ -483,7 +451,7 @@ def run_pipeline(
             if _is_terminal_nonfailure(result):
                 break
 
-            # Failed: notify and optionally wait for user.
+            # Failed/stopped: notify and wait for operator action.
             _red_print(
                 f'[TENYSON] Step "{label}" failed: {getattr(result, "failure_reason", "unknown")}'
             )
@@ -498,14 +466,10 @@ def run_pipeline(
                 phase=job_type,
             )
 
-            if on_failure == "abort":
-                return results
-
             action = _prompt_failure_action(
                 step_label=label,
                 config=config,
                 job_type=job_type,
-                on_failure=on_failure,
                 last_result=result,
             )
             if action == "abort":

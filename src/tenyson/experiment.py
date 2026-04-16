@@ -55,7 +55,6 @@ from tenyson.jobs.sft import SFTJob
 from tenyson.loader import load_config
 from tenyson.pipeline import (
     _accept_stopped_result,
-    _normalize_on_failure_policy,
     run_pipeline,
 )
 from tenyson.reporting.builder import ReportBuilder
@@ -786,7 +785,6 @@ class ExperimentSession:
         task: Any,
         templates: ConfigTemplates,
         cloud_factory: Optional[Callable[[], Any]] = None,
-        on_failure: str = "wait",
         shared_overrides: Optional[Mapping[str, Any]] = None,
         abort_message: str = _DEFAULT_ABORT_MESSAGE,
         parallel: bool = True,
@@ -804,7 +802,6 @@ class ExperimentSession:
         self.task = task
         self.templates = templates
         self.cloud_factory = cloud_factory
-        self.on_failure = _normalize_on_failure_policy(on_failure)
         self.shared_overrides = deepcopy(shared_overrides) if shared_overrides else None
         self.abort_message = abort_message
         self.parallel = parallel
@@ -1441,7 +1438,6 @@ class ExperimentSession:
             results = run_pipeline(
                 [stage.as_pipeline_step()],
                 cloud_instance,
-                on_failure=self.on_failure,
             )
             matched_result = None
             for result in reversed(results):
@@ -1523,7 +1519,6 @@ class ExperimentSession:
                     }
                 ],
                 cloud_instance,
-                on_failure=self.on_failure,
             )
         finally:
             for active_run_id in active_run_ids:
