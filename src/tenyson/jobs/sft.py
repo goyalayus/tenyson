@@ -9,12 +9,15 @@ from tenyson.core.hf_checkpoint import (
     resolve_hf_repo_revision,
     resolve_hf_resume_revision,
 )
-from tenyson.core.hub_push import push_pretrained_snapshot_to_hub
+from tenyson.core.hub_push import (
+    push_pretrained_snapshot_to_hub,
+    resolve_hf_push_repo_id,
+    resolve_hf_token,
+)
 from tenyson.core.model_policy import require_qwen3_model_name
 from tenyson.core.plugin import TaskPlugin
 from tenyson.core.execution_policy import require_gpu_provider_runtime
 from tenyson.core.run_name import resolve_required_run_name
-from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.reporting_utils import normalize_report_to
 from tenyson.jobs.result import JobResult
 from tenyson.jobs.tokenizer_utils import normalize_tokenizer_special_tokens
@@ -240,7 +243,6 @@ class SFTJob:
             load_in_8bit=model_cfg.get("load_in_8bit", False),
             fast_inference=model_cfg.get("fast_inference", False),
             full_finetuning=full_finetuning,
-            trust_remote_code=True,
         )
 
         normalize_tokenizer_special_tokens(tokenizer)
@@ -390,18 +392,22 @@ class SFTJob:
                 )
                 return False
 
-        hf_repo_base = (train_cfg.get("hf_repo_base") or "").strip()
-        if not hf_repo_base:
+        push_repo_id = resolve_hf_push_repo_id(
+            train_cfg,
+            run_name=run_name,
+        )
+        if not push_repo_id:
             raise ValueError(
-                "training.hf_repo_base is required for SFT runs. "
+                "training.hf_repo_id or training.hf_repo_base is required for SFT runs. "
                 "Tenyson stores checkpoints/adapters on Hugging Face only."
             )
-        if not os.getenv("HF_TOKEN", "").strip():
-            raise ValueError("HF_TOKEN environment variable is required for SFT runs.")
-
-        push_repo_id = unique_repo_id(hf_repo_base, run_name)
-        if not push_repo_id:
-            raise ValueError("Failed to derive a valid Hugging Face repo id.")
+        hf_token = resolve_hf_token()
+        if not hf_token:
+            raise ValueError(
+                "A Hugging Face token is required for SFT runs. Export HF_TOKEN or "
+                "log in locally so the cached token can be reused."
+            )
+        os.environ.setdefault("HF_TOKEN", hf_token)
         hf_push_every_steps = int(
             train_cfg.get("hf_push_every_steps", train_cfg.get("save_steps", 100))
         )
@@ -578,7 +584,7 @@ class SFTJob:
             trainer_kwargs["data_collator"] = collator
 
         callbacks = []
-        ensure_hf_repo(push_repo_id)
+        ensure_hf_repo(push_repo_id, token=hf_token)
 
         callbacks.append(
             SFTTelemetryCallback(

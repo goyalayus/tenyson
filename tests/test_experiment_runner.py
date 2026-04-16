@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import tenyson.experiment as experiment_module
 from tenyson.core.experiment_runtime import LocalExperimentContext, bootstrap_local_experiment
 from tenyson.core.experiment_runner import run_experiment
 from tenyson.core.functional import load_functional_manifest
@@ -370,6 +371,127 @@ class RunExperimentTests(unittest.TestCase):
                 )
 
         self.assertEqual(observed_prepare, [(context, manifest)])
+
+    def test_run_experiment_accepts_direct_stage_sequences_in_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            anchor_file = base_dir / "experiment.py"
+            anchor_file.write_text("# placeholder\n", encoding="utf-8")
+            functional_path = base_dir / "functional.py"
+            functional_path.write_text("# placeholder\n", encoding="utf-8")
+
+            context = LocalExperimentContext(
+                anchor_file=anchor_file,
+                project_root=base_dir,
+                base_dir=base_dir,
+                env_path=base_dir / ".env",
+                loaded_env={},
+            )
+
+            fake_task = SimpleNamespace(get_environment_name=lambda: "demo")
+            manifest = SimpleNamespace(
+                task=fake_task,
+                resolve_seed=lambda alias: AdapterRef(repo_id=f"seed/{alias}", revision="r1"),
+                resolve_run=lambda run_name: {
+                    "sft_main": "demo_sft_main",
+                    "eval_turn2": "demo_eval_turn2",
+                }[run_name],
+            )
+
+            fake_report = Mock()
+            fake_report.output_path = base_dir / "final_report.md"
+            fake_report.experiment_id = "demo_experiment_123"
+            fake_report.telemetry_backend_ref = "wandb://demo/project"
+
+            created_stages: dict[str, dict[str, object]] = {}
+            observed_branch_stage_ids: list[str] = []
+
+            class FakeBranch:
+                def sft(self, stage_id: str, **kwargs):
+                    created_stages[stage_id] = {"run_type": "sft", **kwargs}
+                    return SimpleNamespace(id=stage_id)
+
+                def eval(self, stage_id: str, **kwargs):
+                    created_stages[stage_id] = {"run_type": "eval", **kwargs}
+                    return SimpleNamespace(id=stage_id)
+
+                def require_adapter(self, stage_id: str):
+                    raise KeyError(stage_id)
+
+            fake_branch = FakeBranch()
+
+            class FakeSession:
+                def branch(self):
+                    return fake_branch
+
+                def run_branches(self, branches):
+                    plan = branches["curriculum"]
+                    if callable(plan):
+                        raise AssertionError("Expected a direct stage sequence, not a branch builder.")
+                    observed_branch_stage_ids.extend(stage.id for stage in plan)
+                    return {
+                        "curriculum": {
+                            stage.id: SimpleNamespace(stage_id=stage.id)
+                            for stage in plan
+                        }
+                    }
+
+                def close(self):
+                    return None
+
+            def build(exp):
+                return exp.run_branches(
+                    {
+                        "curriculum": [
+                            exp.sft_stage("sft_main", run="sft_main"),
+                            exp.eval_stage(
+                                "eval_after_sft",
+                                run="eval_turn2",
+                                artifact=exp.adapter("sft_main"),
+                            ),
+                        ]
+                    }
+                )
+
+            with patch(
+                "tenyson.core.experiment_runner.bootstrap_local_experiment",
+                return_value=context,
+            ), patch(
+                "tenyson.core.experiment_runner.load_functional_manifest",
+                return_value=manifest,
+            ), patch(
+                "tenyson.core.experiment_runner.install_sigterm_handler",
+                return_value=None,
+            ), patch(
+                "tenyson.core.experiment_runner.configure_experiment_identity",
+                return_value="demo_experiment_123",
+            ), patch(
+                "tenyson.core.experiment_runner.build_experiment_report",
+                return_value=fake_report,
+            ), patch(
+                "tenyson.core.experiment_runner.resolve_recovery_experiment_id",
+                return_value=None,
+            ), patch(
+                "tenyson.core.experiment_runner.create_modal_experiment_session",
+                return_value=FakeSession(),
+            ), patch(
+                "tenyson.core.experiment_runner._rebuild_report_from_telemetry",
+                Mock(),
+            ):
+                branch_results = run_experiment(anchor_file, build)
+
+        self.assertEqual(observed_branch_stage_ids, ["sft_main", "eval_after_sft"])
+        self.assertEqual(created_stages["sft_main"]["run"], "demo_sft_main")
+        self.assertEqual(created_stages["eval_after_sft"]["run"], "demo_eval_turn2")
+        self.assertIsInstance(
+            created_stages["eval_after_sft"]["artifact"],
+            experiment_module._DeferredStageArtifactRef,
+        )
+        self.assertEqual(
+            created_stages["eval_after_sft"]["artifact"].stage_id,
+            "sft_main",
+        )
+        self.assertIn("curriculum", branch_results)
 
     def test_run_experiment_plans_restart_stages_from_build_graph(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

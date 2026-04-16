@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from huggingface_hub import CommitOperationDelete, create_repo, HfApi
 from huggingface_hub.errors import HfHubHTTPError
 from requests.exceptions import RequestException
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
+
+from tenyson.jobs.hf_repo import unique_repo_id
 
 
 _MODEL_ARTIFACT_PATTERNS: tuple[str, ...] = (
@@ -40,21 +43,73 @@ _TOKENIZER_ARTIFACT_PATTERNS: tuple[str, ...] = (
     "vocab.json",
 )
 
+_HF_TOKEN_CACHE_PATHS: tuple[Path, ...] = (
+    Path.home() / ".cache" / "huggingface" / "token",
+    Path.home() / ".huggingface" / "token",
+)
+
+
+def resolve_hf_token() -> str:
+    """Resolve a Hugging Face token from env first, then the local cache."""
+
+    env_candidates = (
+        os.getenv("HF_TOKEN"),
+        os.getenv("HUGGING_FACE_HUB_TOKEN"),
+        os.getenv("HUGGINGFACE_HUB_TOKEN"),
+    )
+    for candidate in env_candidates:
+        token = str(candidate or "").strip()
+        if token:
+            return token
+
+    for token_path in _HF_TOKEN_CACHE_PATHS:
+        try:
+            token = token_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+        if token:
+            return token
+
+    return ""
+
+
+def resolve_hf_push_repo_id(
+    training_cfg: Mapping[str, Any],
+    *,
+    run_name: str,
+) -> str:
+    """Resolve the exact repo id a training run should push to."""
+
+    explicit_repo_id = str(training_cfg.get("hf_repo_id") or "").strip().rstrip("/")
+    if explicit_repo_id:
+        return explicit_repo_id
+
+    hf_repo_base = str(training_cfg.get("hf_repo_base") or "").strip().rstrip("/")
+    if not hf_repo_base:
+        return ""
+
+    return unique_repo_id(hf_repo_base, run_name)
+
 
 def ensure_hf_repo(
     repo_id: str,
     *,
+    token: str | None = None,
     max_attempts: int = 5,
     initial_backoff_seconds: float = 2.0,
 ) -> None:
-    """Create the target Hub repository if it does not exist."""
+    """Ensure the target Hub repo exists and the token can create/push to it."""
     if int(max_attempts) < 1:
         raise ValueError("max_attempts must be >= 1.")
 
     last_error: Exception | None = None
     for attempt in range(1, int(max_attempts) + 1):
         try:
-            create_repo(repo_id=repo_id, exist_ok=True)
+            create_repo(
+                repo_id=repo_id,
+                token=token,
+                exist_ok=True,
+            )
             return
         except HfHubHTTPError as exc:
             if not _is_retryable_hf_http_error(exc) or attempt >= int(max_attempts):
@@ -68,6 +123,67 @@ def ensure_hf_repo(
 
     if last_error is not None:
         raise last_error
+
+
+def preflight_cloud_hf_push(
+    config: Mapping[str, Any],
+    *,
+    run_name: str,
+    job_type: str,
+) -> str | None:
+    """Validate Hub push config locally before a cloud training launch."""
+
+    normalized_job_type = str(job_type or "").strip().lower()
+    if normalized_job_type not in {"sft", "rl"}:
+        return None
+
+    training_cfg = config.get("training", {})
+    if training_cfg is None:
+        training_cfg = {}
+    if not isinstance(training_cfg, Mapping):
+        raise TypeError("training must be a mapping when provided.")
+
+    repo_id = resolve_hf_push_repo_id(
+        training_cfg,
+        run_name=run_name,
+    )
+    if not repo_id:
+        raise ValueError(
+            f"training.hf_repo_id or training.hf_repo_base is required for "
+            f"{normalized_job_type.upper()} cloud runs. Set one of them before "
+            "launching."
+        )
+
+    hf_token = resolve_hf_token()
+    if not hf_token:
+        raise ValueError(
+            f"A Hugging Face token is required before launching "
+            f"{normalized_job_type.upper()} so Tenyson can push checkpoints to "
+            f"'{repo_id}'. Export HF_TOKEN or log in locally with Hugging Face "
+            "so the cached token can be reused."
+        )
+
+    try:
+        ensure_hf_repo(repo_id, token=hf_token)
+    except HfHubHTTPError as exc:
+        response = getattr(exc, "response", None)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in {401, 403}:
+            raise ValueError(
+                f"{normalized_job_type.upper()} cloud launch preflight failed: "
+                f"HF_TOKEN is invalid or does not have write access to '{repo_id}'."
+            ) from exc
+        raise RuntimeError(
+            f"{normalized_job_type.upper()} cloud launch preflight could not verify "
+            f"Hugging Face repo '{repo_id}': {exc}"
+        ) from exc
+    except RequestException as exc:
+        raise RuntimeError(
+            f"{normalized_job_type.upper()} cloud launch preflight could not reach "
+            f"Hugging Face while verifying '{repo_id}': {exc}"
+        ) from exc
+
+    return repo_id
 
 
 def _is_retryable_hf_http_error(exc: HfHubHTTPError) -> bool:
@@ -143,7 +259,8 @@ def push_pretrained_snapshot_to_hub(
     tokenizer: Optional[Any],
     commit_message: str,
 ) -> None:
-    ensure_hf_repo(repo_id)
+    hf_token = resolve_hf_token() or None
+    ensure_hf_repo(repo_id, token=hf_token)
 
     with TemporaryDirectory(prefix="tenyson-hf-push-") as tmpdir:
         snapshot_dir = Path(tmpdir)
@@ -155,7 +272,7 @@ def push_pretrained_snapshot_to_hub(
             for path in snapshot_dir.rglob("*")
             if path.is_file()
         )
-        api = HfApi()
+        api = HfApi(token=hf_token)
         stale_files = _resolve_stale_root_artifact_files(
             remote_files=list(api.list_repo_files(repo_id=repo_id)),
             local_files=local_files,

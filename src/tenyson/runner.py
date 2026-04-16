@@ -23,7 +23,7 @@ def _maybe_add_task_module_parent_to_sys_path(spec: str) -> None:
 
     Example:
     `examples/arithmetic/experiment.py` may import hooks with
-    `from functional import build_three_digit_addition_dataset`.
+    `from functional import build_addition_dataset`.
     Those hook refs serialize as module `functional`, so the remote runner needs
     the task file's parent directory on `sys.path` before it rebinds templates.
     """

@@ -26,12 +26,18 @@ from tenyson.core.experiment_runtime import (
     resolve_recovery_restart_stages,
 )
 from tenyson.core.functional import FunctionalManifest, load_functional_manifest
-from tenyson.experiment import ExperimentAborted, ExperimentBranch, StageSpec
+from tenyson.experiment import (
+    ExperimentAborted,
+    ExperimentBranch,
+    StageSpec,
+    _DeferredStageArtifactRef,
+)
 from tenyson.reporting.fixed import ExperimentReport
 
 
 BuildFn = Callable[["ExperimentController"], Any]
 BranchBuildFn = Callable[["ExperimentBranchController"], Any]
+BranchPlan = BranchBuildFn | Sequence[StageSpec]
 PrepareFn = Callable[[LocalExperimentContext, FunctionalManifest], Any]
 
 
@@ -51,8 +57,14 @@ class ExperimentController:
     def artifact(self, stage_id: str):
         require_artifact = getattr(self._branch, "require_artifact", None)
         if callable(require_artifact):
-            return require_artifact(stage_id)
-        return self._branch.require_adapter(stage_id)
+            try:
+                return require_artifact(stage_id)
+            except KeyError:
+                return _DeferredStageArtifactRef(stage_id=str(stage_id))
+        try:
+            return self._branch.require_adapter(stage_id)
+        except KeyError:
+            return _DeferredStageArtifactRef(stage_id=str(stage_id))
 
     def require_artifact(self, stage_id: str):
         return self.artifact(stage_id)
@@ -60,7 +72,10 @@ class ExperimentController:
     def adapter(self, stage_id: str):
         require_adapter = getattr(self._branch, "require_adapter", None)
         if callable(require_adapter):
-            return require_adapter(stage_id)
+            try:
+                return require_adapter(stage_id)
+            except KeyError:
+                return _DeferredStageArtifactRef(stage_id=str(stage_id))
         return self.artifact(stage_id)
 
     def require_adapter(self, stage_id: str):
@@ -100,7 +115,7 @@ class ExperimentController:
 
     def run_branches(
         self,
-        branches: Mapping[str, BranchBuildFn],
+        branches: Mapping[str, BranchPlan],
     ):
         return self._runtime.run_branches(branches)
 
@@ -155,12 +170,20 @@ class _ExperimentRuntime:
 
     def run_branches(
         self,
-        branches: Mapping[str, BranchBuildFn],
+        branches: Mapping[str, BranchPlan],
     ):
-        wrapped: dict[str, Callable[[ExperimentBranch], Any]] = {}
-        for label, builder in branches.items():
-            wrapped[label] = self._wrap_branch_builder(builder)
-        return self.session.run_branches(wrapped)
+        prepared: dict[str, Callable[[ExperimentBranch], Any] | Sequence[StageSpec]] = {}
+        for label, plan in branches.items():
+            prepared[label] = self._prepare_branch_plan(plan)
+        return self.session.run_branches(prepared)
+
+    def _prepare_branch_plan(
+        self,
+        plan: BranchPlan,
+    ) -> Callable[[ExperimentBranch], Any] | Sequence[StageSpec]:
+        if callable(plan):
+            return self._wrap_branch_builder(plan)
+        return plan
 
     def _wrap_branch_builder(
         self,
@@ -196,13 +219,13 @@ class _PlanningController:
         return self._runtime.manifest.resolve_seed(alias)
 
     def artifact(self, stage_id: str):
-        return _PlannedValue(kind="artifact", ref=stage_id)
+        return _DeferredStageArtifactRef(stage_id=str(stage_id))
 
     def require_artifact(self, stage_id: str):
         return self.artifact(stage_id)
 
     def adapter(self, stage_id: str):
-        return _PlannedValue(kind="adapter", ref=stage_id)
+        return _DeferredStageArtifactRef(stage_id=str(stage_id))
 
     def require_adapter(self, stage_id: str):
         return self.adapter(stage_id)
@@ -247,7 +270,7 @@ class _PlanningController:
 
     def run_branches(
         self,
-        branches: Mapping[str, BranchBuildFn],
+        branches: Mapping[str, BranchPlan | Sequence[object]],
     ):
         return self._runtime.run_branches(branches)
 
@@ -284,11 +307,20 @@ class _PlanningRuntime:
 
     def run_branches(
         self,
-        branches: Mapping[str, BranchBuildFn],
+        branches: Mapping[str, BranchPlan | Sequence[object]],
     ):
         results: dict[str, Any] = {}
-        for label, builder in branches.items():
-            results[label] = builder(_PlanningBranchController(runtime=self))
+        for label, plan in branches.items():
+            if callable(plan):
+                results[label] = plan(_PlanningBranchController(runtime=self))
+                continue
+            results[label] = {
+                _planned_stage_id(stage): _PlannedValue(
+                    kind="run",
+                    ref=_planned_stage_id(stage),
+                )
+                for stage in plan
+            }
         return results
 
 
