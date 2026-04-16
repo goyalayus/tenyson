@@ -11,6 +11,31 @@ from tenyson import bind_chat_sft_dataset, bind_eval_dataset, run_experiment
 def build(exp):
     return exp.run_branches(
         {
+            "baseline_branch": [
+                exp.eval_stage(
+                    "eval_2digit_baseline",
+                    dataset=bind_eval_dataset(
+                        build_addition_dataset,
+                        digits=2,
+                        sample_count=100,
+                        seed=7,
+                    ),
+                    metrics=compute_addition_metrics,
+                    overrides={
+                        "model": {
+                            "name": "Qwen/Qwen3-0.6B",
+                            "load_in_4bit": False,
+                        },
+                        "chat_template": {
+                            "enable_thinking": False,
+                            "stop_strings": ["</answer>"],
+                        },
+                        "vllm": {
+                            "max_tokens": 64,
+                        },
+                    },
+                ),
+            ],
             "sft_branch": [
                 exp.sft_stage(
                     "sft_2digit_06b",
