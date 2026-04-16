@@ -58,6 +58,7 @@ def build(exp):
                             "loss_on_assistant_only": True,
                             "response_template": "<|im_start|>assistant\n",
                             "val_size": 0,
+                            "early_stopping_patience": None,
                             "max_steps": 250,
                             "per_device_train_batch_size": 8,
                             "gradient_accumulation_steps": 4,
