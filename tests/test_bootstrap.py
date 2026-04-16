@@ -260,6 +260,7 @@ class SharedOverridesTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "TENYSON_HF_REPO_ID": "org/existing-repo",
                 "TENYSON_HF_REPO_BASE": "org/repo",
                 "TENYSON_EXPERIMENT_ID": "exp_123",
                 "TENYSON_WANDB_ENTITY": "wandb-entity",
@@ -272,7 +273,10 @@ class SharedOverridesTests(unittest.TestCase):
         self.assertEqual(
             overrides,
             {
-                "training": {"hf_repo_base": "org/repo"},
+                "training": {
+                    "hf_repo_id": "org/existing-repo",
+                    "hf_repo_base": "org/repo",
+                },
                 "telemetry": {
                     "experiment_id": "exp_123",
                     "entity": "wandb-entity",
@@ -285,6 +289,7 @@ class SharedOverridesTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "TENYSON_HF_REPO_ID": "",
                 "TENYSON_HF_REPO_BASE": "",
                 "TENYSON_EXPERIMENT_ID": "",
                 "TENYSON_WANDB_ENTITY": "",

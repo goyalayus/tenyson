@@ -20,9 +20,13 @@ except ImportError:  # pragma: no cover - optional dependency guard
 from tenyson.cloud.base import BaseCloudManager, JobFailedError, _red_print
 from tenyson.cloud.runtime_deps import runtime_pip_install_command
 from tenyson.core.hf_checkpoint import resolve_hf_resume_revision
+from tenyson.core.hub_push import (
+    preflight_cloud_hf_push,
+    resolve_hf_push_repo_id,
+    resolve_hf_token,
+)
 from tenyson.core.run_name import resolve_required_run_name
 from tenyson.core.run_config import materialize_run_config
-from tenyson.jobs.hf_repo import unique_repo_id
 from tenyson.jobs.result import JobResult
 
 
@@ -241,6 +245,26 @@ class AWSManager(BaseCloudManager):
                 "Provide all three to run on EC2."
             )
 
+        job_type = "sft"
+        from tenyson.jobs.rl import RLJob as _R
+        from tenyson.jobs.eval import EvalJob as _E
+
+        if isinstance(job, _R):
+            job_type = "rl"
+        elif isinstance(job, _E):
+            job_type = "eval"
+
+        run_name = resolve_required_run_name(job.config, job_type)
+        resolved_push_repo_id = preflight_cloud_hf_push(
+            job.config,
+            run_name=run_name,
+            job_type=job_type,
+        )
+        if resolved_push_repo_id:
+            training_cfg = job.config.setdefault("training", {})
+            if isinstance(training_cfg, dict):
+                training_cfg["hf_repo_id"] = resolved_push_repo_id
+
         session = self._get_session()
         ec2 = session.client("ec2")
         ec2_resource = session.resource("ec2")
@@ -282,10 +306,6 @@ class AWSManager(BaseCloudManager):
         print(f"[AWSManager] Instance is running. IP: {public_ip}")
 
         user = "ubuntu"
-        job_type = "sft"
-        from tenyson.jobs.sft import SFTJob as _S
-        from tenyson.jobs.rl import RLJob as _R
-        from tenyson.jobs.eval import EvalJob as _E
         from tenyson.core.telemetry import (
             TelemetryClient,
             record_run_result,
@@ -293,13 +313,6 @@ class AWSManager(BaseCloudManager):
             resolve_required_telemetry_context,
             wait_for_run_result,
         )
-
-        if isinstance(job, _R):
-            job_type = "rl"
-        elif isinstance(job, _E):
-            job_type = "eval"
-
-        run_name = resolve_required_run_name(job.config, job_type)
         backend_ref, experiment_id = resolve_required_telemetry_context(job.config)
         attempt_token = str(
             job.config.get("telemetry", {}).get("attempt_token") or ""
@@ -310,10 +323,10 @@ class AWSManager(BaseCloudManager):
             if job_type not in ("sft", "rl"):
                 return None, None
             train_cfg = job.config.get("training", {})
-            hf_repo_base = str(train_cfg.get("hf_repo_base") or "").strip()
-            if not hf_repo_base:
-                return None, None
-            repo_id = unique_repo_id(hf_repo_base, run_name)
+            repo_id = resolve_hf_push_repo_id(
+                train_cfg,
+                run_name=run_name,
+            )
             if not repo_id:
                 return None, None
             try:
@@ -440,10 +453,12 @@ class AWSManager(BaseCloudManager):
             "export TENYSON_EXECUTION_MODE=cloud",
             "export TENYSON_GPU_PROVIDER=aws",
         ]
-        for var in ["HF_TOKEN", "WANDB_API_KEY"]:
-            val = os.environ.get(var)
-            if val:
-                env_exports.append(f"export {var}={val}")
+        hf_token = resolve_hf_token()
+        if hf_token:
+            env_exports.append(f"export HF_TOKEN={hf_token}")
+        wandb_api_key = os.environ.get("WANDB_API_KEY")
+        if wandb_api_key:
+            env_exports.append(f"export WANDB_API_KEY={wandb_api_key}")
 
         task = job.task
         try:

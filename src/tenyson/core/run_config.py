@@ -45,17 +45,21 @@ def materialize_run_config(
 
 def shared_overrides_from_env(
     *,
+    hf_repo_id_env: str = "TENYSON_HF_REPO_ID",
     hf_repo_base_env: str = "TENYSON_HF_REPO_BASE",
     experiment_id_env: str = "TENYSON_EXPERIMENT_ID",
     wandb_entity_env: str = "TENYSON_WANDB_ENTITY",
     wandb_project_env: str = "TENYSON_WANDB_PROJECT",
 ) -> Optional[Dict[str, Any]]:
+    hf_repo_id = str(os.getenv(hf_repo_id_env) or "").strip()
     hf_repo_base = str(os.getenv(hf_repo_base_env) or "").strip()
     experiment_id = str(os.getenv(experiment_id_env) or "").strip()
     wandb_entity = str(os.getenv(wandb_entity_env) or "").strip()
     wandb_project = str(os.getenv(wandb_project_env) or "").strip()
 
     shared_overrides: Dict[str, Any] = {}
+    if hf_repo_id:
+        shared_overrides.setdefault("training", {})["hf_repo_id"] = hf_repo_id
     if hf_repo_base:
         shared_overrides.setdefault("training", {})["hf_repo_base"] = hf_repo_base
     if experiment_id:

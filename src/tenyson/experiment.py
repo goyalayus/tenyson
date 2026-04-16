@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -150,6 +150,11 @@ ArtifactRef = AdapterRef
 
 
 @dataclass(frozen=True)
+class _DeferredStageArtifactRef:
+    stage_id: str
+
+
+@dataclass(frozen=True)
 class StageSpec:
     id: str
     config: Dict[str, Any]
@@ -159,8 +164,14 @@ class StageSpec:
     run_name: str
     environment_run: Optional[str] = None
     variant: Optional[str] = None
+    deferred_artifact: Optional[_DeferredStageArtifactRef] = None
 
     def as_pipeline_step(self) -> Tuple[str, Dict[str, Any], type, Any]:
+        if self.deferred_artifact is not None:
+            raise RuntimeError(
+                f'Stage "{self.id}" still has an unresolved artifact dependency on '
+                f'"{self.deferred_artifact.stage_id}".'
+            )
         return (self.id, self.config, self.job_class, self.task)
 
 
@@ -168,15 +179,21 @@ def _resolve_stage_artifact(
     *,
     stage_id: str,
     run_type: str,
-    adapter: Optional[AdapterRef],
-    artifact: Optional[AdapterRef],
-) -> Optional[AdapterRef]:
+    adapter: Optional[AdapterRef | _DeferredStageArtifactRef],
+    artifact: Optional[AdapterRef | _DeferredStageArtifactRef],
+) -> Optional[AdapterRef | _DeferredStageArtifactRef]:
     if adapter is not None and artifact is not None:
         raise ValueError(
             f'Stage "{stage_id}" passed both adapter= and artifact= to {run_type}().'
         )
 
     return artifact if artifact is not None else adapter
+
+
+def _is_deferred_stage_artifact_ref(
+    value: object,
+) -> bool:
+    return isinstance(value, _DeferredStageArtifactRef)
 
 
 def _apply_stage_artifact_config(
@@ -201,6 +218,27 @@ def _apply_stage_artifact_config(
 
     model_cfg["init_adapter_repo"] = artifact.repo_id
     model_cfg["init_adapter_revision"] = artifact.revision
+
+
+def _resolve_deferred_stage_artifact(
+    stage: StageSpec,
+    artifact: AdapterRef,
+) -> StageSpec:
+    if stage.deferred_artifact is None:
+        return stage
+
+    resolved_config = deepcopy(stage.config)
+    _apply_stage_artifact_config(resolved_config, artifact)
+    _require_stage_model_source(
+        config=resolved_config,
+        stage_id=stage.id,
+        run_type=stage.run_type,
+    )
+    return replace(
+        stage,
+        config=resolved_config,
+        deferred_artifact=None,
+    )
 
 
 def _has_stage_model_source(config: Dict[str, Any]) -> bool:
@@ -659,7 +697,8 @@ class ExperimentBranch:
         return self.session.eval(stage_id, **kwargs)
 
     def run(self, stage: StageSpec) -> JobResult:
-        result = self.session.run_stage(stage, cloud=self._resolve_cloud())
+        resolved_stage = self._resolve_stage_dependencies(stage)
+        result = self.session.run_stage(resolved_stage, cloud=self._resolve_cloud())
         self._store_result(stage.id, result)
         self.session.raise_if_aborted()
         return result
@@ -672,13 +711,22 @@ class ExperimentBranch:
         if not self.session.parallel:
             results: Dict[str, JobResult] = {}
             for stage in stages:
-                result = self.session.run_stage(stage, cloud=self._resolve_cloud())
+                resolved_stage = self._resolve_stage_dependencies(stage)
+                result = self.session.run_stage(
+                    resolved_stage,
+                    cloud=self._resolve_cloud(),
+                )
                 results[stage.id] = result
                 self._store_result(stage.id, result)
             self.session.raise_if_aborted()
             return results
 
-        results = self.session.run_parallel(label, stages, cloud=self._resolve_cloud())
+        resolved_stages = [self._resolve_stage_dependencies(stage) for stage in stages]
+        results = self.session.run_parallel(
+            label,
+            resolved_stages,
+            cloud=self._resolve_cloud(),
+        )
         for stage in stages:
             self._store_result(stage.id, results[stage.id])
         self.session.raise_if_aborted()
@@ -713,6 +761,22 @@ class ExperimentBranch:
         if stage_id in self._results:
             raise ValueError(f'Duplicate branch result for stage "{stage_id}".')
         self._results[stage_id] = result
+
+    def _resolve_stage_dependencies(self, stage: StageSpec) -> StageSpec:
+        deferred_artifact = stage.deferred_artifact
+        if deferred_artifact is None:
+            return stage
+
+        try:
+            artifact = self.require_artifact(deferred_artifact.stage_id)
+        except KeyError as exc:
+            raise RuntimeError(
+                f'Stage "{stage.id}" depends on artifact from stage '
+                f'"{deferred_artifact.stage_id}", but that result is not available '
+                "in this branch yet."
+            ) from exc
+
+        return _resolve_deferred_stage_artifact(stage, artifact)
 
 
 class ExperimentSession:
@@ -1195,17 +1259,21 @@ class ExperimentSession:
 
     def run_branches(
         self,
-        branches: Mapping[str, Callable[[ExperimentBranch], None]],
+        branches: Mapping[str, Callable[[ExperimentBranch], None] | Sequence[StageSpec]],
     ) -> Dict[str, Dict[str, JobResult]]:
         self.raise_if_aborted()
         if not branches:
             return {}
 
         def _run_branch(
-            runner: Callable[[ExperimentBranch], None],
+            plan: Callable[[ExperimentBranch], None] | Sequence[StageSpec],
         ) -> Dict[str, JobResult]:
             branch = self.branch()
-            runner(branch)
+            if callable(plan):
+                plan(branch)
+            else:
+                for stage in plan:
+                    branch.run(stage)
             return branch.results()
 
         if not self.parallel:
@@ -1537,7 +1605,7 @@ class ExperimentSession:
         run_name: Optional[str],
         output_dir: Optional[str],
         overrides: Optional[Mapping[str, Any]],
-        artifact: Optional[AdapterRef],
+        artifact: Optional[AdapterRef | _DeferredStageArtifactRef],
         run_section: str,
         sft_dataset: Optional[SFTDatasetTemplate],
         rl_dataset: Optional[RLDatasetTemplate],
@@ -1546,6 +1614,16 @@ class ExperimentSession:
         eval_metrics: Optional[EvalMetricsTemplate],
     ) -> StageSpec:
         config = self.templates.clone(base)
+        deferred_artifact = (
+            artifact
+            if _is_deferred_stage_artifact_ref(artifact)
+            else None
+        )
+        resolved_artifact = (
+            None
+            if deferred_artifact is not None
+            else artifact
+        )
         task_overrides = None
         resolved_environment_run = str(environment_run or "").strip() or None
         explicit_stage_templates = has_explicit_stage_templates(
@@ -1594,12 +1672,13 @@ class ExperimentSession:
         elif not section_cfg.get("output_dir"):
             section_cfg["output_dir"] = f"./outputs/{resolved_run_name}"
 
-        _apply_stage_artifact_config(config, artifact)
-        _require_stage_model_source(
-            config=config,
-            stage_id=stage_id,
-            run_type=run_type,
-        )
+        _apply_stage_artifact_config(config, resolved_artifact)
+        if deferred_artifact is None:
+            _require_stage_model_source(
+                config=config,
+                stage_id=stage_id,
+                run_type=run_type,
+            )
         if resolved_environment_run is not None:
             bind_environment_run(config, resolved_environment_run)
         serialized_stage_templates = serialize_stage_templates(
@@ -1630,4 +1709,5 @@ class ExperimentSession:
             run_name=resolved_run_name,
             environment_run=resolved_environment_run,
             variant=variant,
+            deferred_artifact=deferred_artifact,
         )

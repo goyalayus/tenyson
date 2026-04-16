@@ -1,0 +1,189 @@
+
+[tenyson.ctl] Launching controller 'wordle-hardening-20260327-2157' at 2026-03-27T18:07:59.004981+00:00
+[wordle experiment] Smoke identity (experiment_id=wordle_hardening_matrix_20260327_215730, hf_repo_base=goyalayus/wordle-hardening-matrix-smoke, report_path=/home/ayush/Desktop/code/tenyson/.tenyson_runs/wordle_hardening_matrix_20260327_215730_report.md).
+[wordle experiment] Smoke mode enabled (sft_steps=1, rl_steps=20, rl_samples=24, eval_samples=4, rl_vllm_gpu_util=0.45).
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+✓ Initialized. View run at 
+https://modal.com/apps/goyalayuss/main/ap-kkNwE3xxKXzhMB5GYFenal
+Building image im-sD3PrWEpvuZ13dVWxbHMsh
+
+=> Step 0: FROM base
+
+=> Step 1: RUN python3 -m pip install --upgrade -qqq uv && python3 -m pip uninstall -y unsloth vllm triton torchvision bitsandbytes xformers transformers trl || true && uv pip install --system -qqq --upgrade vllm==0.9.2 numpy pillow torchvision bitsandbytes xformers unsloth && uv pip install --system -qqq triton==3.2.0 && uv pip install --system transformers==4.56.2 && uv pip install --system --no-deps trl==0.22.2 && python3 -m pip install huggingface_hub pyyaml wandb
+WARNING: Skipping unsloth as it is not installed.
+WARNING: Skipping vllm as it is not installed.
+WARNING: Skipping triton as it is not installed.
+WARNING: Skipping torchvision as it is not installed.
+WARNING: Skipping bitsandbytes as it is not installed.
+WARNING: Skipping xformers as it is not installed.
+WARNING: Skipping transformers as it is not installed.
+WARNING: Skipping trl as it is not installed.
+Using Python 3.12.10 environment at: /usr/local
+Resolved 18 packages in 216ms
+Downloading transformers (11.1MiB)
+ Downloaded transformers
+Prepared 2 packages in 708ms
+Uninstalled 2 packages in 620ms
+Installed 2 packages in 268ms
+Bytecode compiled 20782 files in 11.88s
+ - huggingface-hub==1.8.0
+ + huggingface-hub==0.36.2
+ - transformers==5.3.0
+ + transformers==4.56.2
+Using Python 3.12.10 environment at: /usr/local
+Resolved 1 package in 18ms
+Prepared 1 package in 54ms
+Uninstalled 1 package in 13ms
+Installed 1 package in 24ms
+Bytecode compiled 20836 files in 12.24s
+ - trl==0.24.0
+ + trl==0.22.2
+Looking in indexes: http://pypi-mirror.modal.local:5555/simple
+Requirement already satisfied: huggingface_hub in /usr/local/lib/python3.12/site-packages (0.36.2)
+Requirement already satisfied: pyyaml in /usr/local/lib/python3.12/site-packages (6.0.3)
+Collecting wandb
+  Downloading http://pypi-mirror.modal.local:5555/simple/wandb/wandb-0.25.1-py3-none-manylinux_2_28_x86_64.whl.metadata (11 kB)
+Requirement already satisfied: filelock in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (3.25.2)
+Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (2025.9.0)
+Requirement already satisfied: hf-xet<2.0.0,>=1.1.3 in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (1.4.2)
+Requirement already satisfied: packaging>=20.9 in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (26.0)
+Requirement already satisfied: requests in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (2.33.0)
+Requirement already satisfied: tqdm>=4.42.1 in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (4.67.3)
+Requirement already satisfied: typing-extensions>=3.7.4.3 in /usr/local/lib/python3.12/site-packages (from huggingface_hub) (4.15.0)
+Requirement already satisfied: click>=8.0.1 in /usr/local/lib/python3.12/site-packages (from wandb) (8.3.1)
+Collecting gitpython!=3.1.29,>=1.0.0 (from wandb)
+  Downloading http://pypi-mirror.modal.local:5555/simple/gitpython/gitpython-3.1.46-py3-none-any.whl.metadata (13 kB)
+Collecting platformdirs (from wandb)
+  Downloading http://pypi-mirror.modal.local:5555/simple/platformdirs/platformdirs-4.9.4-py3-none-any.whl.metadata (4.7 kB)
+Collecting protobuf!=5.28.0,!=5.29.0,<7,>4.21.0 (from wandb)
+  Downloading http://pypi-mirror.modal.local:5555/simple/protobuf/protobuf-6.33.6-cp39-abi3-manylinux2014_x86_64.whl.metadata (593 bytes)
+Requirement already satisfied: pydantic<3 in /usr/local/lib/python3.12/site-packages (from wandb) (2.12.5)
+Requirement already satisfied: sentry-sdk>=2.0.0 in /usr/local/lib/python3.12/site-packages (from wandb) (2.56.0)
+Requirement already satisfied: annotated-types>=0.6.0 in /usr/local/lib/python3.12/site-packages (from pydantic<3->wandb) (0.7.0)
+Requirement already satisfied: pydantic-core==2.41.5 in /usr/local/lib/python3.12/site-packages (from pydantic<3->wandb) (2.41.5)
+Requirement already satisfied: typing-inspection>=0.4.2 in /usr/local/lib/python3.12/site-packages (from pydantic<3->wandb) (0.4.2)
+Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/site-packages (from requests->huggingface_hub) (3.4.6)
+Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/site-packages (from requests->huggingface_hub) (3.11)
+Requirement already satisfied: urllib3<3,>=1.26 in /usr/local/lib/python3.12/site-packages (from requests->huggingface_hub) (2.6.3)
+Requirement already satisfied: certifi>=2023.5.7 in /usr/local/lib/python3.12/site-packages (from requests->huggingface_hub) (2026.2.25)
+Collecting gitdb<5,>=4.0.1 (from gitpython!=3.1.29,>=1.0.0->wandb)
+  Downloading http://pypi-mirror.modal.local:5555/simple/gitdb/gitdb-4.0.12-py3-none-any.whl.metadata (1.2 kB)
+Collecting smmap<6,>=3.0.1 (from gitdb<5,>=4.0.1->gitpython!=3.1.29,>=1.0.0->wandb)
+  Downloading http://pypi-mirror.modal.local:5555/simple/smmap/smmap-5.0.3-py3-none-any.whl.metadata (4.6 kB)
+Downloading http://pypi-mirror.modal.local:5555/simple/wandb/wandb-0.25.1-py3-none-manylinux_2_28_x86_64.whl (25.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 25.6/25.6 MB 239.8 MB/s eta 0:00:00
+Downloading http://pypi-mirror.modal.local:5555/simple/protobuf/protobuf-6.33.6-cp39-abi3-manylinux2014_x86_64.whl (323 kB)
+Downloading http://pypi-mirror.modal.local:5555/simple/gitpython/gitpython-3.1.46-py3-none-any.whl (208 kB)
+Downloading http://pypi-mirror.modal.local:5555/simple/gitdb/gitdb-4.0.12-py3-none-any.whl (62 kB)
+Downloading http://pypi-mirror.modal.local:5555/simple/smmap/smmap-5.0.3-py3-none-any.whl (24 kB)
+Downloading http://pypi-mirror.modal.local:5555/simple/platformdirs/platformdirs-4.9.4-py3-none-any.whl (21 kB)
+Installing collected packages: smmap, protobuf, platformdirs, gitdb, gitpython, wandb
+  Attempting uninstall: protobuf
+    Found existing installation: protobuf 7.34.1
+    Uninstalling protobuf-7.34.1:
+      Successfully uninstalled protobuf-7.34.1
+
+Successfully installed gitdb-4.0.12 gitpython-3.1.46 platformdirs-4.9.4 protobuf-6.33.6 smmap-5.0.3 wandb-0.25.1
+
+[notice] A new release of pip is available: 25.1.1 -> 26.0.1
+[notice] To update, run: pip install --upgrade pip
+Saving image...
+Image saved, took 18.12s
+
+Built image im-sD3PrWEpvuZ13dVWxbHMsh in 126.25s
+
+
+Building image im-hbP2eboAwvEVwu5lYTAJL3
+
+=> Step 0: FROM base
+
+=> Step 1: RUN python3 -c 'exec('"'"'import os\nimport shutil\nimport subprocess\nfrom pathlib import Path\nfrom urllib.parse import quote\n\nrepo_url = os.environ["TENYSON_GIT_REPO_URL"]\nrepo_commit = os.environ["TENYSON_GIT_COMMIT"]\ngit_token = str(os.environ.get("TENYSON_GIT_AUTH_TOKEN") or "").strip()\nif git_token and repo_url.startswith(("https://", "http://")):\n    scheme, rest = repo_url.split("://", 1)\n    repo_url = f"{scheme}://x-access-token:{quote(git_token, safe=\'"'"'\'"'"')}@{rest}"\n\nworkspace = Path("/workspace")\nif workspace.exists():\n    shutil.rmtree(workspace)\n\nsubprocess.run(["git", "clone", repo_url, str(workspace)], check=True)\nsubprocess.run(\n    ["git", "-C", str(workspace), "checkout", "--detach", repo_commit],\n    check=True,\n)'"'"')'
+Cloning into '/workspace'...
+HEAD is now at 4fa2e88 Recover terminal telemetry on launcher failure with attempt token
+Saving image...
+Image saved, took 1.87s
+
+Built image im-hbP2eboAwvEVwu5lYTAJL3 in 5.59s
+
+
+Building image im-PkPOUwIjdoU9af01hyTNy9
+
+=> Step 0: FROM base
+
+=> Step 1: ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+=> Step 2: ENV PYTHONPATH=/workspace/src
+Saving image...
+Image saved, took 1.64s
+
+Built image im-PkPOUwIjdoU9af01hyTNy9 in 4.26s
+
+
+✓ Created objects.
+├── 🔨 Created mount PythonPackage:tenyson
+└── 🔨 Created function _modal_run_remote.
+[ModalManager] Spawned detached Modal app ap-kkNwE3xxKXzhMB5GYFenal with function call fc-01KMR7V7CXPMJ16NAQ5VPVW1XV.
+[ModalManager] Running on Modal: /usr/local/bin/python -m tenyson.runner --job-type sft --config /tmp/tenyson-sft-config.yaml --task-module examples/wordle/wordle_task.py
+[modal-client] 2026-03-27T23:40:41+0530 Timed out waiting for final app logs.
+✓ App completed. View run at 
+https://modal.com/apps/goyalayuss/main/ap-kkNwE3xxKXzhMB5GYFenal
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal_launcher.py", line 39, in <module>
+    main()
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal_launcher.py", line 31, in main
+    manager._run_modal_job(
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal.py", line 524, in _run_modal_job
+    git_source = self._resolve_git_source(local_project_root)
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal.py", line 498, in _resolve_git_source
+    raise RuntimeError(
+RuntimeError: Modal execution is git-backed only. Commit tracked changes before launching so the remote worker can run the exact pushed code.
+wandb: Currently logged in as: ayush_g (ayush_g-iit-roorkee) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: WARNING Changes to your `wandb` environment variables will be ignored because your `wandb` session has already started. For more information on how to modify your settings with `wandb.init()` arguments, please refer to https://wandb.me/wandb-init.
+wandb: setting up run wordle_hardening_matrix_20260327_215730-eval-eval_baseline_mixed-308d7ca2-cee80d6cd9
+wandb: Tracking run with wandb version 0.24.1
+wandb: Run data is saved locally in /home/ayush/Desktop/code/tenyson/wandb/run-20260327_234432-wordle_hardening_matrix_20260327_215730-eval-eval_baseline_mixed-308d7ca2-cee80d6cd9
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run eval_baseline_mixed
+wandb: ⭐️ View project at https://wandb.ai/ayush_g-iit-roorkee/wordle-research
+wandb: 🚀 View run at https://wandb.ai/ayush_g-iit-roorkee/wordle-research/runs/wordle_hardening_matrix_20260327_215730-eval-eval_baseline_mixed-308d7ca2-cee80d6cd9
+[TENYSON] Step failed (Modal): Modal launcher subprocess failed with code 1. Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal_launcher.py", line 39, in <module>
+    main()
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal_launcher.py", line 31, in main
+    manager._run_modal_job(
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal.py", line 524, in _run_modal_job
+    git_source = self._resolve_git_source(local_project_root)
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal.py", line 498, in _resolve_git_source
+    raise RuntimeError(
+RuntimeError: Modal execution is git-backed only. Commit tracked changes before launching so the remote worker can run the exact pushed code.
+[TENYSON] Step "eval_baseline_mixed" failed: Modal launcher subprocess failed with code 1. Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal_launcher.py", line 39, in <module>
+    main()
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal_launcher.py", line 31, in main
+    manager._run_modal_job(
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal.py", line 524, in _run_modal_job
+    git_source = self._resolve_git_source(local_project_root)
+  File "/home/ayush/Desktop/code/tenyson/src/tenyson/cloud/modal.py", line 498, in _resolve_git_source
+    raise RuntimeError(
+RuntimeError: Modal execution is git-backed only. Commit tracked changes before launching so the remote worker can run the exact pushed code.
+[TENYSON] Awaiting failure action for step "eval_baseline_mixed" (run_id=eval_baseline_mixed, job_type=eval).
+  [restart] Restart step from scratch
+  [abort] Abort pipeline
+Choice (restart/abort): [TENYSON] Abort selected in stage "eval_baseline_mixed". Stopping experiment and signalling 0 active sibling run(s).
+[TENYSON] Experiment aborted. Skipping remaining stages and final outputs.
+[wordle experiment] Rebuilt final report from telemetry at /home/ayush/Desktop/code/tenyson/.tenyson_runs/wordle_hardening_matrix_20260327_215730_report.md.
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33meval_baseline_mixed[0m at: [34mhttps://wandb.ai/ayush_g-iit-roorkee/wordle-research/runs/wordle_hardening_matrix_20260327_215730-eval-eval_baseline_mixed-308d7ca2-cee80d6cd9[0m
+[1;34mwandb[0m: Find logs at: [1;35mwandb/run-20260327_234432-wordle_hardening_matrix_20260327_215730-eval-eval_baseline_mixed-308d7ca2-cee80d6cd9/logs[0m

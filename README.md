@@ -2,7 +2,7 @@
 
 Tenyson is a remote-first research library for SFT, GRPO RL, and eval workflows.
 
-The mental model is intentionally small:
+The whole thing is built around a small mental model:
 
 - each environment lives in a single Python file
 - that file exports explicit named runs
@@ -10,13 +10,11 @@ The mental model is intentionally small:
 - `experiment.py` just chains those runs into the graph you want
 - the library handles remote execution, telemetry, Hugging Face adapter lineage, control flow, and a fixed report
 
-Right now the Wordle example is the best reference for how the system is supposed to feel.
+If you want to see the intended style, start with the Wordle example. That is the clearest reference for how this library is supposed to feel.
 
-The visible starter templates live in [`config_templates/`](./config_templates), not inside the example folder. That way a new user can see the default SFT, RL, and eval knobs without digging through task-specific code first.
+The starter templates live in [`config_templates/`](./config_templates), not inside the example folder. That is deliberate. A new user should be able to see the default SFT, RL, and eval knobs without digging through task-specific code first.
 
-For RL, `training.max_completion_length` is the single completion-length limit.
-The Wordle reward-side overlength check uses that same resolved value, so you do
-not need a separate `vllm.max_tokens` knob in the RL template.
+For RL, `training.max_completion_length` is the only completion-length limit. The Wordle reward-side overlength check uses that same resolved value, so you do not need a separate `vllm.max_tokens` knob in the RL template.
 
 ## What Tenyson Gives You
 
@@ -31,7 +29,7 @@ not need a separate `vllm.max_tokens` knob in the RL template.
 
 The environment contract lives in [`src/tenyson/core/environment.py`](./src/tenyson/core/environment.py).
 
-An environment definition is a map of named runs. Each run is explicit and stable. For example, the Wordle task exposes names like:
+An environment definition is just a map of named runs. Each run is explicit and stable. In the Wordle task, those names look like:
 
 - `wordle_sft_main`
 - `wordle_rl_mixed`
@@ -53,8 +51,7 @@ That is the big design point: task logic stays in the environment file, while ex
 
 The Wordle experiment entrypoint in [`examples/wordle/experiment.py`](./examples/wordle/experiment.py) is the intended style.
 
-The point is that the experiment file should stay small. In the happy path it is
-just:
+The point is that the experiment file should stay small. In the happy path, it is basically this:
 
 ```python
 from tenyson import run_experiment
@@ -70,13 +67,11 @@ if __name__ == "__main__":
     run_experiment(__file__, build)
 ```
 
-That file is not supposed to contain reward logic, dataset construction logic,
-report rebuilding, or controller shutdown plumbing. Those concerns live in the
-library and the environment definition.
+That file is not supposed to contain reward logic, dataset construction logic, report rebuilding, or controller shutdown plumbing. Those concerns belong in the library and the environment definition.
 
 ## Dataset Format Requirements
 
-This needs to be explicit because the expected shape differs by run type.
+This is worth spelling out because the expected shape changes by run type.
 
 ### SFT
 
@@ -119,8 +114,7 @@ Important constraints:
 
 ### RL And Eval
 
-RL and eval can use task-generated synthetic rows instead of conversational
- SFT rows. The built-in Wordle synthetic rows look like:
+RL and eval can use task-generated synthetic rows instead of conversational SFT rows. The built-in Wordle synthetic rows look like:
 
 ```json
 {
@@ -151,8 +145,8 @@ Important constraints:
 Jobs run through a cloud manager. The manager launches `python -m tenyson.runner` remotely, waits for the canonical run result in telemetry, and returns a `JobResult`.
 
 Local GPU execution is intentionally not the default path. Tenyson expects to run through a supported remote provider.
-Modal execution is git-backed: commit and push your code first, then the worker checks out that exact commit remotely.
-There is no local source-sync or dev-mode upload path in the Modal runner.
+
+Modal execution is still git-backed, but the controller now keeps the remote SHA honest for you. If `HEAD` is already on the remote, Tenyson uses it directly. If `HEAD` is clean but unpushed, or the workspace has local code changes, Tenyson pushes the exact commit or a scratch snapshot commit to a throwaway `tenyson/runs/*` ref and the worker checks out that SHA remotely.
 
 ```python
 from pathlib import Path
@@ -174,7 +168,7 @@ result = cloud.run(job)
 print(result.metrics, result.wandb_url)
 ```
 
-For real runs you will usually also provide the W&B destination and HF repo base through env vars or shared experiment overrides, as shown in the Wordle example runner.
+For real runs, you will usually also provide the W&B destination and HF repo base through env vars or shared experiment overrides, like the Wordle example does.
 
 ## Wordle Reference Workflow
 
@@ -187,7 +181,7 @@ The current Wordle example runs this graph:
 5. Branch B: curriculum RL from turn 2 through turn 5, with follow-up evals after each stage
 6. Final fixed markdown report
 
-The important part is not Wordle itself. The important part is the shape:
+Wordle is not the point here. The shape is:
 
 - the base templates come from `config_templates/`
 - the environment file exports the named runs
@@ -203,14 +197,9 @@ cp examples/wordle/.env.example .env
 python3 examples/wordle/experiment.py
 ```
 
-The experiment entrypoint loads the repo-root `.env` by default and falls back
-to a local example `.env` only if the root file is missing. It can also install
-missing controller-side dependencies on a fresh local checkout. Set
-`TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable dependency bootstrap
-behavior.
+The experiment entrypoint loads the repo-root `.env` by default and falls back to a local example `.env` only if the root file is missing. It can also install missing controller-side dependencies on a fresh local checkout. Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable that bootstrap behavior.
 
-For long-running experiments, prefer launching the local controller in detached
-mode so it does not die with your interactive terminal session:
+For long-running experiments, launch the local controller in detached mode so it does not die with your terminal session:
 
 ```bash
 python3 -m tenyson.ctl launch \
@@ -221,12 +210,10 @@ python3 -m tenyson.ctl launch \
 python3 -m tenyson.ctl status --name wordle
 ```
 
-This writes controller pid/log metadata under `.tenyson_runs/controllers/`.
-Use `python3 -m tenyson.ctl stop-controller --name wordle` if you need to
-terminate the detached local controller process itself.
+This writes controller pid/log metadata under `.tenyson_runs/controllers/`. Use `python3 -m tenyson.ctl stop-controller --name wordle` if you need to terminate the detached local controller process itself.
 
-For a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in
-the repo-root `.env`.
+On a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in the repo-root `.env`.
+
 If your GitHub remote is private, also provide `TENYSON_GIT_AUTH_TOKEN` or `GITHUB_TOKEN` so Modal can clone the repo during image build.
 
 Useful environment variables:
@@ -246,7 +233,8 @@ For Hugging Face pushes, `TENYSON_HF_REPO_BASE` must point at a namespace that t
 ## Telemetry
 
 Telemetry is mandatory. Every run needs an experiment id.
-Telemetry is always sent to W&B. You do not need to set a backend field in normal configs.
+
+Telemetry always goes to W&B. You do not need to set a backend field in normal configs.
 
 ```yaml
 telemetry:
@@ -264,7 +252,7 @@ The canonical run result lives in telemetry:
 
 - W&B summaries and artifacts
 
-That same telemetry layer is also how stop requests are delivered to running jobs.
+That same telemetry layer is also how stop requests reach running jobs.
 
 ## Dashboard
 
@@ -279,8 +267,7 @@ python3 -m tenyson.ui \
   --open-browser
 ```
 
-You can also omit `--db-url` if `TENYSON_WANDB_ENTITY` and `TENYSON_WANDB_PROJECT`
-are already set in your environment.
+You can also omit `--db-url` if `TENYSON_WANDB_ENTITY` and `TENYSON_WANDB_PROJECT` are already set in your environment.
 
 The dashboard is intentionally zero-build:
 
@@ -301,7 +288,7 @@ Useful flags:
 
 Reporting is fixed, not template-driven.
 
-The experiment report captures the things you generally want when looking back at a run:
+The experiment report captures the stuff you usually want when you come back to a run later:
 
 - stage status
 - run type and named environment run
@@ -331,20 +318,15 @@ If you manually stop an SFT or RL run, the pipeline can now do four different th
 
 `continue` is only offered when the stopped run already has a concrete Hugging Face repo + revision, so later stages can still seed from an exact adapter lineage.
 
-You can also recover after the original local controller process has exited.
-Pass an explicit recovery experiment id to `ExperimentSession` with
-`recovery_experiment_id="..."`, then relaunch the experiment with the same stage
-run names. On startup, Tenyson will reuse prior successful/partial stage
-results, and for stopped SFT/RL stages it will prompt for:
+You can also recover after the original local controller process has exited. Pass an explicit recovery experiment id to `ExperimentSession` with `recovery_experiment_id="..."`, then relaunch the experiment with the same stage run names. On startup, Tenyson will reuse prior successful or partial stage results, and for stopped SFT/RL stages it will prompt for:
 
 - `resume`: restart from the saved trainer checkpoint
 - `continue`: accept the stopped checkpoint and move to the next stage
 - `restart`: rerun the stage from scratch
 
-The Wordle example exposes this through
-`TENYSON_RECOVER_EXPERIMENT_ID=<experiment_id>`.
+The Wordle example exposes this through `TENYSON_RECOVER_EXPERIMENT_ID=<experiment_id>`.
 
-For SFT early stopping specifically, Tenyson now treats it as a strict best-model flow instead of a soft hint:
+For SFT early stopping specifically, Tenyson treats it as a strict best-model flow instead of a soft hint:
 
 - early stopping requires an eval dataset
 - `training.eval_steps` must match `training.hf_push_every_steps`

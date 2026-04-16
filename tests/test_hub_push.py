@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -11,8 +13,12 @@ from tenyson.core.hub_push import (
     PeriodicHubPushCallback,
     _resolve_stale_root_artifact_files,
     ensure_hf_repo,
+    preflight_cloud_hf_push,
     push_pretrained_snapshot_to_hub,
+    resolve_hf_push_repo_id,
+    resolve_hf_token,
 )
+from tenyson.jobs.hf_repo import unique_repo_id
 
 
 class FakeSaveable:
@@ -78,6 +84,131 @@ class HubPushTests(unittest.TestCase):
 
         create_repo_mock.assert_called_once()
         sleep_mock.assert_not_called()
+
+    def test_ensure_hf_repo_does_not_false_green_on_existing_public_repo(self) -> None:
+        response = Response()
+        response.status_code = 401
+        response.url = "https://huggingface.co/api/repos/create"
+        auth_error = HfHubHTTPError("unauthorized", response=response)
+
+        with patch(
+            "tenyson.core.hub_push.create_repo",
+            side_effect=auth_error,
+        ) as create_repo_mock, patch(
+            "tenyson.core.hub_push.HfApi"
+        ) as api_mock:
+            with self.assertRaises(HfHubHTTPError):
+                ensure_hf_repo("org/public-repo", token="bad-token")
+
+        create_repo_mock.assert_called_once_with(
+            repo_id="org/public-repo",
+            token="bad-token",
+            exist_ok=True,
+        )
+        api_mock.assert_not_called()
+
+    def test_resolve_hf_token_reads_standard_cache_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            token_path = Path(tmpdir) / "hf-token"
+            token_path.write_text("cached-token\n", encoding="utf-8")
+            with patch(
+                "tenyson.core.hub_push._HF_TOKEN_CACHE_PATHS",
+                (token_path,),
+            ), patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(resolve_hf_token(), "cached-token")
+
+    def test_resolve_hf_push_repo_id_prefers_explicit_repo_id(self) -> None:
+        self.assertEqual(
+            resolve_hf_push_repo_id(
+                {
+                    "hf_repo_id": "org/existing-repo",
+                    "hf_repo_base": "org/base",
+                },
+                run_name="Train Run",
+            ),
+            "org/existing-repo",
+        )
+
+    def test_preflight_cloud_hf_push_requires_repo_target_for_training_jobs(self) -> None:
+        with patch.dict(os.environ, {"HF_TOKEN": "hf-token"}, clear=True), patch(
+            "tenyson.core.hub_push._HF_TOKEN_CACHE_PATHS",
+            tuple(),
+        ):
+            with self.assertRaisesRegex(ValueError, "training.hf_repo_id or training.hf_repo_base"):
+                preflight_cloud_hf_push(
+                    {"training": {}},
+                    run_name="train_run",
+                    job_type="sft",
+                )
+
+    def test_preflight_cloud_hf_push_requires_hf_token_or_cached_login(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "tenyson.core.hub_push._HF_TOKEN_CACHE_PATHS",
+            tuple(),
+        ):
+            with self.assertRaisesRegex(ValueError, "Hugging Face token"):
+                preflight_cloud_hf_push(
+                    {"training": {"hf_repo_base": "org/base"}},
+                    run_name="train_run",
+                    job_type="rl",
+                )
+
+    def test_preflight_cloud_hf_push_validates_target_repo_with_explicit_token(self) -> None:
+        repo_id = unique_repo_id("org/base", "Train Run")
+
+        with patch.dict(os.environ, {"HF_TOKEN": "hf-token"}, clear=True), patch(
+            "tenyson.core.hub_push._HF_TOKEN_CACHE_PATHS",
+            tuple(),
+        ), patch(
+            "tenyson.core.hub_push.ensure_hf_repo"
+        ) as ensure_repo_mock:
+            resolved_repo = preflight_cloud_hf_push(
+                {"training": {"hf_repo_base": "org/base"}},
+                run_name="Train Run",
+                job_type="sft",
+            )
+
+        self.assertEqual(resolved_repo, repo_id)
+        ensure_repo_mock.assert_called_once_with(repo_id, token="hf-token")
+
+    def test_preflight_cloud_hf_push_accepts_explicit_repo_id(self) -> None:
+        with patch.dict(os.environ, {"HF_TOKEN": "hf-token"}, clear=True), patch(
+            "tenyson.core.hub_push._HF_TOKEN_CACHE_PATHS",
+            tuple(),
+        ), patch(
+            "tenyson.core.hub_push.ensure_hf_repo"
+        ) as ensure_repo_mock:
+            resolved_repo = preflight_cloud_hf_push(
+                {"training": {"hf_repo_id": "org/existing-repo"}},
+                run_name="Train Run",
+                job_type="sft",
+            )
+
+        self.assertEqual(resolved_repo, "org/existing-repo")
+        ensure_repo_mock.assert_called_once_with("org/existing-repo", token="hf-token")
+
+    def test_preflight_cloud_hf_push_rewrites_auth_failures_cleanly(self) -> None:
+        response = Response()
+        response.status_code = 401
+        response.url = "https://huggingface.co/api/repos/create"
+        auth_error = HfHubHTTPError("unauthorized", response=response)
+
+        with patch.dict(os.environ, {"HF_TOKEN": "hf-token"}, clear=True), patch(
+            "tenyson.core.hub_push._HF_TOKEN_CACHE_PATHS",
+            tuple(),
+        ), patch(
+            "tenyson.core.hub_push.ensure_hf_repo",
+            side_effect=auth_error,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "invalid or does not have write access",
+            ):
+                preflight_cloud_hf_push(
+                    {"training": {"hf_repo_base": "org/base"}},
+                    run_name="train_run",
+                    job_type="rl",
+                )
 
     def test_resolve_stale_root_artifact_files_deletes_old_model_shards_and_index(self) -> None:
         stale_files = _resolve_stale_root_artifact_files(
@@ -180,7 +311,9 @@ class HubPushTests(unittest.TestCase):
                     commit_message="sync snapshot",
                 )
 
-        ensure_repo_mock.assert_called_once_with("org/repo")
+        ensure_repo_mock.assert_called_once()
+        self.assertEqual(ensure_repo_mock.call_args.args, ("org/repo",))
+        self.assertIn("token", ensure_repo_mock.call_args.kwargs)
         self.assertEqual(len(model.calls), 1)
         self.assertEqual(len(tokenizer.calls), 1)
         self.assertEqual(fake_api.upload_kwargs["repo_id"], "org/repo")

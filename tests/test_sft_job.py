@@ -213,6 +213,7 @@ class SFTJobHelperTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "from_pretrained")
         self.assertTrue(calls[0][1]["full_finetuning"])
         self.assertFalse(calls[0][1]["fast_inference"])
+        self.assertNotIn("trust_remote_code", calls[0][1])
         self.assertFalse(job.config["model"]["fast_inference"])
         self.assertEqual(calls[0][1]["model_name"], "Qwen/Qwen3-4B")
         self.assertNotIn("get_peft_model", [call[0] for call in calls])

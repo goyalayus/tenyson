@@ -1,11 +1,40 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+import importlib
+import inspect
+from typing import Any, Callable, Mapping, Optional
 
 from datasets import Dataset, load_dataset
 
 from tenyson.core.environment import DatasetHooks
 from tenyson.core.stage_templates import SFTDatasetTemplate, template_factory_ref
+
+
+def chat_sft_dataset_fn(
+    function: Callable[..., Dataset],
+) -> Callable[..., Dataset]:
+    """Mark a plain function as a Tenyson chat-SFT train-dataset hook.
+
+    This decorator exists for readability first. A function like
+    `build_addition_sft_train_dataset(...)` looks like an ordinary helper in a
+    task file, but Tenyson can bind it into an `SFTDatasetTemplate` with
+    `bind_chat_sft_dataset(...)`.
+
+    The decorator makes that role visible at the definition site and validates
+    the small contract that chat-SFT bound builders must follow: they must be a
+    module-level named function and they must use a callback-safe signature.
+    """
+
+    _require_module_level_named_function(
+        function,
+        label="chat SFT train builder",
+    )
+    _validate_chat_sft_train_builder_signature(
+        function,
+        label="chat SFT train builder",
+    )
+    setattr(function, "__tenyson_chat_sft_dataset_fn__", True)
+    return function
 
 
 def build_hub_chat_sft_dataset_hooks(
@@ -26,6 +55,43 @@ def build_hub_chat_sft_dataset_hooks(
         evaluation=template.evaluation,
         formatting=template.formatting,
         collator=template.collator,
+    )
+
+
+def bind_chat_sft_dataset(
+    train_builder: Callable[..., Dataset],
+    /,
+    *,
+    messages_column: str = "messages",
+    **bound_kwargs: Any,
+) -> SFTDatasetTemplate:
+    """Bind a plain chat-messages dataset builder into an SFT template.
+
+    The builder must be a module-level named function, and every required
+    parameter must be bound here because the SFT job will call it later without
+    passing task-specific kwargs.
+    """
+
+    module_name, function_name = _require_module_level_named_function(
+        train_builder,
+        label="chat SFT train builder",
+    )
+    _validate_chat_sft_bound_builder_kwargs(
+        train_builder,
+        bound_kwargs=bound_kwargs,
+    )
+    return _build_bound_chat_sft_dataset_template(
+        train_builder=train_builder,
+        messages_column=messages_column,
+        bound_kwargs=bound_kwargs,
+        factory_ref=template_factory_ref(
+            "tenyson.core.chat_sft",
+            "_bound_chat_sft_dataset_from_callable_ref",
+            module_name=module_name,
+            function_name=function_name,
+            messages_column=messages_column,
+            **({"bound_kwargs": dict(bound_kwargs)} if bound_kwargs else {}),
+        ),
     )
 
 
@@ -73,6 +139,72 @@ def hub_chat_sft_dataset(
             dataset_key=dataset_key,
             messages_column=messages_column,
             split=split,
+        ),
+    )
+
+
+def _build_bound_chat_sft_dataset_template(
+    *,
+    train_builder: Callable[..., Dataset],
+    messages_column: str,
+    bound_kwargs: Mapping[str, Any],
+    factory_ref: Any,
+) -> SFTDatasetTemplate:
+    resolved_bound_kwargs = dict(bound_kwargs)
+
+    def _train_dataset(_config: dict[str, Any], _tokenizer: Any) -> Dataset:
+        dataset = train_builder(**resolved_bound_kwargs)
+        if not isinstance(dataset, Dataset):
+            raise TypeError(
+                "chat SFT train builder must return datasets.Dataset, "
+                f"got {type(dataset).__name__}."
+            )
+        validate_chat_messages_dataset(
+            dataset,
+            messages_column=messages_column,
+            dataset_name=f"{train_builder.__module__}.{train_builder.__name__}",
+            split_name="train",
+        )
+        return dataset
+
+    def _formatting(_config: dict[str, Any], tokenizer: Any):
+        return build_chat_messages_formatting_func(
+            tokenizer=tokenizer,
+            messages_column=messages_column,
+        )
+
+    return SFTDatasetTemplate(
+        train=_train_dataset,
+        formatting=_formatting,
+        factory_ref=factory_ref,
+    )
+
+
+def _bound_chat_sft_dataset_from_callable_ref(
+    *,
+    module_name: str,
+    function_name: str,
+    messages_column: str = "messages",
+    bound_kwargs: Mapping[str, Any] | None = None,
+) -> SFTDatasetTemplate:
+    module = importlib.import_module(str(module_name).strip())
+    train_builder = getattr(module, str(function_name).strip())
+    if not callable(train_builder):
+        raise TypeError(
+            f"chat SFT train builder {module_name}.{function_name} is not callable."
+        )
+
+    return _build_bound_chat_sft_dataset_template(
+        train_builder=train_builder,
+        messages_column=messages_column,
+        bound_kwargs=dict(bound_kwargs or {}),
+        factory_ref=template_factory_ref(
+            "tenyson.core.chat_sft",
+            "_bound_chat_sft_dataset_from_callable_ref",
+            module_name=module_name,
+            function_name=function_name,
+            messages_column=messages_column,
+            **({"bound_kwargs": dict(bound_kwargs)} if bound_kwargs else {}),
         ),
     )
 
@@ -170,6 +302,77 @@ def build_chat_messages_formatting_func(
         ]
 
     return _format_example
+
+
+def _require_module_level_named_function(
+    value: Callable[..., Any],
+    *,
+    label: str,
+) -> tuple[str, str]:
+    module_name = str(getattr(value, "__module__", "") or "").strip()
+    function_name = str(getattr(value, "__name__", "") or "").strip()
+    qualname = str(getattr(value, "__qualname__", "") or "").strip()
+
+    if not module_name or not function_name:
+        raise TypeError(f"{label} must be a module-level importable function.")
+    if "<locals>" in qualname or function_name == "<lambda>":
+        raise TypeError(
+            f"{label} must be a module-level named function, not a lambda or nested function."
+        )
+    return module_name, function_name
+
+
+def _validate_chat_sft_train_builder_signature(
+    function: Callable[..., Dataset],
+    *,
+    label: str,
+) -> None:
+    signature = inspect.signature(function)
+
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                f"{label} cannot use positional-only parameters."
+            )
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            raise TypeError(
+                f"{label} cannot use *args."
+            )
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            raise TypeError(
+                f"{label} cannot use **kwargs."
+            )
+
+
+def _validate_chat_sft_bound_builder_kwargs(
+    train_builder: Callable[..., Dataset],
+    *,
+    bound_kwargs: Mapping[str, Any],
+) -> None:
+    _validate_chat_sft_train_builder_signature(
+        train_builder,
+        label="chat SFT train builder",
+    )
+    signature = inspect.signature(train_builder)
+
+    try:
+        signature.bind_partial(**dict(bound_kwargs))
+    except TypeError as exc:
+        raise TypeError(
+            "chat SFT train builder received invalid bound kwargs for "
+            f"{train_builder.__module__}.{train_builder.__name__}: {exc}"
+        ) from exc
+
+    for parameter in signature.parameters.values():
+        if parameter.name in bound_kwargs:
+            continue
+        if parameter.default is not inspect.Signature.empty:
+            continue
+        raise TypeError(
+            "chat SFT train builder must bind every required parameter. "
+            f'Missing bound kwarg "{parameter.name}" for '
+            f"{train_builder.__module__}.{train_builder.__name__}."
+        )
 
 
 def validate_chat_messages_dataset(
