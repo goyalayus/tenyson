@@ -801,11 +801,13 @@ def _build_request_handler(
                 if parsed.path == "/":
                     self._write_file(_static_asset_path("index.html"))
                     return
-                if parsed.path == "/assets/app.js":
-                    self._write_file(_static_asset_path("app.js"))
-                    return
-                if parsed.path == "/assets/styles.css":
-                    self._write_file(_static_asset_path("styles.css"))
+                if parsed.path.startswith("/assets/"):
+                    asset_name = parsed.path.removeprefix("/assets/")
+                    asset_path = _static_asset_path(asset_name)
+                    if asset_path.is_file():
+                        self._write_file(asset_path)
+                        return
+                    self._write_json({"error": "Asset not found."}, status=404)
                     return
                 if parsed.path == "/api/config":
                     self._write_json(
@@ -880,13 +882,17 @@ def serve_dashboard(config: DashboardServerConfig) -> None:
         ),
         history_limit=config.history_limit,
     )
-    if config.experiment_id:
-        service._prewarm_default_experiment()
     handler = _build_request_handler(service=service, config=config)
     server = ThreadingHTTPServer((config.host, int(config.port)), handler)
     host, port = server.server_address
     url = f"http://{host}:{port}"
     print(f"[tenyson.ui] Serving telemetry dashboard at {url}", flush=True)
+    if config.experiment_id:
+        threading.Thread(
+            target=service._prewarm_default_experiment,
+            name="tenyson-ui-prewarm",
+            daemon=True,
+        ).start()
     if config.open_browser:
         try:
             webbrowser.open(url)

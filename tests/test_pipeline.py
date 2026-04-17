@@ -285,6 +285,63 @@ class PipelineTests(unittest.TestCase):
         record_summary_mock.assert_called_once()
         record_result_mock.assert_called_once()
 
+    def test_accept_stopped_result_preserves_existing_results_payload(self) -> None:
+        result = JobResult(
+            run_id="wordle_rl_main",
+            status="stopped",
+            total_time_seconds=0.0,
+            hf_repo_id="repo",
+            hf_revision="rev",
+            stopped_early=True,
+            failure_reason="Manual stop requested at step 12.",
+            attempt_token="attempt-1",
+        )
+        config = {
+            "telemetry": {
+                "backend": "wandb",
+                "entity": "demo",
+                "project": "tenyson",
+                "experiment_id": "wordle_exp",
+            }
+        }
+        preserved_payload = {
+            "metrics": {"total_samples": 2, "rollout_batches": 1},
+            "detailed_results": [
+                {
+                    "prompt": "Prompt one",
+                    "completion": "Answer one",
+                    "reward": 0.6,
+                }
+            ],
+        }
+
+        with patch.object(
+            pipeline_module,
+            "TelemetryClient",
+            return_value=object(),
+        ), patch.object(
+            pipeline_module,
+            "get_run_result",
+            return_value=(preserved_payload, {"status": "stopped"}),
+        ) as get_run_result_mock, patch.object(
+            pipeline_module,
+            "record_run_summary",
+        ), patch.object(
+            pipeline_module,
+            "record_run_result",
+        ) as record_result_mock:
+            pipeline_module._accept_stopped_result(
+                result,
+                config=config,
+                job_type="rl",
+            )
+
+        get_run_result_mock.assert_called_once()
+        self.assertEqual(
+            record_result_mock.call_args.kwargs["results_payload"],
+            preserved_payload,
+        )
+
     def test_abort_parallel_stage_runs_requests_stop_for_sibling_with_attempt_token(self) -> None:
         branches = [
             (

@@ -16,6 +16,7 @@ from tenyson.core.notify import notify_failure
 from tenyson.core.run_name import resolve_required_run_name_for_job_class
 from tenyson.core.telemetry import (
     TelemetryClient,
+    get_run_result,
     record_run_result,
     record_run_summary,
     resolve_experiment_id,
@@ -68,6 +69,22 @@ def _accept_stopped_result(
         if not backend_ref or not experiment_id:
             return
         client = TelemetryClient(db_url=backend_ref)
+        preserved_results_payload: Any = result
+        try:
+            existing_result = get_run_result(
+                client=client,
+                experiment_id=experiment_id,
+                run_id=result.run_id,
+                phase=job_type,
+                attempt_token=getattr(result, "attempt_token", None),
+                include_results_payload=True,
+            )
+        except Exception:
+            existing_result = None
+        if existing_result is not None:
+            existing_results_payload, _existing_job_payload = existing_result
+            if existing_results_payload:
+                preserved_results_payload = existing_results_payload
         record_run_summary(
             client=client,
             experiment_id=experiment_id,
@@ -79,7 +96,7 @@ def _accept_stopped_result(
             experiment_id=experiment_id,
             run_id=result.run_id,
             phase=job_type,
-            results_payload=result,
+            results_payload=preserved_results_payload,
             job_result_payload=result,
         )
     except Exception as exc:  # noqa: BLE001
