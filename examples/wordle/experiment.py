@@ -1,275 +1,89 @@
 from functional import (
-    constraint_metrics,
-    constraint_reward,
-    eval_mixed_dataset,
-    eval_turn_dataset,
-    rl_mixed_dataset,
-    rl_turn_dataset,
-    sft_chat_dataset,
+    build_turn5_eval_dataset,
+    build_turn5_sft_train_dataset,
+    compute_turn5_wordle_metrics,
+    turn5_wordle_reward,
+    turn5_wordle_rl_dataset,
 )
-from tenyson import run_experiment
+from tenyson import bind_chat_sft_dataset, bind_eval_dataset, run_experiment
+
+
+_SFT_DATASET = "goyalayus/wordle-reasoning-sft-prefix-keep-think"
+_MODEL_NAME = "Qwen/Qwen3-4B"
+_RL_SAMPLE_COUNT = 4096
+_RL_SEED = 456
+_EVAL_SAMPLE_COUNT = 100
+_EVAL_SEED = 7
 
 
 def build(exp):
-    exp.sft(
-        "sft_main",
-        dataset=sft_chat_dataset(),
-        overrides={
-            "training": {
-                "loss_on_assistant_only": True,
-                "response_template": "<|im_start|>assistant\n",
-            },
-            "task": {
-                "sft_dataset": "goyalayus/wordle-reasoning-sft-prefix-keep-think",
-            },
-        },
-    )
-    sft_adapter = exp.adapter("sft_main")
-
-    exp.eval(
-        "eval_baseline_mixed",
-        adapter=sft_adapter,
-        dataset=eval_mixed_dataset(),
-        metrics=constraint_metrics(),
-        overrides={
-            "task": {
-                "eval_samples": 100,
-                "eval_seed": 42,
-            },
-        },
-    )
-
-    def build_mixed(branch):
-        branch.rl(
-            "mixed_rl",
-            adapter=sft_adapter,
-            dataset=rl_mixed_dataset(),
-            reward=constraint_reward(),
-            overrides={
-                "task": {
-                    "synthetic_samples": 4096,
-                },
-            },
-        )
-        branch.eval(
-            "mixed_final_eval",
-            adapter=branch.adapter("mixed_rl"),
-            dataset=eval_mixed_dataset(),
-            metrics=constraint_metrics(),
-            overrides={
-                "task": {
-                    "eval_samples": 100,
-                    "eval_seed": 42,
-                },
-            },
-        )
-
-    def build_curriculum(branch):
-        branch.rl(
-            "curr_rl_t2",
-            adapter=sft_adapter,
-            dataset=rl_turn_dataset(2),
-            reward=constraint_reward(),
-            overrides={
-                "task": {
-                    "synthetic_samples": 4096,
-                },
-            },
-        )
-        branch.eval(
-            "curr_eval_after_t2_turn2",
-            adapter=branch.adapter("curr_rl_t2"),
-            dataset=eval_turn_dataset(2),
-            metrics=constraint_metrics(),
-            overrides={
-                "task": {
-                    "eval_samples": 100,
-                    "eval_seed": 42,
-                },
-            },
-        )
-
-        branch.rl(
-            "curr_rl_t3",
-            adapter=branch.adapter("curr_rl_t2"),
-            dataset=rl_turn_dataset(3),
-            reward=constraint_reward(),
-            overrides={
-                "task": {
-                    "synthetic_samples": 4096,
-                },
-            },
-        )
-        branch.run_parallel(
-            "curr_eval_after_t3",
-            [
-                branch.eval_stage(
-                    "curr_eval_after_t3_turn2",
-                    adapter=branch.adapter("curr_rl_t3"),
-                    dataset=eval_turn_dataset(2),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-                branch.eval_stage(
-                    "curr_eval_after_t3_turn3",
-                    adapter=branch.adapter("curr_rl_t3"),
-                    dataset=eval_turn_dataset(3),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-            ],
-        )
-
-        branch.rl(
-            "curr_rl_t4",
-            adapter=branch.adapter("curr_rl_t3"),
-            dataset=rl_turn_dataset(4),
-            reward=constraint_reward(),
-            overrides={
-                "task": {
-                    "synthetic_samples": 4096,
-                },
-            },
-        )
-        branch.run_parallel(
-            "curr_eval_after_t4",
-            [
-                branch.eval_stage(
-                    "curr_eval_after_t4_turn3",
-                    adapter=branch.adapter("curr_rl_t4"),
-                    dataset=eval_turn_dataset(3),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-                branch.eval_stage(
-                    "curr_eval_after_t4_turn4",
-                    adapter=branch.adapter("curr_rl_t4"),
-                    dataset=eval_turn_dataset(4),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-            ],
-        )
-
-        branch.rl(
-            "curr_rl_t5",
-            adapter=branch.adapter("curr_rl_t4"),
-            dataset=rl_turn_dataset(5),
-            reward=constraint_reward(),
-            overrides={
-                "task": {
-                    "synthetic_samples": 4096,
-                },
-            },
-        )
-        branch.run_parallel(
-            "curr_eval_after_t5",
-            [
-                branch.eval_stage(
-                    "curr_eval_after_t5_turn4",
-                    adapter=branch.adapter("curr_rl_t5"),
-                    dataset=eval_turn_dataset(4),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-                branch.eval_stage(
-                    "curr_eval_after_t5_turn5",
-                    adapter=branch.adapter("curr_rl_t5"),
-                    dataset=eval_turn_dataset(5),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-            ],
-        )
-
-        branch.rl(
-            "curr_rl_t6",
-            adapter=branch.adapter("curr_rl_t5"),
-            dataset=rl_turn_dataset(6),
-            reward=constraint_reward(),
-            overrides={
-                "task": {
-                    "synthetic_samples": 4096,
-                },
-            },
-        )
-        branch.run_parallel(
-            "curr_eval_after_t6",
-            [
-                branch.eval_stage(
-                    "curr_eval_after_t6_turn5",
-                    adapter=branch.adapter("curr_rl_t6"),
-                    dataset=eval_turn_dataset(5),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-                branch.eval_stage(
-                    "curr_eval_after_t6_turn6",
-                    adapter=branch.adapter("curr_rl_t6"),
-                    dataset=eval_turn_dataset(6),
-                    metrics=constraint_metrics(),
-                    overrides={
-                        "task": {
-                            "eval_samples": 100,
-                            "eval_seed": 42,
-                        },
-                    },
-                ),
-            ],
-        )
-
-        branch.eval(
-            "curr_final_eval",
-            adapter=branch.adapter("curr_rl_t6"),
-            dataset=eval_mixed_dataset(),
-            metrics=constraint_metrics(),
-            overrides={
-                "task": {
-                    "eval_samples": 100,
-                    "eval_seed": 42,
-                },
-            },
-        )
-
-    exp.run_branches(
+    return exp.run_branches(
         {
-            "mixed": build_mixed,
-            "curriculum": build_curriculum,
+            "main": [
+                exp.sft_stage(
+                    "sft_turn5",
+                    dataset=bind_chat_sft_dataset(
+                        build_turn5_sft_train_dataset,
+                        dataset_name=_SFT_DATASET,
+                    ),
+                    overrides={
+                        "model": {
+                            "name": _MODEL_NAME,
+                            "load_in_4bit": False,
+                            "load_in_8bit": False,
+                        },
+                        "training": {
+                            "finetune_mode": "full",
+                            "loss_on_assistant_only": True,
+                            "response_template": "<|im_start|>assistant\n",
+                            "val_size": 0,
+                            "early_stopping_patience": None,
+                        },
+                    },
+                ),
+                exp.rl_stage(
+                    "rl_turn5",
+                    artifact=exp.artifact("sft_turn5"),
+                    dataset=turn5_wordle_rl_dataset(
+                        sample_count=_RL_SAMPLE_COUNT,
+                        seed=_RL_SEED,
+                        benchmark_sample_count=_EVAL_SAMPLE_COUNT,
+                        benchmark_seed=_EVAL_SEED,
+                    ),
+                    reward=turn5_wordle_reward(),
+                    overrides={
+                        "model": {
+                            "name": _MODEL_NAME,
+                            "load_in_4bit": False,
+                            "load_in_8bit": False,
+                        },
+                        "chat_template": {
+                            "stop_strings": ["</guess>"],
+                        },
+                        "training": {
+                            "finetune_mode": "full",
+                        },
+                    },
+                ),
+                exp.eval_stage(
+                    "eval_turn5_after_rl",
+                    artifact=exp.artifact("rl_turn5"),
+                    dataset=bind_eval_dataset(
+                        build_turn5_eval_dataset,
+                        sample_count=_EVAL_SAMPLE_COUNT,
+                        seed=_EVAL_SEED,
+                    ),
+                    metrics=compute_turn5_wordle_metrics,
+                    overrides={
+                        "model": {
+                            "name": _MODEL_NAME,
+                        },
+                        "chat_template": {
+                            "stop_strings": ["</guess>"],
+                        },
+                    },
+                ),
+            ]
         }
     )
 
