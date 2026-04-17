@@ -1,14 +1,27 @@
-from functional import (
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+
+REPO_ROOT = Path("/home/ayush/Desktop/code/tenyson")
+SRC_DIR = REPO_ROOT / "src"
+
+for path in (str(REPO_ROOT), str(SRC_DIR)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+from functional import (  # noqa: E402
     build_turn5_eval_dataset,
-    build_turn5_sft_train_dataset,
     compute_turn5_wordle_metrics,
     turn5_wordle_reward,
     turn5_wordle_rl_dataset,
 )
-from tenyson import bind_chat_sft_dataset, bind_eval_dataset, run_experiment
+from tenyson import bind_eval_dataset, run_experiment  # noqa: E402
 
 
-_SFT_DATASET = "goyalayus/wordle-reasoning-sft-prefix-keep-think"
 _MODEL_NAME = "Qwen/Qwen3-4B"
 _RL_SAMPLE_COUNT = 4096
 _RL_SEED = 456
@@ -24,35 +37,16 @@ _LORA_TARGET_MODULES = [
     "down_proj",
 ]
 
+_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
 
 def build(exp):
     return exp.run_branches(
         {
             "main": [
-                exp.sft_stage(
-                    "sft_turn5",
-                    dataset=bind_chat_sft_dataset(
-                        build_turn5_sft_train_dataset,
-                        dataset_name=_SFT_DATASET,
-                    ),
-                    overrides={
-                        "model": {
-                            "name": _MODEL_NAME,
-                        },
-                        "lora": {
-                            "target_modules": _LORA_TARGET_MODULES,
-                        },
-                        "training": {
-                            "loss_on_assistant_only": True,
-                            "response_template": "<|im_start|>assistant\n",
-                            "val_size": 0,
-                            "early_stopping_patience": None,
-                        },
-                    },
-                ),
                 exp.rl_stage(
                     "rl_turn5",
-                    adapter=exp.adapter("sft_turn5"),
+                    adapter=exp.seed("stopped_sft_turn5"),
                     dataset=turn5_wordle_rl_dataset(
                         sample_count=_RL_SAMPLE_COUNT,
                         seed=_RL_SEED,
@@ -69,6 +63,12 @@ def build(exp):
                         },
                         "chat_template": {
                             "stop_strings": ["</guess>"],
+                        },
+                        "training": {
+                            "hf_repo_id": (
+                                "goyalayus/"
+                                f"wordle-lora-20260324-163252-rl_turn5_from_saved_sft_{_TIMESTAMP}"
+                            ),
                         },
                     },
                 ),
