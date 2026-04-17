@@ -185,7 +185,7 @@ class RunnerTests(unittest.TestCase):
         config = {
             STAGE_TEMPLATE_CONFIG_KEY: {
                 "eval_dataset": {
-                    "module": "examples.wordle.functional",
+                    "module": "examples.arithmetic.functional",
                     "factory": "eval_turn_dataset",
                     "kwargs": {"turn": 6, "word_source": None},
                 }

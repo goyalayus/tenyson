@@ -18,4 +18,4 @@ Notes:
 - the current runtime only accepts Qwen 3 family base models
 - SFT packing is intentionally not exposed; Tenyson keeps it disabled internally
 
-The Wordle example uses these templates and then applies its own environment run overrides on top.
+The example environments use these templates and then apply task-specific overrides on top.

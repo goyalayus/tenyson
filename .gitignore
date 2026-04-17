@@ -10,9 +10,9 @@ __pycache__/
 experiments/
 wandb/
 history_len
-examples/wordle/final_report.md
+examples/**/final_report.md
 
 # Local run environment secrets
 .env
-examples/wordle/.env
-examples/wordle/run.env
+examples/**/.env
+examples/**/run.env

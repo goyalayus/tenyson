@@ -273,7 +273,7 @@ class CtlControllerLifecycleTests(unittest.TestCase):
                 controller_dir=tmpdir,
                 cwd="/repo",
                 env=["FOO=bar"],
-                command=["--", "python3", "examples/wordle/experiment.py"],
+                command=["--", "python3", "examples/arithmetic/experiment.py"],
             )
 
             with patch.object(
@@ -291,7 +291,7 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             self.assertEqual(metadata["pid"], 43210)
             self.assertEqual(
                 metadata["command"],
-                ["python3", "examples/wordle/experiment.py"],
+                ["python3", "examples/arithmetic/experiment.py"],
             )
             self.assertEqual(metadata["cwd"], "/repo")
             self.assertEqual(metadata["log_path"], str(log_path))
@@ -310,7 +310,7 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             popen_mock.assert_called_once()
             self.assertEqual(
                 popen_mock.call_args.args[0],
-                ["python3", "examples/wordle/experiment.py"],
+                ["python3", "examples/arithmetic/experiment.py"],
             )
             self.assertEqual(popen_mock.call_args.kwargs["cwd"], "/repo")
             self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
@@ -336,7 +336,7 @@ class CtlControllerLifecycleTests(unittest.TestCase):
                 controller_dir=tmpdir,
                 cwd=".",
                 env=[],
-                command=["python3", "examples/wordle/experiment.py"],
+                command=["python3", "examples/arithmetic/experiment.py"],
             )
 
             with patch.object(ctl_module, "_is_process_alive", return_value=True):
@@ -353,7 +353,7 @@ class CtlControllerLifecycleTests(unittest.TestCase):
                     {
                         "name": "wordle",
                         "pid": 456,
-                        "command": ["python3", "examples/wordle/experiment.py"],
+                        "command": ["python3", "examples/arithmetic/experiment.py"],
                         "cwd": "/repo",
                         "log_path": str(base.with_suffix(".log")),
                         "launched_at": "2026-03-24T00:00:00+00:00",
@@ -380,7 +380,7 @@ class CtlControllerLifecycleTests(unittest.TestCase):
             output = stdout_buffer.getvalue()
             self.assertIn("status: running", output)
             self.assertIn("pid: 456", output)
-            self.assertIn("python3 examples/wordle/experiment.py", output)
+            self.assertIn("python3 examples/arithmetic/experiment.py", output)
             self.assertIn("state: between-stages", output)
             self.assertIn("last_completed_stages: eval_baseline_mixed", output)
             self.assertIn(

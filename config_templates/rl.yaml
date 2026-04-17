@@ -58,7 +58,7 @@ training:
   optim: "adamw_8bit"
   # Number of sampled completions per prompt in each GRPO rollout batch.
   num_generations: 4
-  # Wordle prompts are short; keep this modest so long RL completions still fit comfortably.
+  # Keep this modest so shorter prompts still leave enough room for long RL completions.
   max_prompt_length: 512
   # Single RL completion-length limit. Reward overlength checks use this same value.
   max_completion_length: 2048

@@ -1,264 +1,198 @@
 # Tenyson
 
-Tenyson is a remote-first research library for SFT, GRPO RL, and eval workflows.
+I love using Unsloth.
 
-The whole thing is built around a small mental model:
+I started using it around three months ago, and it was a great experience until my research experiments got bigger and messier.
 
-- each environment lives in a single Python file
-- that file exports explicit named runs
-- each run declares its datasets, rubric or metrics, env metadata, and config overrides
-- `experiment.py` just chains those runs into the graph you want
-- the library handles remote execution, telemetry, Hugging Face adapter lineage, control flow, and a fixed report
+At that point I realized I was writing a lot of boilerplate again and again. I was managing versions of files, wiring datasets and rewards, tracking Hugging Face adapters, and once runs failed inside a bigger experiment, recovery got painful very quickly.
 
-If you want to see the intended style, start with the Wordle example. That is the clearest reference for how this library is supposed to feel.
+So I built Tenyson.
 
-The starter templates live in [`config_templates/`](./config_templates), not inside the example folder. That is deliberate. A new user should be able to see the default SFT, RL, and eval knobs without digging through task-specific code first.
+Tenyson is an open-source library that abstracts the boilerplate around larger Unsloth research experiments and makes them much easier to run.
 
-For RL, `training.max_completion_length` is the only completion-length limit. The Wordle reward-side overlength check uses that same resolved value, so you do not need a separate `vllm.max_tokens` knob in the RL template.
+The main idea is simple: you define the shape of the whole experiment in a single file called `experiment.py`.
 
-## What Tenyson Gives You
-
-- Job abstractions: `SFTJob`, `RLJob`, `EvalJob`
-- Cloud execution managers: Modal and AWS
-- W&B-only telemetry
-- Fixed markdown reporting with W&B project/run links
-- Hugging Face adapter pushes for SFT and RL runs
-- Stop, continue, resume, restart, and abort control flow across experiments
-
-## The Shape Of An Environment
-
-The environment contract lives in [`src/tenyson/core/environment.py`](./src/tenyson/core/environment.py).
-
-An environment definition is just a map of named runs. Each run is explicit and stable. In the Wordle task, those names look like:
-
-- `wordle_sft_main`
-- `wordle_rl_mixed`
-- `wordle_rl_turn2`
-- `wordle_eval_turn4`
-- `wordle_eval_mixed`
-
-Each named run carries:
-
-- a run type: `sft`, `rl`, or `eval`
-- dataset hooks
-- reward hooks or metric hooks
-- environment metadata
-- run-specific config overrides
-
-That is the big design point: task logic stays in the environment file, while experiment files stay focused on orchestration.
-
-## The Shape Of An Experiment
-
-The Wordle experiment entrypoint in [`examples/wordle/experiment.py`](./examples/wordle/experiment.py) is the intended style.
-
-The point is that the experiment file should stay small. In the happy path, it is basically this:
+A small bundled arithmetic example makes that pattern easier to see. Here is a trimmed version of its `experiment.py`:
 
 ```python
-from tenyson import run_experiment
+from functional import (
+    addition_reward,
+    addition_rl_dataset,
+    build_addition_dataset,
+    build_addition_sft_train_dataset,
+    compute_addition_metrics,
+)
+from tenyson import bind_chat_sft_dataset, bind_eval_dataset, run_experiment
 
 
 def build(exp):
-    exp.eval("baseline", run="eval_turn6", adapter=exp.seed("base"))
-    exp.rl("train", run="rl_turn6", adapter=exp.seed("base"))
-    exp.eval("final", run="eval_turn6", adapter=exp.adapter("train"))
+    return exp.run_branches(
+        {
+            "baseline_branch": [
+                exp.eval_stage(
+                    "eval_2digit_baseline",
+                    dataset=bind_eval_dataset(
+                        build_addition_dataset,
+                        digits=2,
+                        sample_count=100,
+                        seed=7,
+                    ),
+                    metrics=compute_addition_metrics,
+                ),
+            ],
+            "sft_branch": [
+                exp.sft_stage(...),
+                exp.eval_stage(
+                    "eval_2digit_after_sft",
+                    adapter=exp.adapter("sft_2digit_06b"),
+                    ...,
+                ),
+            ],
+            "rl_branch": [
+                exp.rl_stage(
+                    "rl_2digit_06b",
+                    dataset=addition_rl_dataset(...),
+                    reward=addition_reward(),
+                    ...,
+                ),
+                exp.eval_stage(
+                    "eval_2digit_after_rl",
+                    adapter=exp.adapter("rl_2digit_06b"),
+                    ...,
+                ),
+            ],
+        }
+    )
 
 
 if __name__ == "__main__":
     run_experiment(__file__, build)
 ```
 
-That file is not supposed to contain reward logic, dataset construction logic, report rebuilding, or controller shutdown plumbing. Those concerns belong in the library and the environment definition.
+In that example, there are three parallel branches: eval, SFT, and RL.
 
-## Dataset Format Requirements
+The important part is the shape. Tenyson reads that graph, handles the orchestration, and keeps the dependencies intact. In the SFT branch, there is an eval after SFT. In the RL branch, there is an eval after RL. So you get parallel branches and sequential stages without writing controller code by hand.
 
-This is worth spelling out because the expected shape changes by run type.
+You are also not dealing with the provider and GPU plumbing in this file. In the workflow shown here, Modal is the provider, and Tenyson takes care of the remote launch side.
 
-### SFT
+The other half of the setup lives in a separate file called `functional.py`. That is where the datasets, reward functions, and eval metrics for SFT, RL, and eval are defined.
 
-For SFT, the task hook should return a conversational dataset. The built-in
-Wordle SFT path loads a Hugging Face dataset where each row looks like:
-
-```json
-{
-  "messages": [
-    {"role": "system", "content": "..."},
-    {"role": "user", "content": "..."},
-    {"role": "assistant", "content": "..."}
-  ]
-}
-```
-
-Important constraints:
-
-- If you bring your own SFT dataset and want to use the default path, it must
-  expose a `messages` column in this chat format. This is now a strict
-  contract for the built-in Hub chat-SFT helper in Tenyson core. A plain
-  `prompt` / `completion` table will not work unless you also provide a custom
-  formatting hook or collator.
-- Every `messages` row must be a non-empty list of objects with string
-  `role` and string `content` fields. The built-in helper validates this before
-  training starts.
-- The built-in assistant-only-loss path expects the formatted sequence to
-  contain an assistant-turn marker such as
-  `training.response_template: "<|im_start|>assistant\n"`.
-- With `training.loss_on_assistant_only: true`, loss is computed only on the
-  assistant message content. The assistant turn terminator is excluded from the
-  loss mask.
-- If one formatted example contains multiple assistant turns separated by more
-  user turns, you must also set `training.instruction_template`, or provide a
-  task-specific collator. Do not assume the default assistant-only collator can
-  safely infer user/assistant boundaries in arbitrary text.
-- In the current Wordle example, every SFT row is exactly one
-  `system -> user -> assistant` conversation turn. The SFT dataset is not the
-  random synthetic Wordle-history dataset used for RL and eval.
-
-### RL And Eval
-
-RL and eval can use task-generated synthetic rows instead of conversational SFT rows. The built-in Wordle synthetic rows look like:
-
-```json
-{
-  "secret": "meant",
-  "history_len": 4,
-  "history_rows": [
-    ["cogue", "X X X X Y"],
-    ["irone", "X X X G Y"],
-    ["exams", "Y X G Y X"],
-    ["macaw", "G Y X X X"]
-  ],
-  "prompt": "..."
-}
-```
-
-Important constraints:
-
-- Mixed Wordle RL/eval runs intentionally sample random prior-history lengths.
-- Curriculum Wordle runs intentionally fix the history window for each stage.
-- The default Wordle environment now pulls a single remote word source from
-  `dwyl/english-words` and keeps only 5-letter alphabetic words. That same
-  filtered list is used for both candidate secrets and accepted guesses.
-- Do not expect the SFT dataset and the RL/eval datasets to have the same row
-  schema. They are different on purpose.
-
-## Basic Usage
-
-Jobs run through a cloud manager. The manager launches `python -m tenyson.runner` remotely, waits for the canonical run result in telemetry, and returns a `JobResult`.
-
-Local GPU execution is intentionally not the default path. Tenyson expects to run through a supported remote provider.
-
-Modal execution is still git-backed, but the controller now keeps the remote SHA honest for you. If `HEAD` is already on the remote, Tenyson uses it directly. If `HEAD` is clean but unpushed, or the workspace has local code changes, Tenyson pushes the exact commit or a scratch snapshot commit to a throwaway `tenyson/runs/*` ref and the worker checks out that SHA remotely.
+Here is a small reward snippet from the same arithmetic example:
 
 ```python
-from pathlib import Path
-import yaml
+def get_addition_reward_funcs() -> list[Any]:
+    def reward_correct_answer(
+        _prompts: Sequence[Any],
+        completions: Sequence[Any],
+        expected_answer: Sequence[Any],
+    ) -> list[float]:
+        rewards: list[float] = []
+        for completion_obj, expected in zip(completions, expected_answer):
+            completion_text = extract_generation_text(completion_obj)
+            parsed_answer = parse_answer(completion_text)
+            rewards.append(
+                1.0
+                if parsed_answer is not None and parsed_answer == str(expected)
+                else 0.0
+            )
+        return rewards
 
-from tenyson.cloud.modal import ModalManager
-from tenyson.jobs.sft import SFTJob
-from tenyson.loader import load_task
+    def reward_strict_format(
+        _prompts: Sequence[Any],
+        completions: Sequence[Any],
+    ) -> list[float]:
+        rewards: list[float] = []
+        for completion_obj in completions:
+            completion_text = extract_generation_text(completion_obj)
+            rewards.append(0.1 if has_strict_answer_format(completion_text) else 0.0)
+        return rewards
 
-with open("config_templates/sft.yaml", "r", encoding="utf-8") as f:
-    cfg = yaml.safe_load(f)
+    setattr(reward_correct_answer, "tenyson_reward_name", "correct_answer")
+    setattr(reward_strict_format, "tenyson_reward_name", "strict_format")
+    return [reward_correct_answer, reward_strict_format]
 
-task = load_task(str(Path("examples/wordle/functional.py").resolve()))
-cfg.setdefault("training", {})["run_name"] = "example_sft_run"
-cfg.setdefault("telemetry", {})["experiment_id"] = "example_experiment"
-job = SFTJob(config=cfg, task=task)
-cloud = ModalManager(gpu="A100", timeout=86400)
-result = cloud.run(job)
-print(result.metrics, result.wandb_url)
+
+@rl_reward_template
+def addition_reward() -> RLRewardTemplate:
+    def _build(_config: dict[str, Any], _tokenizer: Any) -> list[Any]:
+        return get_addition_reward_funcs()
+
+    return RLRewardTemplate(build=_build)
 ```
 
-For real runs, you will usually also provide the W&B destination and HF repo base through env vars or shared experiment overrides, like the Wordle example does.
+That is basically the pattern. You write these two files, and that is the core setup.
 
-## Wordle Reference Workflow
+If you want to change things like batch size, learning rate, max steps, or generation limits, there are separate config templates for that. But the normal flow is that you do not edit those directly. They stay abstracted away, and you just override the values you care about inside `experiment.py`.
 
-The current Wordle example runs this graph:
+For example, you can override training values directly in `experiment.py`:
 
-1. SFT
-2. Baseline mixed eval
-3. Two branches in parallel
-4. Branch A: mixed RL, then mixed final eval
-5. Branch B: curriculum RL from turn 2 through turn 5, with follow-up evals after each stage
-6. Final fixed markdown report
+```python
+overrides={
+    "training": {
+        "max_steps": 150,
+        "per_device_batch_size": 1,
+        "gradient_accumulation_steps": 4,
+        "learning_rate": 5.0e-6,
+        "num_generations": 4,
+        "max_prompt_length": 256,
+        "max_completion_length": 64,
+        "hf_push_every_steps": 50,
+    },
+}
+```
 
-Wordle is not the point here. The shape is:
+Once that experiment starts running, Tenyson creates a `final_report.md` next to your `experiment.py`.
 
-- the base templates come from `config_templates/`
-- the environment file exports the named runs
-- the experiment file only composes them
+When a stage starts, the report gets the W&B link. When it finishes, the report gets the stage metrics. The idea is that you always have a readable summary of the experiment as it unfolds, instead of stitching it together later from logs.
 
-## Running The Wordle Example
-
-Run from the repo root:
+Now suppose you want to stop one particular run from one particular branch without disturbing the whole experiment. You can do that with:
 
 ```bash
-cp examples/wordle/.env.example .env
-# fill in your values in .env
-python3 examples/wordle/experiment.py
+python3 -m tenyson.ctl stop \
+  --db-url wandb://<entity>/<project> \
+  --experiment-id <experiment_id>
 ```
 
-The experiment entrypoint loads the repo-root `.env` by default and falls back to a local example `.env` only if the root file is missing. It can also install missing controller-side dependencies on a fresh local checkout. Set `TENYSON_SKIP_LOCAL_BOOTSTRAP=1` if you want to disable that bootstrap behavior.
-
-For long-running experiments, launch the local controller in detached mode so it does not die with your terminal session:
+If you already know the exact run, you can pass it directly:
 
 ```bash
-python3 -m tenyson.ctl launch \
-  --name wordle \
-  --cwd . \
-  -- python3 examples/wordle/experiment.py
-
-python3 -m tenyson.ctl status --name wordle
+python3 -m tenyson.ctl stop \
+  --db-url wandb://<entity>/<project> \
+  --experiment-id <experiment_id> \
+  --run-id rl_2digit_06b
 ```
 
-This writes controller pid/log metadata under `.tenyson_runs/controllers/`. Use `python3 -m tenyson.ctl stop-controller --name wordle` if you need to terminate the detached local controller process itself.
+Once that stage is stopped, Tenyson gives you four useful choices:
 
-On a fresh machine, put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` directly in the repo-root `.env`.
+- `resume`: useful when a run stopped because of a bug or code issue, you fixed it, and now you want to continue from the latest saved Hugging Face checkpoint instead of starting from scratch
+- `continue`: accept the stopped stage and move to the next stage
+- `restart`: rerun that stage from scratch
+- `abort`: stop the experiment there and skip the remaining stages
 
-If your GitHub remote is private, also provide `TENYSON_GIT_AUTH_TOKEN` or `GITHUB_TOKEN` so Modal can clone the repo during image build.
+This matters a lot once the experiment graph gets larger. You do not want one interrupted branch to force you to manually reconstruct everything.
 
-Useful environment variables:
+Now suppose you want to continue from a specific place in an experiment that has already finished. You can do that too.
 
-- `TENYSON_MODAL_GPU` default `A100`
-- `TENYSON_MODAL_TIMEOUT` default `86400`
-- `MODAL_TOKEN_ID`
-- `MODAL_TOKEN_SECRET`
-- `TENYSON_HF_REPO_BASE`
-- `TENYSON_WANDB_ENTITY`
-- `TENYSON_WANDB_PROJECT`
-- `HF_TOKEN`
-- `WANDB_API_KEY`
+To recover an older experiment, rerun the same `experiment.py` with the original experiment id:
 
-For Hugging Face pushes, `TENYSON_HF_REPO_BASE` must point at a namespace that the provided `HF_TOKEN` can actually write to.
-
-## Telemetry
-
-Telemetry is mandatory. Every run needs an experiment id.
-
-Telemetry always goes to W&B. You do not need to set a backend field in normal configs.
-
-```yaml
-telemetry:
-  experiment_id: "wordle_research_2026_03_01"
-  entity: "your-wandb-entity"
-  project: "wordle-research"
+```bash
+TENYSON_RECOVER_EXPERIMENT_ID=<old_experiment_id> \
+python3 examples/arithmetic/experiment.py
 ```
 
-You can provide the W&B destination either in config or through env vars:
+If you want to force a restart from a specific stage onward:
 
-- `telemetry.entity` / `telemetry.project`
-- `TENYSON_WANDB_ENTITY` / `TENYSON_WANDB_PROJECT`
+```bash
+TENYSON_RECOVER_EXPERIMENT_ID=<old_experiment_id> \
+TENYSON_RECOVER_RESTART_FROM_STAGE=<stage_id> \
+python3 examples/arithmetic/experiment.py
+```
 
-The canonical run result lives in telemetry:
+Tenyson also uses W&B for telemetry, not just graphs.
 
-- W&B summaries and artifacts
+We store the important debugging information there as well, especially for RL: prompts, rollout answers, rewards, and stage metadata.
 
-That same telemetry layer is also how stop requests reach running jobs.
-
-## Dashboard
-
-Tenyson now ships a built-in local telemetry dashboard for live and post-run inspection across SFT, eval, and RL stages.
-
-Run it from the repo root:
+To inspect all of that properly, there is a custom UI. You can start it with:
 
 ```bash
 python3 -m tenyson.ui \
@@ -267,96 +201,6 @@ python3 -m tenyson.ui \
   --open-browser
 ```
 
-You can also omit `--db-url` if `TENYSON_WANDB_ENTITY` and `TENYSON_WANDB_PROJECT` are already set in your environment.
+That UI is there so you can inspect what actually happened inside a run, instead of only looking at top-line charts.
 
-The dashboard is intentionally zero-build:
-
-- it serves a local web UI directly from Python
-- it auto-refreshes while an experiment is still running
-- it lists all runs in the experiment, not just eval
-- eval runs show detailed sample rows when the task logs `detailed_results`
-- every run also exposes raw canonical payloads and W&B-linked metadata for debugging
-
-Useful flags:
-
-- `--host` default `127.0.0.1`
-- `--port` default `8787`
-- `--refresh-seconds` default `10`
-- `--history-limit` default `240`
-
-## Reporting
-
-Reporting is fixed, not template-driven.
-
-The experiment report captures the stuff you usually want when you come back to a run later:
-
-- stage status
-- run type and named environment run
-- key metrics
-- Hugging Face adapter lineage for SFT and RL
-- W&B run links and project link
-
-The Wordle example writes this to `examples/wordle/final_report.md` during local runs.
-
-## Checkpoints And Resume
-
-SFT and RL use Hub-managed checkpoints.
-
-- set `training.hf_repo_base` to enable pushes
-- checkpoints are stored in a stable repo derived from the run name
-- resume uses `training.resume_from_checkpoint: "repo_id:revision"`
-- the revision is resolved to an immutable Hugging Face commit SHA before restore
-
-That gives you a clean lineage story for stop, continue, resume, and restart flows.
-
-If you manually stop an SFT or RL run, the pipeline can now do four different things:
-
-- `continue`: accept the stopped checkpoint and move on to the next stage
-- `resume`: restart from the latest saved HF checkpoint
-- `restart`: run the stage again from scratch
-- `abort`: stop the experiment
-
-`continue` is only offered when the stopped run already has a concrete Hugging Face repo + revision, so later stages can still seed from an exact adapter lineage.
-
-You can also recover after the original local controller process has exited. Pass an explicit recovery experiment id to `ExperimentSession` with `recovery_experiment_id="..."`, then relaunch the experiment with the same stage run names. On startup, Tenyson will reuse prior successful or partial stage results, and for stopped SFT/RL stages it will prompt for:
-
-- `resume`: restart from the saved trainer checkpoint
-- `continue`: accept the stopped checkpoint and move to the next stage
-- `restart`: rerun the stage from scratch
-
-The Wordle example exposes this through `TENYSON_RECOVER_EXPERIMENT_ID=<experiment_id>`.
-
-For SFT early stopping specifically, Tenyson treats it as a strict best-model flow instead of a soft hint:
-
-- early stopping requires an eval dataset
-- `training.eval_steps` must match `training.hf_push_every_steps`
-- the best checkpoint is re-synced to HF at the end so downstream stages use the actual best adapter revision
-
-## Runner CLI
-
-Remote workers call a single entrypoint:
-
-```bash
-python -m tenyson.runner \
-  --job-type sft \
-  --config path/to/config.yaml \
-  --task-module examples/wordle/functional.py
-```
-
-Or with a `module:Class` task spec:
-
-```bash
-python -m tenyson.runner \
-  --job-type sft \
-  --config path/to/config.yaml \
-  --task-module examples.wordle.functional
-```
-
-`--job-type` must be one of `sft`, `rl`, or `eval`.
-
-## Notes
-
-- AWS spot failures return a failed `JobResult` instead of throwing away run context
-- Modal and AWS both return the same `JobResult` shape
-- remote runtime setup installs the stack around `unsloth` and `vllm`
-- within one experiment run, stage run names must stay unique
+We are still improving Tenyson. More model support, more GPU providers, and a better overall research workflow are coming. If this is useful to you, please star the repo and follow along.

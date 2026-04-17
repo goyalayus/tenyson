@@ -11,7 +11,6 @@
       "train/loss",
       "train/reward",
       "profiling/Time taken: UnslothGRPOTrainer.transformers.generate",
-      "profiling/Time taken: UnslothGRPOTrainer.reward_wordle_strict",
     ],
     eval: [
       "constraint_accuracy",

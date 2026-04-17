@@ -37,7 +37,7 @@ training:
   optim: "adamw_8bit"
   # Save+push full trainer checkpoints (model + optimizer + scheduler + state) every N steps.
   hf_push_every_steps: 20
-  # For tasks like Wordle, this carves a holdout split out of the training dataset.
+  # This carves a holdout split out of the training dataset when the task does not provide one.
   # Set to 0 if the task already provides its own eval dataset.
   val_size: 100
   # Early stopping based on eval_loss: stop if constant or increasing for N evals.

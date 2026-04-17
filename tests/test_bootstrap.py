@@ -1,11 +1,9 @@
 import os
-import runpy
 import signal
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from tenyson.bootstrap import (
@@ -138,122 +136,6 @@ class BootstrapTests(unittest.TestCase):
                 handler(signal.SIGTERM, None)
         finally:
             signal.signal(signal.SIGTERM, previous_handler)
-
-    def test_wordle_experiment_main_delegates_flow_to_run_experiment(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        experiment_path = repo_root / "examples" / "wordle" / "experiment.py"
-
-        captured: dict[str, object] = {}
-
-        def fake_run_experiment(anchor_file, build, **kwargs):
-            captured["anchor_file"] = anchor_file
-            captured["build"] = build
-            captured["kwargs"] = kwargs
-
-        original_sys_path = list(sys.path)
-        try:
-            sys.path.insert(0, str(experiment_path.parent))
-            with patch("tenyson.run_experiment", new=fake_run_experiment):
-                runpy.run_path(
-                    str(experiment_path),
-                    run_name="__main__",
-                )
-        finally:
-            sys.path[:] = original_sys_path
-
-        self.assertEqual(
-            Path(str(captured["anchor_file"])).resolve(),
-            experiment_path.resolve(),
-        )
-        self.assertNotIn("prepare", captured["kwargs"])
-        self.assertNotIn("recovery_restart_stage_fallback_env_vars", captured["kwargs"])
-
-        top_level_calls: list[tuple[str, str, tuple[str, ...]]] = []
-        branch_calls: list[tuple[str, str, tuple[str, ...]]] = []
-        parallel_calls: list[tuple[str, list[str]]] = []
-
-        class FakeBranch:
-            def rl(self, stage_id: str, **kwargs):
-                branch_calls.append(
-                    ("rl", stage_id, tuple(sorted(kwargs.keys())))
-                )
-                return SimpleNamespace(id=stage_id)
-
-            def eval(self, stage_id: str, **kwargs):
-                branch_calls.append(
-                    ("eval", stage_id, tuple(sorted(kwargs.keys())))
-                )
-                return SimpleNamespace(id=stage_id)
-
-            def eval_stage(self, stage_id: str, **kwargs):
-                branch_calls.append(
-                    ("eval_stage", stage_id, tuple(sorted(kwargs.keys())))
-                )
-                return SimpleNamespace(id=stage_id)
-
-            def run(self, stage):
-                branch_calls.append(("run", stage.id, stage.id))
-                return SimpleNamespace(id=stage.id)
-
-            def run_parallel(self, label: str, stages):
-                parallel_calls.append((label, [stage.id for stage in stages]))
-                return {stage.id: SimpleNamespace(id=stage.id) for stage in stages}
-
-            def adapter(self, stage_id: str):
-                return f"adapter:{stage_id}"
-
-        class FakeExperiment:
-            def sft(self, stage_id: str, **kwargs):
-                top_level_calls.append(
-                    ("sft", stage_id, tuple(sorted(kwargs.keys())))
-                )
-                return SimpleNamespace(id=stage_id)
-
-            def adapter(self, stage_id: str):
-                return f"adapter:{stage_id}"
-
-            def eval(self, stage_id: str, **kwargs):
-                top_level_calls.append(
-                    ("eval", stage_id, tuple(sorted(kwargs.keys())))
-                )
-                return SimpleNamespace(id=stage_id)
-
-            def run_branches(self, branches):
-                self_branch = FakeBranch()
-                for builder in branches.values():
-                    builder(self_branch)
-
-        captured["build"](FakeExperiment())
-
-        self.assertEqual(
-            top_level_calls,
-            [
-                ("sft", "sft_main", ("dataset", "overrides")),
-                (
-                    "eval",
-                    "eval_baseline_mixed",
-                    ("adapter", "dataset", "metrics", "overrides"),
-                ),
-            ],
-        )
-        self.assertIn(
-            (
-                "rl",
-                "mixed_rl",
-                ("adapter", "dataset", "overrides", "reward"),
-            ),
-            branch_calls,
-        )
-        self.assertIn(
-            (
-                "eval",
-                "mixed_final_eval",
-                ("adapter", "dataset", "metrics", "overrides"),
-            ),
-            branch_calls,
-        )
-        self.assertIn(("curr_eval_after_t3", ["curr_eval_after_t3_turn2", "curr_eval_after_t3_turn3"]), parallel_calls)
-
 
 class SharedOverridesTests(unittest.TestCase):
     def test_shared_overrides_from_env(self) -> None:
