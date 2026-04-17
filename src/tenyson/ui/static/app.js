@@ -24,38 +24,48 @@
       "max_reward",
     ],
   };
+  const initialRoute = readRoute();
 
   const state = {
     config: null,
     experiments: [],
+    experimentsLoaded: false,
     selectedExperimentId: null,
     experimentSnapshot: null,
     selectedRunKey: null,
     selectedRunSummary: null,
     runDetail: null,
+    runDetailLoading: false,
+    selectedPanel: initialRoute.panel || "overview",
     showFailuresOnly: false,
     rewardFilterMode: "any",
     refreshTimer: null,
     refreshInFlight: false,
     experimentRequestToken: 0,
     runRequestToken: 0,
-    initialRoute: readRoute(),
+    initialRoute: initialRoute,
   };
 
   const elements = {
     experimentSelect: document.getElementById("experiment-select"),
     refreshButton: document.getElementById("refresh-button"),
+    refreshLabel: document.getElementById("refresh-label"),
     projectSummary: document.getElementById("project-summary"),
     runCountBadge: document.getElementById("run-count-badge"),
     runList: document.getElementById("run-list"),
     heroCards: document.getElementById("hero-cards"),
     detailTitle: document.getElementById("detail-title"),
+    detailSubtitle: document.getElementById("detail-subtitle"),
     detailStatus: document.getElementById("detail-status"),
+    detailFacts: document.getElementById("detail-facts"),
+    detailActions: document.getElementById("detail-actions"),
+    detailStageNote: document.getElementById("detail-stage-note"),
     detailMeta: document.getElementById("detail-meta"),
     detailMetrics: document.getElementById("detail-metrics"),
     historySummary: document.getElementById("history-summary"),
     historyCharts: document.getElementById("history-charts"),
     evalSummary: document.getElementById("eval-summary"),
+    evalTableHead: document.getElementById("eval-table-head"),
     evalTableBody: document.getElementById("eval-table-body"),
     rawPayload: document.getElementById("raw-payload"),
     showAllRows: document.getElementById("show-all-rows"),
@@ -64,6 +74,10 @@
       document.querySelectorAll("[data-reward-filter]")
     ),
     liveIndicator: document.getElementById("live-indicator"),
+    tabButtons: Array.from(document.querySelectorAll("[data-panel]")).filter((node) =>
+      node.classList.contains("tab-button")
+    ),
+    tabPanels: Array.from(document.querySelectorAll(".tab-panel")),
   };
 
   bindEvents();
@@ -75,6 +89,7 @@
       state.selectedRunKey = null;
       state.selectedRunSummary = null;
       state.runDetail = null;
+      state.runDetailLoading = false;
       void loadExperimentSnapshot(elements.experimentSelect.value, {
         preferredRunKey: null,
         preserveCurrentRun: false,
@@ -104,6 +119,18 @@
         renderEvalSamples();
       });
     });
+
+    elements.tabButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.disabled) {
+          return;
+        }
+        state.selectedPanel = String(button.dataset.panel || "overview");
+        syncActivePanel();
+        writeRoute();
+        maybeLoadRunDetailForPanel();
+      });
+    });
   }
 
   async function refreshDashboard(options) {
@@ -116,49 +143,41 @@
     setRefreshBusy(true);
 
     try {
-      const firstLoad = !state.config;
-      const responses = firstLoad
-        ? await Promise.all([fetchJson("/api/config"), fetchJson("/api/experiments")])
-        : [state.config, await fetchJson("/api/experiments")];
-
-      const config = responses[0];
-      const experimentsPayload = responses[1];
-      state.config = config;
-      state.experiments = Array.isArray(experimentsPayload.experiments)
-        ? experimentsPayload.experiments
-        : [];
-
+      if (!state.config) {
+        state.config = await fetchJson("/api/config");
+      }
       scheduleAutoRefresh();
-
-      const nextExperimentId = pickExperimentId({
+      const bootstrapExperimentId = pickPreferredExperimentId({
         resetSelection: Boolean(settings.resetSelection),
-        defaultExperimentId:
-          experimentsPayload.default_experiment_id || config.default_experiment_id,
+        defaultExperimentId: state.config.default_experiment_id,
       });
-      const previousExperimentId = state.selectedExperimentId;
 
-      state.selectedExperimentId = nextExperimentId;
+      if (bootstrapExperimentId) {
+        state.selectedExperimentId = bootstrapExperimentId;
+      }
       renderExperimentSelect();
 
-      if (!nextExperimentId) {
-        state.selectedExperimentId = null;
-        state.experimentSnapshot = null;
-        state.selectedRunKey = null;
-        state.selectedRunSummary = null;
-        state.runDetail = null;
-        renderNoExperiments();
-        writeRoute();
+      if (bootstrapExperimentId) {
+        await loadExperimentSnapshot(bootstrapExperimentId, {
+          preferredRunKey:
+            settings.preferredRunKey || routeRunKeyForExperiment(bootstrapExperimentId),
+          preserveCurrentRun: !settings.resetSelection,
+          showLoadingState:
+            !state.experimentSnapshot ||
+            Boolean(settings.resetSelection) ||
+            state.selectedExperimentId !== bootstrapExperimentId,
+        });
+        void loadExperimentsIndex({
+          resetSelection: Boolean(settings.resetSelection),
+          preferredRunKey: settings.preferredRunKey || null,
+        }).catch(() => {
+          renderExperimentSelect();
+        });
         return;
       }
-
-      await loadExperimentSnapshot(nextExperimentId, {
-        preferredRunKey:
-          settings.preferredRunKey || routeRunKeyForExperiment(nextExperimentId),
-        preserveCurrentRun: !settings.resetSelection,
-        showLoadingState:
-          firstLoad ||
-          Boolean(settings.resetSelection) ||
-          previousExperimentId !== nextExperimentId,
+      await loadExperimentsIndex({
+        resetSelection: Boolean(settings.resetSelection),
+        preferredRunKey: settings.preferredRunKey || null,
       });
     } catch (error) {
       renderGlobalError(error);
@@ -181,6 +200,64 @@
     }, Math.max(2, refreshSeconds) * 1000);
   }
 
+  function pickPreferredExperimentId(options) {
+    const settings = options || {};
+    const routeExperimentId = state.initialRoute.experimentId;
+
+    if (!settings.resetSelection && state.selectedExperimentId) {
+      return state.selectedExperimentId;
+    }
+    if (routeExperimentId) {
+      return routeExperimentId;
+    }
+    if (settings.defaultExperimentId) {
+      return String(settings.defaultExperimentId);
+    }
+    return state.experiments.length > 0
+      ? String(state.experiments[0].experiment_id)
+      : null;
+  }
+
+  async function loadExperimentsIndex(options) {
+    const settings = options || {};
+    const experimentsPayload = await fetchJson("/api/experiments");
+    state.experiments = Array.isArray(experimentsPayload.experiments)
+      ? experimentsPayload.experiments
+      : [];
+    state.experimentsLoaded = true;
+
+    const nextExperimentId = pickExperimentId({
+      resetSelection: Boolean(settings.resetSelection),
+      defaultExperimentId:
+        experimentsPayload.default_experiment_id ||
+        (state.config ? state.config.default_experiment_id : null),
+    });
+
+    if (!nextExperimentId) {
+      state.selectedExperimentId = null;
+      state.experimentSnapshot = null;
+      state.selectedRunKey = null;
+      state.selectedRunSummary = null;
+      state.runDetail = null;
+      state.runDetailLoading = false;
+      renderExperimentSelect();
+      renderNoExperiments();
+      writeRoute();
+      return;
+    }
+
+    renderExperimentSelect();
+
+    if (!state.experimentSnapshot || state.selectedExperimentId !== nextExperimentId) {
+      await loadExperimentSnapshot(nextExperimentId, {
+        preferredRunKey:
+          settings.preferredRunKey || routeRunKeyForExperiment(nextExperimentId),
+        preserveCurrentRun: !settings.resetSelection,
+        showLoadingState: !state.experimentSnapshot,
+      });
+    }
+  }
+
   function pickExperimentId(options) {
     const settings = options || {};
     const existingIds = new Set(
@@ -188,23 +265,10 @@
         .map((item) => String(item.experiment_id || "").trim())
         .filter(Boolean)
     );
-    const routeExperimentId = state.initialRoute.experimentId;
+    const preferredExperimentId = pickPreferredExperimentId(settings);
 
-    if (
-      !settings.resetSelection &&
-      state.selectedExperimentId &&
-      existingIds.has(state.selectedExperimentId)
-    ) {
-      return state.selectedExperimentId;
-    }
-    if (routeExperimentId && existingIds.has(routeExperimentId)) {
-      return routeExperimentId;
-    }
-    if (
-      settings.defaultExperimentId &&
-      existingIds.has(String(settings.defaultExperimentId))
-    ) {
-      return String(settings.defaultExperimentId);
+    if (preferredExperimentId && existingIds.has(preferredExperimentId)) {
+      return preferredExperimentId;
     }
     return state.experiments.length > 0
       ? String(state.experiments[0].experiment_id)
@@ -221,7 +285,6 @@
     }
 
     const previousExperimentId = state.selectedExperimentId;
-    const previousRunKey = state.selectedRunKey;
     state.selectedExperimentId = targetExperimentId;
     renderExperimentSelect();
     if (settings.showLoadingState !== false) {
@@ -256,11 +319,8 @@
       writeRoute();
 
       if (nextRun) {
-        await loadRunDetail(nextRun, {
-          showLoadingState:
-            settings.showLoadingState !== false ||
-            previousRunKey !== state.selectedRunKey,
-        });
+        renderRunSummarySnapshot(nextRun, { loadingDetail: true });
+        void loadRunDetail(nextRun, { showLoadingState: false });
         return;
       }
 
@@ -275,10 +335,10 @@
     const selectedKey = buildRunKey(runSummary);
     state.selectedRunSummary = runSummary;
     state.selectedRunKey = selectedKey;
+    state.runDetail = null;
+    state.runDetailLoading = true;
     renderRunList();
-    if (settings.showLoadingState !== false) {
-      renderRunLoadingState(runSummary);
-    }
+    renderRunSummarySnapshot(runSummary, { loadingDetail: true });
     writeRoute();
 
     const requestToken = ++state.runRequestToken;
@@ -299,16 +359,17 @@
       }
 
       state.runDetail = detail;
+      state.runDetailLoading = false;
       renderRunDetail();
-      renderEvalSamples();
-      renderRawPayload();
       updateDocumentTitle();
     } catch (error) {
+      state.runDetailLoading = false;
       renderRunError(error, runSummary);
     }
   }
 
   function renderBootState() {
+    renderExperimentSelect();
     appendEmptyState(elements.projectSummary, "Loading telemetry workspace...");
     appendEmptyState(elements.runList, "Loading runs...");
     appendEmptyState(elements.heroCards, "Loading experiment summary...");
@@ -359,10 +420,38 @@
   }
 
   function renderExperimentLoadingState() {
-    appendEmptyState(elements.runList, "Refreshing runs...");
-    appendEmptyState(elements.heroCards, "Refreshing experiment summary...");
-    elements.runCountBadge.textContent = "0";
+    const label = state.selectedExperimentId || "the selected experiment";
     renderProjectSummary();
+    appendEmptyState(elements.runList, `Loading runs from ${label}…`);
+    appendEmptyState(elements.heroCards, `Refreshing experiment summary for ${label}…`);
+    elements.runCountBadge.textContent = state.experimentSnapshot
+      ? String(
+          Array.isArray(state.experimentSnapshot.runs)
+            ? state.experimentSnapshot.runs.length
+            : 0
+        )
+      : "0";
+    elements.detailTitle.textContent = "Loading latest run";
+    elements.detailSubtitle.textContent = `Fetching fresh telemetry for ${label}.`;
+    elements.detailStageNote.textContent = "Fetching latest snapshot";
+    applyStatusPill(elements.detailStatus, "loading");
+    renderFactRow([
+      buildFactChip("Experiment", label),
+      buildFactChip("Status", "Refreshing"),
+    ]);
+    renderActionRow([]);
+    appendEmptyState(
+      elements.detailMeta,
+      "Run overview will appear here as soon as the selected experiment snapshot lands."
+    );
+    appendEmptyState(elements.detailMetrics, "Summary metrics are on the way.");
+    elements.historySummary.textContent = "Waiting for run selection";
+    appendEmptyState(elements.historyCharts, "History charts will load after the run snapshot arrives.");
+    elements.rawPayload.textContent = "Waiting for canonical payload…";
+    clearNode(elements.evalTableBody);
+    appendTableMessage("Waiting for the selected run before loading sample rows.");
+    syncPanelAvailability();
+    syncActivePanel();
   }
 
   function renderExperimentError(error) {
@@ -381,8 +470,12 @@
 
     if (!state.experiments.length) {
       const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No experiments";
+      option.value = state.selectedExperimentId || "";
+      option.textContent = state.selectedExperimentId
+        ? `${state.selectedExperimentId} (loading…)`
+        : state.experimentsLoaded
+        ? "No experiments"
+        : "Loading experiments…";
       elements.experimentSelect.appendChild(option);
       elements.experimentSelect.disabled = true;
       return;
@@ -481,7 +574,10 @@
       { label: "Active now", value: experiment.active_run_count || 0 },
       { label: "Succeeded", value: statusCounts.success || 0 },
       { label: "Failed", value: statusCounts.failed || 0 },
-      { label: "Stopped", value: statusCounts.stopped || 0 },
+      {
+        label: "Partial",
+        value: (statusCounts.partial || 0) + (statusCounts.stopped || 0),
+      },
       { label: "Phases", value: Object.keys(phaseCounts).length || 0 },
     ];
 
@@ -556,27 +652,73 @@
     });
   }
 
-  function renderRunLoadingState(runSummary) {
-    const title = runSummary.display_name || runSummary.run_name || "Loading run";
-    elements.detailTitle.textContent = title;
-    applyStatusPill(elements.detailStatus, runSummary.status || "loading");
-    appendEmptyState(elements.detailMeta, "Loading run metadata...");
-    appendEmptyState(elements.detailMetrics, "Loading summary metrics...");
-    elements.historySummary.textContent = "Loading metric history...";
-    appendEmptyState(elements.historyCharts, "Loading metric history...");
-    elements.rawPayload.textContent = "Loading canonical payload...";
+  function renderRunSummarySnapshot(runSummary, options) {
+    const settings = options || {};
+    const summary = asObject(runSummary);
+    const jobResultPayload = asObject(settings.jobResultPayload);
+    const metrics = settings.metrics || asObject(summary.metrics);
+
+    elements.detailTitle.textContent =
+      summary.display_name || summary.run_name || "Run detail";
+    elements.detailSubtitle.textContent = summarizeRunSubtitle(summary);
+    applyStatusPill(elements.detailStatus, summary.status || "unknown");
+    elements.detailStageNote.textContent = settings.loadingDetail
+      ? "Loading deeper telemetry…"
+      : "Detail ready";
+    renderFactRow(buildRunFacts(summary, metrics, settings.loadingDetail));
+    renderActionRow(buildRunActions(summary));
+
+    renderMetaGrid(buildRunMetaItems(summary, jobResultPayload));
+
+    if (!Object.keys(metrics).length) {
+      appendEmptyState(elements.detailMetrics, detailMetricsEmptyState(summary, metrics));
+    } else {
+      renderMetricCards(elements.detailMetrics, metrics);
+    }
+
+    if (settings.loadingDetail) {
+      elements.historySummary.textContent = "Loading metric history…";
+      appendEmptyState(
+        elements.historyCharts,
+        "Loading chart data for this run in the background."
+      );
+      appendEmptyState(
+        elements.evalSummary,
+        isEvalLikeRun(summary)
+          ? "Loading detailed eval metrics…"
+          : "Detailed eval metrics appear here when the run logs a structured result payload."
+      );
+      clearNode(elements.evalTableBody);
+      appendTableMessage(
+        isEvalLikeRun(summary)
+          ? "Loading eval samples…"
+          : "This run does not expose eval sample rows."
+      );
+      elements.rawPayload.textContent = "Loading canonical payload…";
+    }
+
+    syncPanelAvailability();
+    syncActivePanel();
+    updateDocumentTitle();
   }
 
   function clearRunDetail(message) {
     const detailMessage = message || "No run selected.";
     state.runDetail = null;
+    state.runDetailLoading = false;
     elements.detailTitle.textContent = "Select a run";
+    elements.detailSubtitle.textContent = "Pick a run from the left to inspect it.";
+    elements.detailStageNote.textContent = "Snapshot ready";
     applyStatusPill(elements.detailStatus, "idle");
+    renderFactRow([buildFactChip("Selection", "No run selected")]);
+    renderActionRow([]);
     appendEmptyState(elements.detailMeta, detailMessage);
     appendEmptyState(elements.detailMetrics, "Run-level metrics will appear here.");
     elements.historySummary.textContent = "No series loaded";
     appendEmptyState(elements.historyCharts, "Metric history will appear here.");
     elements.rawPayload.textContent = detailMessage;
+    syncPanelAvailability();
+    syncActivePanel();
     renderEvalSamples();
     updateDocumentTitle();
   }
@@ -585,13 +727,23 @@
     const message = normalizeErrorMessage(error);
     elements.detailTitle.textContent =
       runSummary.display_name || runSummary.run_name || "Run detail";
+    elements.detailSubtitle.textContent = summarizeRunSubtitle(runSummary);
+    elements.detailStageNote.textContent = "Detail failed to load";
     applyStatusPill(elements.detailStatus, "failed");
+    renderFactRow([
+      buildFactChip("Phase", String(runSummary.phase || "unknown").toUpperCase()),
+      buildFactChip("Provider", runSummary.provider || "n/a"),
+      buildFactChip("Detail", "Failed"),
+    ]);
+    renderActionRow(buildRunActions(asObject(runSummary)));
     appendEmptyState(elements.detailMeta, message);
     appendEmptyState(elements.detailMetrics, "No metrics available.");
     elements.historySummary.textContent = "No series loaded";
     appendEmptyState(elements.historyCharts, message);
     elements.rawPayload.textContent = message;
     state.runDetail = null;
+    syncPanelAvailability();
+    syncActivePanel();
     renderEvalSamples();
   }
 
@@ -605,12 +757,19 @@
     const resultPayload = asObject(state.runDetail.result_payload);
     const jobResultPayload = asObject(state.runDetail.job_result_payload);
     const metrics = collectMetrics(state.runDetail);
+    renderRunSummarySnapshot(summary, {
+      jobResultPayload: jobResultPayload,
+      metrics: metrics,
+      loadingDetail: false,
+    });
 
-    elements.detailTitle.textContent =
-      summary.display_name || summary.run_name || "Run detail";
-    applyStatusPill(elements.detailStatus, summary.status || "unknown");
+    renderHistoryCharts();
+    renderEvalSamples();
+    renderRawPayload();
+  }
 
-    renderMetaGrid([
+  function buildRunMetaItems(summary, jobResultPayload) {
+    return [
       metaItem("Phase", String(summary.phase || "unknown").toUpperCase()),
       metaItem("Provider", summary.provider || "n/a"),
       metaItem(
@@ -660,22 +819,94 @@
         "Failure reason",
         summary.failure_reason || jobResultPayload.failure_reason || "n/a"
       ),
-    ]);
+    ];
+  }
 
-    if (!Object.keys(metrics).length) {
-      appendEmptyState(elements.detailMetrics, detailMetricsEmptyState(summary, metrics));
+  function summarizeRunSubtitle(summary) {
+    const parts = [
+      String(summary.phase || "").toUpperCase(),
+      summary.provider,
+      pickRunPreview(summary) || runPreviewFallbackText(summary),
+    ].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "Pick a run from the left to inspect it.";
+  }
+
+  function buildRunFacts(summary, metrics, loadingDetail) {
+    const items = [
+      buildFactChip("Phase", String(summary.phase || "unknown").toUpperCase()),
+      buildFactChip("Provider", summary.provider || "n/a"),
+      buildFactChip(
+        "Samples",
+        summarizeSamples(summary.processed_samples, summary.expected_samples)
+      ),
+    ];
+
+    const metricEntries = orderedMetricEntries(metrics, summary.phase);
+    if (metricEntries.length) {
+      const [key, value] = metricEntries[0];
+      items.push(buildFactChip(prettifyKey(key), formatMetricValue(value, key)));
     } else {
-      renderMetricCards(elements.detailMetrics, metrics);
+      items.push(
+        buildFactChip(
+          "Runtime",
+          Number.isFinite(Number(summary.total_time_seconds))
+            ? formatDuration(Number(summary.total_time_seconds))
+            : "n/a"
+        )
+      );
     }
 
-    renderHistoryCharts();
-    renderRawPayload();
+    items.push(
+      buildFactChip(
+        "Detail",
+        loadingDetail ? "Syncing in background" : "Ready"
+      )
+    );
+    return items;
+  }
+
+  function buildRunActions(summary) {
+    const actions = [];
+    if (summary.wandb_url) {
+      actions.push(buildActionLink("Open W&B run", summary.wandb_url));
+    }
+    if (summary.hf_repo_id) {
+      actions.push(
+        buildActionLink(
+          "Open HF artifact",
+          buildHfUrl(summary.hf_repo_id, summary.hf_revision)
+        )
+      );
+    }
+    if (state.config && state.config.project_url) {
+      actions.push(buildActionLink("Open project", state.config.project_url));
+    }
+    return actions;
   }
 
   function renderMetaGrid(items) {
     clearNode(elements.detailMeta);
     items.forEach((item) => {
       elements.detailMeta.appendChild(item);
+    });
+  }
+
+  function renderFactRow(items) {
+    clearNode(elements.detailFacts);
+    items.forEach((item) => {
+      elements.detailFacts.appendChild(item);
+    });
+  }
+
+  function renderActionRow(items) {
+    clearNode(elements.detailActions);
+    if (!items.length) {
+      elements.detailActions.hidden = true;
+      return;
+    }
+    elements.detailActions.hidden = false;
+    items.forEach((item) => {
+      elements.detailActions.appendChild(item);
     });
   }
 
@@ -692,6 +923,15 @@
 
   function renderHistoryCharts() {
     clearNode(elements.historyCharts);
+
+    if (state.runDetailLoading && !state.runDetail) {
+      elements.historySummary.textContent = "Loading metric history…";
+      appendEmptyState(
+        elements.historyCharts,
+        "Loading chart data for this run in the background."
+      );
+      return;
+    }
 
     const history =
       state.runDetail && state.runDetail.history ? asObject(state.runDetail.history) : {};
@@ -715,6 +955,25 @@
   }
 
   function renderEvalSamples() {
+    if (state.runDetailLoading && !state.runDetail) {
+      clearNode(elements.evalSummary);
+      appendEmptyState(
+        elements.evalSummary,
+        isEvalLikeRun(state.selectedRunSummary)
+          ? "Loading detailed eval metrics…"
+          : "Detailed eval metrics appear here when the run logs a structured result payload."
+      );
+      clearNode(elements.evalTableBody);
+      appendTableMessage(
+        isEvalLikeRun(state.selectedRunSummary)
+          ? "Loading eval samples…"
+          : "This run does not expose eval sample rows."
+      );
+      toggleSampleFilters(false, null, null);
+      syncPanelAvailability();
+      return;
+    }
+
     const resultPayload =
       state.runDetail && state.runDetail.result_payload
         ? asObject(state.runDetail.result_payload)
@@ -753,6 +1012,7 @@
     }
 
     clearNode(elements.evalTableBody);
+    renderEvalTableHead([]);
 
     if (!normalizedRows.length) {
       appendTableMessage("No detailed sample rows were logged for this run.");
@@ -775,66 +1035,248 @@
       return;
     }
 
+    const columns = pickEvalTableColumns(filteredRows, {
+      includeReward: rewardCounts.available > 0,
+    });
+    renderEvalTableHead(columns);
+
     filteredRows.forEach((row) => {
-      const outcome = row.outcome;
       const tr = document.createElement("tr");
-
-      const statusCell = document.createElement("td");
-      statusCell.className = "status-cell";
-      const badge = createText(
-        "span",
-        `eval-status ${outcome.passed ? "pass" : "fail"}`,
-        outcome.passed ? "Pass" : "Needs review"
-      );
-      statusCell.appendChild(badge);
-      if (outcome.reasons.length) {
-        statusCell.appendChild(
-          createText("div", "muted-copy", outcome.reasons.join(", "))
-        );
-      }
-
-      const rewardCell = document.createElement("td");
-      rewardCell.className = "reward-cell";
-      rewardCell.appendChild(buildRewardCell(row.raw, row.reward));
-
-      const guessCell = createText(
-        "td",
-        "guess-cell",
-        row.raw && row.raw.parsed_guess ? String(row.raw.parsed_guess) : "-"
-      );
-
-      const completionCell = document.createElement("td");
-      completionCell.className = "completion-cell";
-      completionCell.appendChild(
-        buildExpandableCopy(
-          "completion-copy",
-          row.raw && row.raw.completion ? String(row.raw.completion) : "",
-          520
-        )
-      );
-
-      const promptCell = document.createElement("td");
-      promptCell.className = "prompt-cell";
-      promptCell.appendChild(
-        buildExpandableCopy(
-          "prompt-copy",
-          row.raw && row.raw.prompt ? String(row.raw.prompt) : "",
-          420
-        )
-      );
-
-      tr.appendChild(statusCell);
-      tr.appendChild(rewardCell);
-      tr.appendChild(guessCell);
-      tr.appendChild(completionCell);
-      tr.appendChild(promptCell);
+      columns.forEach((column) => {
+        tr.appendChild(column.render(row));
+      });
       elements.evalTableBody.appendChild(tr);
     });
+
+    syncPanelAvailability();
+  }
+
+  function renderEvalTableHead(columns) {
+    clearNode(elements.evalTableHead);
+    const row = document.createElement("tr");
+    const activeColumns = columns.length
+      ? columns
+      : [
+          { label: "Status" },
+          { label: "Reward" },
+          { label: "Parsed" },
+          { label: "Completion" },
+          { label: "Prompt" },
+        ];
+    activeColumns.forEach((column) => {
+      const th = document.createElement("th");
+      th.textContent = column.label;
+      if (column.headerClassName) {
+        th.className = column.headerClassName;
+      }
+      row.appendChild(th);
+    });
+    elements.evalTableHead.appendChild(row);
+  }
+
+  function pickEvalTableColumns(rows, options) {
+    const settings = options || {};
+    const first = rows.length ? asObject(rows[0].raw) : {};
+    const baseColumns = [buildStatusColumn()];
+
+    if (isArithmeticEvalRow(first)) {
+      return baseColumns.concat([
+        buildProblemColumn(),
+        buildExpectedColumn(),
+        buildParsedColumn("Parsed answer"),
+        buildCompletionColumn("Completion", 180),
+        buildNumericColumn("Absolute error", "absolute_error"),
+      ]);
+    }
+
+    if (settings.includeReward) {
+      baseColumns.push(buildRewardColumn());
+    }
+
+    return baseColumns.concat([
+      buildParsedColumn("Parsed"),
+      buildCompletionColumn("Completion", 420),
+      buildPromptColumn("Prompt", 360),
+    ]);
+  }
+
+  function buildStatusColumn() {
+    return {
+      label: "Status",
+      render(row) {
+        const cell = document.createElement("td");
+        cell.className = "status-cell cell-status";
+        cell.appendChild(buildStatusCell(row.outcome));
+        return cell;
+      },
+    };
+  }
+
+  function buildRewardColumn() {
+    return {
+      label: "Reward",
+      render(row) {
+        const cell = document.createElement("td");
+        cell.className = "reward-cell cell-reward";
+        cell.appendChild(buildRewardCell(row.raw, row.reward));
+        return cell;
+      },
+    };
+  }
+
+  function buildProblemColumn() {
+    return {
+      label: "Problem",
+      render(row) {
+        const raw = asObject(row.raw);
+        const value =
+          raw.left == null || raw.right == null
+            ? "n/a"
+            : `${raw.left} + ${raw.right}`;
+        return buildTextCell(value, "problem-cell cell-problem sample-primary");
+      },
+    };
+  }
+
+  function buildExpectedColumn() {
+    return {
+      label: "Expected",
+      render(row) {
+        const raw = asObject(row.raw);
+        return buildTextCell(
+          raw.expected_answer != null ? String(raw.expected_answer) : "n/a",
+          "expected-cell cell-expected sample-mono"
+        );
+      },
+    };
+  }
+
+  function buildParsedColumn(label) {
+    return {
+      label: label,
+      render(row) {
+        return buildTextCell(findParsedValue(row.raw), "guess-cell cell-parsed sample-mono");
+      },
+    };
+  }
+
+  function buildCompletionColumn(label, previewLength) {
+    return {
+      label: label,
+      render(row) {
+        const cell = document.createElement("td");
+        cell.className = "completion-cell cell-completion";
+        cell.appendChild(
+          buildSampleCopy(
+            row.raw && row.raw.completion ? String(row.raw.completion) : "",
+            "completion-copy",
+            previewLength
+          )
+        );
+        return cell;
+      },
+    };
+  }
+
+  function buildPromptColumn(label, previewLength) {
+    return {
+      label: label,
+      render(row) {
+        const cell = document.createElement("td");
+        cell.className = "prompt-cell cell-prompt";
+        cell.appendChild(
+          buildSampleCopy(resolvePromptPreview(row.raw), "prompt-copy", previewLength)
+        );
+        return cell;
+      },
+    };
+  }
+
+  function buildNumericColumn(label, key) {
+    return {
+      label: label,
+      render(row) {
+        const raw = asObject(row.raw);
+        const value = raw[key];
+        return buildTextCell(
+          value == null ? "n/a" : formatMetricValue(value, key),
+          "numeric-cell sample-mono"
+        );
+      },
+    };
+  }
+
+  function buildStatusCell(outcome) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "status-shell";
+    const badge = createText(
+      "span",
+      `eval-status ${outcome.passed ? "pass" : "fail"}`,
+      outcome.passed ? "Pass" : "Needs review"
+    );
+    wrapper.appendChild(badge);
+    if (outcome.reasons.length) {
+      wrapper.appendChild(
+        createText("div", "muted-copy status-note", outcome.reasons.join(", "))
+      );
+    }
+    return wrapper;
+  }
+
+  function buildTextCell(value, className) {
+    const cell = document.createElement("td");
+    cell.className = className || "";
+    cell.textContent = value == null || value === "" ? "n/a" : String(value);
+    return cell;
+  }
+
+  function buildSampleCopy(text, className, previewLength) {
+    const fullText = String(text || "");
+    if (!fullText.trim()) {
+      return createText("div", `copy-inline muted-copy ${className}`, "n/a");
+    }
+    if (fullText.length <= Math.max(80, previewLength / 2)) {
+      return createText("div", `copy-inline ${className}`, fullText);
+    }
+    return buildExpandableCopy(className, fullText, previewLength);
+  }
+
+  function resolvePromptPreview(rawRow) {
+    const record = asObject(rawRow);
+    if (record.prompt) {
+      return String(record.prompt);
+    }
+    if (isArithmeticEvalRow(record)) {
+      return `${record.left} + ${record.right} = ?`;
+    }
+    return "";
+  }
+
+  function isArithmeticEvalRow(rawRow) {
+    const record = asObject(rawRow);
+    return (
+      record.left != null &&
+      record.right != null &&
+      Object.prototype.hasOwnProperty.call(record, "expected_answer")
+    );
+  }
+
+  function findParsedValue(rawRow) {
+    const record = asObject(rawRow);
+    if (record.parsed_guess != null && record.parsed_guess !== "") {
+      return String(record.parsed_guess);
+    }
+    if (record.parsed_answer != null && record.parsed_answer !== "") {
+      return String(record.parsed_answer);
+    }
+    return "n/a";
   }
 
   function renderRawPayload() {
     if (!state.runDetail) {
-      elements.rawPayload.textContent = "No run selected.";
+      elements.rawPayload.textContent = state.runDetailLoading
+        ? "Loading canonical payload…"
+        : "No run selected.";
       return;
     }
 
@@ -851,6 +1293,7 @@
       },
     };
     elements.rawPayload.textContent = JSON.stringify(payload, null, 2);
+    syncPanelAvailability();
   }
 
   function buildChartCard(rows, key, color) {
@@ -1131,7 +1574,8 @@
   function appendTableMessage(message) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    const headerColumns = elements.evalTableHead.querySelectorAll("th").length;
+    cell.colSpan = headerColumns || 5;
     cell.appendChild(createText("div", "empty-state", message));
     row.appendChild(cell);
     elements.evalTableBody.appendChild(row);
@@ -1399,6 +1843,29 @@
     return item;
   }
 
+  function buildFactChip(label, value) {
+    const chip = document.createElement("div");
+    chip.className = "fact-chip";
+    chip.appendChild(createText("div", "fact-label", label));
+    chip.appendChild(createText("div", "fact-value", value));
+    return chip;
+  }
+
+  function buildActionLink(label, href) {
+    const link = buildLink(label, href);
+    link.className = "action-link";
+    return link;
+  }
+
+  function buildHfUrl(repoId, revision) {
+    const encodedRepo = String(repoId || "").trim();
+    if (!encodedRepo) {
+      return "https://huggingface.co";
+    }
+    const base = `https://huggingface.co/${encodedRepo}`;
+    return revision ? `${base}/tree/${encodeURIComponent(String(revision))}` : base;
+  }
+
   function buildStatusPill(status) {
     const node = document.createElement("span");
     applyStatusPill(node, status);
@@ -1416,9 +1883,61 @@
     elements.liveIndicator.title = title || "";
   }
 
+  function syncPanelAvailability() {
+    const hasRunSelection = Boolean(state.selectedRunSummary);
+    const evalAvailable =
+      isEvalLikeRun(state.selectedRunSummary) ||
+      Boolean(
+        state.runDetail &&
+          Array.isArray(asObject(state.runDetail.result_payload).detailed_results) &&
+          asObject(state.runDetail.result_payload).detailed_results.length
+      );
+
+    elements.tabButtons.forEach((button) => {
+      if (button.dataset.panel === "samples") {
+        button.disabled = !evalAvailable;
+      }
+    });
+
+    if (hasRunSelection && !evalAvailable && state.selectedPanel === "samples") {
+      state.selectedPanel = "overview";
+    }
+  }
+
+  function syncActivePanel() {
+    elements.tabButtons.forEach((button) => {
+      const isActive = button.dataset.panel === state.selectedPanel;
+      button.classList.toggle("active", isActive);
+      button.setAttribute("aria-selected", String(isActive));
+    });
+
+    elements.tabPanels.forEach((panel) => {
+      const isActive = panel.dataset.panel === state.selectedPanel;
+      panel.classList.toggle("active", isActive);
+      panel.hidden = !isActive;
+    });
+  }
+
+  function maybeLoadRunDetailForPanel() {
+    if (
+      state.selectedPanel === "overview" ||
+      state.runDetail ||
+      state.runDetailLoading ||
+      !state.selectedRunSummary
+    ) {
+      return;
+    }
+    void loadRunDetail(state.selectedRunSummary, { showLoadingState: false });
+  }
+
   function setRefreshBusy(isBusy) {
     elements.refreshButton.disabled = isBusy;
     elements.refreshButton.textContent = isBusy ? "Refreshing..." : "Refresh";
+    elements.refreshLabel.textContent = isBusy
+      ? "Syncing telemetry…"
+      : state.config
+      ? `Auto refresh every ${Math.max(2, Number(state.config.refresh_seconds) || 10)}s`
+      : "Telemetry idle";
   }
 
   function statusTone(status) {
@@ -1507,6 +2026,11 @@
     return `${String(run.phase || "")}::${String(run.run_name || "")}`;
   }
 
+  function isEvalLikeRun(run) {
+    const summary = asObject(run);
+    return String(summary.phase || "").toLowerCase() === "eval";
+  }
+
   function pluralize(count, noun) {
     const numericCount = Number(count || 0);
     return `${numericCount} ${noun}${numericCount === 1 ? "" : "s"}`;
@@ -1541,6 +2065,12 @@
       params.delete("run_name");
     }
 
+    if (state.selectedPanel && state.selectedPanel !== "overview") {
+      params.set("panel", state.selectedPanel);
+    } else {
+      params.delete("panel");
+    }
+
     const nextQuery = params.toString();
     const nextUrl = nextQuery
       ? `${window.location.pathname}?${nextQuery}`
@@ -1555,6 +2085,7 @@
       experimentId: trimOrNull(params.get("experiment_id")),
       phase: trimOrNull(params.get("phase")),
       runName: trimOrNull(params.get("run_name")),
+      panel: trimOrNull(params.get("panel")),
     };
   }
 

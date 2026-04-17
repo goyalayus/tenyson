@@ -9,15 +9,19 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div>
+        <div class="title-stack">
           <p class="eyebrow">Telemetry Workspace</p>
           <h1>Tenyson Dashboard</h1>
+          <p class="subtitle-copy">
+            Browse recent experiment runs without waiting for the whole page to catch up.
+          </p>
         </div>
         <div class="toolbar">
           <label class="select-wrap">
             <span>Experiment</span>
             <select id="experiment-select"></select>
           </label>
+          <span id="refresh-label" class="refresh-label">Syncing telemetry…</span>
           <button id="refresh-button" class="ghost-button" type="button">
             Refresh
           </button>
@@ -46,26 +50,100 @@
         <section class="main-panel">
           <div id="hero-cards" class="hero-grid"></div>
 
-          <div class="detail-grid">
-            <section class="card-panel detail-panel">
-              <div class="section-header">
-                <h2 id="detail-title">Select a run</h2>
-                <span id="detail-status" class="status-pill neutral">idle</span>
+          <section class="card-panel detail-shell">
+            <div class="detail-header">
+              <div class="detail-title-wrap">
+                <p class="eyebrow detail-eyebrow">Selected Run</p>
+                <div class="detail-title-row">
+                  <h2 id="detail-title">Select a run</h2>
+                  <span id="detail-status" class="status-pill neutral">idle</span>
+                </div>
+                <p id="detail-subtitle" class="muted-copy detail-subtitle">
+                  Pick a run from the left to inspect it.
+                </p>
               </div>
-              <div id="detail-meta" class="meta-grid"></div>
-              <div id="detail-metrics" class="metric-grid"></div>
-            </section>
-
-            <section class="card-panel detail-panel">
-              <div class="section-header">
-                <h2>Metric History</h2>
-                <span id="history-summary" class="muted-copy">No series loaded</span>
+              <div class="tab-row" role="tablist" aria-label="Run detail sections">
+                <button
+                  id="tab-overview"
+                  class="tab-button active"
+                  type="button"
+                  data-panel="overview"
+                  role="tab"
+                  aria-selected="true"
+                >
+                  Overview
+                </button>
+                <button
+                  id="tab-history"
+                  class="tab-button"
+                  type="button"
+                  data-panel="history"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  History
+                </button>
+                <button
+                  id="tab-samples"
+                  class="tab-button"
+                  type="button"
+                  data-panel="samples"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  Samples
+                </button>
+                <button
+                  id="tab-payload"
+                  class="tab-button"
+                  type="button"
+                  data-panel="payload"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  Payload
+                </button>
               </div>
-              <div id="history-charts" class="chart-grid"></div>
-            </section>
-          </div>
+            </div>
+            <div id="detail-facts" class="fact-row"></div>
+            <div id="detail-actions" class="action-row"></div>
+          </section>
 
-          <section class="card-panel eval-panel">
+          <section
+            id="panel-overview"
+            class="card-panel tab-panel detail-panel active"
+            data-panel="overview"
+            role="tabpanel"
+          >
+            <div class="section-header">
+              <h2>Run Overview</h2>
+              <span id="detail-stage-note" class="muted-copy">Snapshot ready</span>
+            </div>
+            <div id="detail-meta" class="meta-grid"></div>
+            <div id="detail-metrics" class="metric-grid"></div>
+          </section>
+
+          <section
+            id="panel-history"
+            class="card-panel tab-panel detail-panel"
+            data-panel="history"
+            role="tabpanel"
+            hidden
+          >
+            <div class="section-header">
+              <h2>Metric History</h2>
+              <span id="history-summary" class="muted-copy">No series loaded</span>
+            </div>
+            <div id="history-charts" class="chart-grid"></div>
+          </section>
+
+          <section
+            id="panel-samples"
+            class="card-panel tab-panel eval-panel"
+            data-panel="samples"
+            role="tabpanel"
+            hidden
+          >
             <div class="section-header">
               <h2>Eval Samples</h2>
               <div class="toolbar-inline">
@@ -120,21 +198,19 @@
             <div id="eval-summary" class="metric-grid compact"></div>
             <div id="eval-table-wrap" class="table-wrap">
               <table class="eval-table">
-                <thead>
-                  <tr>
-                    <th>Status</th>
-                    <th>Reward</th>
-                    <th>Parsed Guess</th>
-                    <th>Completion</th>
-                    <th>Prompt</th>
-                  </tr>
-                </thead>
+                <thead id="eval-table-head"></thead>
                 <tbody id="eval-table-body"></tbody>
               </table>
             </div>
           </section>
 
-          <section class="card-panel raw-panel">
+          <section
+            id="panel-payload"
+            class="card-panel tab-panel raw-panel"
+            data-panel="payload"
+            role="tabpanel"
+            hidden
+          >
             <div class="section-header">
               <h2>Canonical Payload</h2>
               <span class="muted-copy">Raw telemetry for debugging and review</span>

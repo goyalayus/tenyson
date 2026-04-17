@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -329,7 +330,29 @@ class DashboardDataService:
         self._cache_lock = threading.Lock()
         self._project_runs_cache: tuple[float, List[Any]] | None = None
         self._experiment_runs_cache: Dict[str, tuple[float, List[Any]]] = {}
+        self._experiment_snapshot_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         self._run_detail_cache: Dict[tuple[str, str, str], tuple[float, Dict[str, Any]]] = {}
+
+    def _prewarm_default_experiment(self) -> None:
+        experiment_id = str(self.default_experiment_id or "").strip()
+        if not experiment_id:
+            return
+        try:
+            snapshot = self.get_experiment_snapshot(experiment_id)
+            runs = snapshot.get("runs")
+            if not isinstance(runs, list) or not runs:
+                return
+            first_run = _coerce_mapping(runs[0])
+            phase = str(first_run.get("phase") or "").strip()
+            run_name = str(first_run.get("run_name") or "").strip()
+            if phase and run_name:
+                self.get_run_detail(
+                    experiment_id=experiment_id,
+                    phase=phase,
+                    run_name=run_name,
+                )
+        except Exception:
+            return
 
     def project_url(self) -> str:
         return self.target.project_url
@@ -538,6 +561,12 @@ class DashboardDataService:
         if not experiment_id:
             raise ValueError("experiment_id is required.")
 
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._experiment_snapshot_cache.get(experiment_id)
+            if cached is not None and (now - cached[0]) <= self.cache_ttl_seconds:
+                return cached[1]
+
         runs = [
             self._normalize_run_summary(run)
             for run in self._experiment_runs(experiment_id)
@@ -554,7 +583,7 @@ class DashboardDataService:
             if latest_heartbeat_at is None or heartbeat > latest_heartbeat_at:
                 latest_heartbeat_at = heartbeat
 
-        return {
+        snapshot = {
             "experiment": {
                 "experiment_id": experiment_id,
                 "backend_ref": self.backend_ref,
@@ -569,6 +598,9 @@ class DashboardDataService:
             },
             "runs": runs,
         }
+        with self._cache_lock:
+            self._experiment_snapshot_cache[experiment_id] = (now, snapshot)
+        return snapshot
 
     def _build_history_payload(self, run: Any, *, phase: str) -> Dict[str, Any]:
         history_rows: List[Dict[str, Any]] = []
@@ -666,36 +698,43 @@ class DashboardDataService:
 
         run = self._find_run(experiment_id=experiment_id, phase=phase, run_name=run_name)
         summary = self._normalize_run_summary(run)
-        stop_requested, stop_requested_at = wandb_store.fetch_stop_request_state(
-            self.backend_ref,
-            experiment_id=experiment_id,
-            phase=phase,
-            run_name=run_name,
-            attempt_token=summary.get("attempt_token"),
-        )
+        config_preview = _coerce_mapping(getattr(run, "config", {}))
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            stop_future = executor.submit(
+                wandb_store.fetch_stop_request_state,
+                self.backend_ref,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=run_name,
+                attempt_token=summary.get("attempt_token"),
+            )
+            result_future = executor.submit(
+                wandb_store.fetch_run_result,
+                self.backend_ref,
+                experiment_id=experiment_id,
+                phase=phase,
+                run_name=run_name,
+                attempt_token=summary.get("attempt_token"),
+            )
+            history_future = executor.submit(self._build_history_payload, run, phase=phase)
+
+            stop_requested, stop_requested_at = stop_future.result()
+            result_pair = result_future.result()
+            history_payload = history_future.result()
+
         summary["stop_requested"] = bool(stop_requested)
         summary["stop_requested_at"] = _normalize_timestamp(stop_requested_at)
-        result_pair = wandb_store.fetch_run_result(
-            self.backend_ref,
-            experiment_id=experiment_id,
-            phase=phase,
-            run_name=run_name,
-            attempt_token=summary.get("attempt_token"),
-        )
         results_payload: Dict[str, Any] = {}
         job_result_payload: Dict[str, Any] = {}
         if result_pair is not None:
             results_payload, job_result_payload = result_pair
 
-        config_preview = _coerce_mapping(getattr(run, "config", {}))
-        results_payload = _maybe_enrich_wordle_eval_results(
-            results_payload, config_preview
-        )
+        results_payload = _maybe_enrich_wordle_eval_results(results_payload, config_preview)
         detail = {
             "summary": summary,
             "result_payload": _json_ready(results_payload),
             "job_result_payload": _json_ready(job_result_payload),
-            "history": self._build_history_payload(run, phase=phase),
+            "history": history_payload,
             "config": _json_ready(config_preview),
             "detail_kind": str(phase),
         }
@@ -727,12 +766,15 @@ def _build_request_handler(
 
         def _write_json(self, payload: Dict[str, Any], *, status: int = 200) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _write_file(self, path: Path) -> None:
             if not path.exists() or not path.is_file():
@@ -740,14 +782,17 @@ def _build_request_handler(
                 return
             mime_type, _encoding = mimetypes.guess_type(str(path))
             body = path.read_bytes()
-            self.send_response(200)
-            self.send_header(
-                "Content-Type", mime_type or "application/octet-stream"
-            )
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type", mime_type or "application/octet-stream"
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -817,6 +862,8 @@ def _build_request_handler(
                     )
                     return
                 self._write_json({"error": "Not found."}, status=404)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except Exception as exc:  # noqa: BLE001
                 self._write_json({"error": str(exc)}, status=500)
 
@@ -827,9 +874,14 @@ def serve_dashboard(config: DashboardServerConfig) -> None:
     service = DashboardDataService(
         backend_ref=config.backend_ref,
         default_experiment_id=config.experiment_id,
-        cache_ttl_seconds=config.cache_ttl_seconds,
+        cache_ttl_seconds=max(
+            float(config.cache_ttl_seconds),
+            float(config.refresh_seconds) + 1.0,
+        ),
         history_limit=config.history_limit,
     )
+    if config.experiment_id:
+        service._prewarm_default_experiment()
     handler = _build_request_handler(service=service, config=config)
     server = ThreadingHTTPServer((config.host, int(config.port)), handler)
     host, port = server.server_address
