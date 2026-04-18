@@ -18,11 +18,6 @@ from tenyson.core.chat_generation import (
     prepare_generation_prompts,
     resolve_generation_stop_strings,
 )
-from tenyson.core.hf_adapter import (
-    download_hf_lora_adapter,
-    resolve_hf_lora_runtime_kwargs,
-    strict_load_hf_lora_adapter_weights,
-)
 from tenyson.core.hf_checkpoint import (
     download_hf_resume_checkpoint,
     resolve_hf_repo_revision,
@@ -874,7 +869,6 @@ class RLJob:
 
         init_repo = ""
         init_revision = "main"
-        init_adapter = None
         lora_runtime_kwargs: Dict[str, Any] = {
             "r": lora_cfg.get("r", 16),
             "target_modules": lora_cfg.get(
@@ -895,26 +889,15 @@ class RLJob:
                 model_cfg.get("init_adapter_revision", "main") or "main"
             ).strip() or "main"
 
+        resolved_init_revision = init_revision
         if init_repo and init_artifact_type == "adapter":
-            init_adapter = download_hf_lora_adapter(
-                repo_id=init_repo, revision=init_revision
-            )
-            lora_runtime_kwargs = resolve_hf_lora_runtime_kwargs(
-                init_adapter,
-                expected_r=lora_cfg.get("r") if "r" in lora_cfg else None,
-                expected_alpha=lora_cfg.get("alpha") if "alpha" in lora_cfg else None,
-                expected_dropout=lora_cfg.get("dropout")
-                if "dropout" in lora_cfg
-                else None,
-                expected_bias=lora_cfg.get("bias") if "bias" in lora_cfg else None,
-                expected_target_modules=lora_cfg.get("target_modules")
-                if "target_modules" in lora_cfg
-                else None,
+            resolved_init_revision = resolve_hf_repo_revision(
+                repo_id=init_repo,
+                revision=init_revision,
             )
             print(
                 "[RLJob] Using init adapter "
-                f"{init_repo}@{init_adapter.resolved_revision} "
-                f"({init_adapter.weights_in_repo}).",
+                f"{init_repo}@{resolved_init_revision}.",
                 flush=True,
             )
         elif init_repo and init_artifact_type == "full_model":
@@ -941,17 +924,14 @@ class RLJob:
                 f"{init_repo}@{resolved_revision}.",
                 flush=True,
             )
-        elif init_adapter is not None:
-            adapter_base_model_name = str(
-                init_adapter.config.get("base_model_name_or_path") or ""
-            ).strip()
-            if adapter_base_model_name:
-                resolved_model_name = adapter_base_model_name
-                print(
-                    "[RLJob] Loading the init adapter on top of its recorded base "
-                    f"model {resolved_model_name}.",
-                    flush=True,
-                )
+        elif init_repo and init_artifact_type == "adapter":
+            resolved_model_name = init_repo
+            resolved_revision = resolved_init_revision
+            print(
+                "[RLJob] Loading the init adapter directly via Unsloth's "
+                "continued-LoRA path.",
+                flush=True,
+            )
 
         model_name = resolved_model_name
         seq_len = model_cfg.get("max_seq_length", 2048)
@@ -1001,6 +981,14 @@ class RLJob:
             )
             return model, tokenizer
 
+        if init_repo and init_artifact_type == "adapter":
+            print(
+                "[RLJob] Keeping the loaded Unsloth LoRA model as-is for RL "
+                "training.",
+                flush=True,
+            )
+            return model, tokenizer
+
         print("[RLJob] Applying Unsloth LoRA scaffolding...", flush=True)
         model = FastLanguageModel.get_peft_model(
             model,
@@ -1014,20 +1002,6 @@ class RLJob:
             ),
             random_state=train_cfg.get("seed", 3407),
         )
-
-        if init_adapter is not None:
-            print(
-                "[RLJob] Seeding the Unsloth LoRA model with init adapter weights "
-                "so GRPO keeps its native load_lora path.",
-                flush=True,
-            )
-            loaded_tensors = strict_load_hf_lora_adapter_weights(model, init_adapter)
-            print(
-                "[RLJob] Successfully loaded init adapter "
-                f"from {init_repo}@{init_adapter.resolved_revision} "
-                f"({loaded_tensors} tensors).",
-                flush=True,
-            )
 
         return model, tokenizer
 
