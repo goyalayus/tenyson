@@ -1228,8 +1228,21 @@ class RLConfigHelpersTests(unittest.TestCase):
             },
         )
 
-    def test_require_rl_vllm_config_rejects_disabled_vllm(self) -> None:
-        with self.assertRaisesRegex(ValueError, "RL requires vLLM"):
+    def test_require_rl_vllm_config_allows_disabled_vllm_without_fast_inference(
+        self,
+    ) -> None:
+        _require_rl_vllm_config(
+            {"fast_inference": False},
+            {"enabled": False},
+        )
+
+    def test_require_rl_vllm_config_rejects_disabled_vllm_with_fast_inference(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "RL without vLLM requires model.fast_inference=false",
+        ):
             _require_rl_vllm_config(
                 {"fast_inference": True},
                 {"enabled": False},
@@ -1954,13 +1967,12 @@ class RLFallbackTests(unittest.TestCase):
 
         destroy_mock.assert_not_called()
 
-    def test_build_model_and_tokenizer_keeps_unsloth_lora_when_loading_init_adapter(
+    def test_build_model_and_tokenizer_loads_init_adapter_via_unsloth_directly(
         self,
     ) -> None:
         unsloth_module_name = "unsloth"
         original_unsloth_module = sys.modules.get(unsloth_module_name)
         unsloth_calls = []
-        strict_load_calls = []
 
         class FakeModel:
             def load_lora(self, *args, **kwargs):
@@ -1979,20 +1991,6 @@ class RLFallbackTests(unittest.TestCase):
 
         sys.modules[unsloth_module_name] = SimpleNamespace(
             FastLanguageModel=FakeFastLanguageModel
-        )
-
-        adapter = SimpleNamespace(
-            repo_id="org/adapter",
-            resolved_revision="rev-123",
-            weights_in_repo="adapter_model.safetensors",
-            config={
-                "base_model_name_or_path": "Qwen/Qwen3-4B",
-                "r": 16,
-                "lora_alpha": 32,
-                "lora_dropout": 0.0,
-                "bias": "none",
-                "target_modules": ["up_proj", "gate_proj", "down_proj"],
-            },
         )
 
         try:
@@ -2019,25 +2017,8 @@ class RLFallbackTests(unittest.TestCase):
 
             with unittest.mock.patch.object(
                 rl_module,
-                "download_hf_lora_adapter",
-                return_value=adapter,
-            ), unittest.mock.patch.object(
-                rl_module,
-                "resolve_hf_lora_runtime_kwargs",
-                return_value={
-                    "r": 16,
-                    "target_modules": ["up_proj", "gate_proj", "down_proj"],
-                    "lora_alpha": 32,
-                    "lora_dropout": 0.0,
-                    "bias": "none",
-                },
-            ), unittest.mock.patch.object(
-                rl_module,
-                "strict_load_hf_lora_adapter_weights",
-                side_effect=lambda model, adapter_arg: strict_load_calls.append(
-                    adapter_arg
-                )
-                or 7,
+                "resolve_hf_repo_revision",
+                return_value="rev-123",
             ), unittest.mock.patch.object(
                 rl_module,
                 "normalize_tokenizer_special_tokens",
@@ -2050,25 +2031,14 @@ class RLFallbackTests(unittest.TestCase):
                 sys.modules[unsloth_module_name] = original_unsloth_module
 
         self.assertEqual(len(unsloth_calls), 1)
-        self.assertEqual(unsloth_calls[0]["model_name"], "Qwen/Qwen3-4B")
+        self.assertEqual(unsloth_calls[0]["model_name"], "org/adapter")
+        self.assertEqual(unsloth_calls[0]["revision"], "rev-123")
         self.assertEqual(unsloth_calls[0]["max_seq_length"], 2048)
         self.assertFalse(unsloth_calls[0]["load_in_4bit"])
         self.assertTrue(unsloth_calls[0]["fast_inference"])
         self.assertEqual(unsloth_calls[0]["gpu_memory_utilization"], 0.8)
-        self.assertEqual(
-            getattr(model, "peft_kwargs", None),
-            {
-                "r": 16,
-                "target_modules": ["up_proj", "gate_proj", "down_proj"],
-                "lora_alpha": 32,
-                "lora_dropout": 0.0,
-                "bias": "none",
-                "use_gradient_checkpointing": "unsloth",
-                "random_state": 3407,
-            },
-        )
+        self.assertFalse(hasattr(model, "peft_kwargs"))
         self.assertTrue(callable(getattr(model, "load_lora", None)))
-        self.assertEqual(strict_load_calls, [adapter])
         normalize_mock.assert_called_once()
 
     def test_build_model_and_tokenizer_full_mode_loads_full_model_artifact(self) -> None:
@@ -2136,9 +2106,6 @@ class RLFallbackTests(unittest.TestCase):
                 return_value="rev-full",
             ), unittest.mock.patch.object(
                 rl_module,
-                "download_hf_lora_adapter",
-            ) as adapter_download_mock, unittest.mock.patch.object(
-                rl_module,
                 "normalize_tokenizer_special_tokens",
             ) as normalize_mock:
                 model, _tokenizer = job._build_model_and_tokenizer()
@@ -2158,7 +2125,6 @@ class RLFallbackTests(unittest.TestCase):
         self.assertFalse(job.config["vllm"]["enabled"])
         self.assertTrue(model.for_training_calls)
         self.assertFalse(hasattr(model, "peft_kwargs"))
-        adapter_download_mock.assert_not_called()
         normalize_mock.assert_called_once()
 
     def test_build_model_and_tokenizer_full_mode_rejects_adapter_seed(self) -> None:
