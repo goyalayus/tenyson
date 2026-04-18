@@ -18,11 +18,6 @@ from tenyson.core.chat_generation import (
     prepare_generation_prompts,
     resolve_generation_stop_strings,
 )
-from tenyson.core.hf_adapter import (
-    download_hf_lora_adapter,
-    resolve_hf_lora_runtime_kwargs,
-    strict_load_hf_lora_adapter_weights,
-)
 from tenyson.core.hf_checkpoint import (
     download_hf_resume_checkpoint,
     resolve_hf_repo_revision,
@@ -237,6 +232,42 @@ def _normalize_full_finetune_rl_config(
     return normalized, messages
 
 
+def _normalize_seeded_adapter_rl_config(
+    config: Dict[str, Any],
+) -> tuple[Dict[str, Any], list[str]]:
+    normalized = copy.deepcopy(config)
+    train_cfg = normalized.setdefault("training", {})
+    if _resolve_finetune_mode(train_cfg) == "full":
+        return normalized, []
+
+    model_cfg = normalized.setdefault("model", {})
+    init_artifact_type = _resolve_init_artifact_type(model_cfg)
+    init_adapter_repo = str(model_cfg.get("init_adapter_repo") or "").strip()
+    if init_artifact_type != "adapter" or not init_adapter_repo:
+        return normalized, []
+
+    vllm_cfg = normalized.setdefault("vllm", {})
+    messages: list[str] = []
+
+    if bool(model_cfg.get("fast_inference", False)):
+        model_cfg["fast_inference"] = False
+        messages.append(
+            "[RLJob] Seeded adapter RL disables fast inference and follows the "
+            "no-vLLM continued-LoRA path that worked in smoke tests; forcing "
+            "model.fast_inference=false."
+        )
+
+    if bool(vllm_cfg.get("enabled", False)):
+        vllm_cfg["enabled"] = False
+        messages.append(
+            "[RLJob] Seeded adapter RL disables vLLM and follows the no-vLLM "
+            "continued-LoRA path that worked in smoke tests; forcing "
+            "vllm.enabled=false."
+        )
+
+    return normalized, messages
+
+
 def _push_final_model_snapshot(
     *,
     repo_id: str,
@@ -358,9 +389,12 @@ def _require_rl_vllm_config(
         return
 
     if not vllm_enabled:
-        raise ValueError(
-            "RL requires vLLM. Set vllm.enabled=true for RL runs."
-        )
+        if fast_inference_enabled:
+            raise ValueError(
+                "RL without vLLM requires model.fast_inference=false when "
+                "vllm.enabled=false."
+            )
+        return
 
     mode = str(vllm_cfg.get("mode", "colocate") or "colocate").strip().lower()
     if mode not in {"colocate", "server"}:
@@ -610,6 +644,19 @@ def _prepare_rl_generation_dataset(
     return Dataset.from_list(updated_rows), prompt_lookup
 
 
+def _resolve_reward_batch_key(
+    *,
+    step: int,
+    prompts: Sequence[Any],
+    completions: Sequence[Any],
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    return (
+        int(step),
+        tuple(_coerce_logged_text(prompt) for prompt in prompts),
+        tuple(_coerce_logged_text(completion) for completion in completions),
+    )
+
+
 class _RewardTelemetryCollector:
     def __init__(
         self,
@@ -624,7 +671,10 @@ class _RewardTelemetryCollector:
         self.reward_component_names = list(reward_component_names)
         self.reward_weights = [1.0 for _ in self.reward_component_names]
         self.rollout_tracker = rollout_tracker
-        self._pending_batches: Dict[tuple[int, int, int], Dict[str, Any]] = {}
+        self._pending_batches: Dict[
+            tuple[int, tuple[str, ...], tuple[str, ...]],
+            Dict[str, Any],
+        ] = {}
         self._detailed_results: List[Dict[str, Any]] = []
         self._rollout_batches = 0
         self._lock = threading.Lock()
@@ -658,10 +708,10 @@ class _RewardTelemetryCollector:
                 "the same length."
             )
 
-        batch_key = (
-            _resolve_reward_logging_step(kwargs),
-            id(prompts),
-            id(completions),
+        batch_key = _resolve_reward_batch_key(
+            step=_resolve_reward_logging_step(kwargs),
+            prompts=prompts,
+            completions=completions,
         )
         completed_batch: Optional[Dict[str, Any]] = None
         with self._lock:
@@ -838,9 +888,12 @@ class RLJob:
     """
 
     def __init__(self, config: Dict[str, Any], task: TaskPlugin):
-        self.config, self._runtime_normalization_messages = (
-            _normalize_full_finetune_rl_config(config)
+        normalized_config, runtime_messages = _normalize_full_finetune_rl_config(config)
+        normalized_config, seeded_adapter_messages = _normalize_seeded_adapter_rl_config(
+            normalized_config
         )
+        self.config = normalized_config
+        self._runtime_normalization_messages = runtime_messages + seeded_adapter_messages
         self.task = task
         self.run_id = resolve_required_run_name(self.config, "rl")
         self._vllm_runtime_enabled: bool | None = None
@@ -874,7 +927,6 @@ class RLJob:
 
         init_repo = ""
         init_revision = "main"
-        init_adapter = None
         lora_runtime_kwargs: Dict[str, Any] = {
             "r": lora_cfg.get("r", 16),
             "target_modules": lora_cfg.get(
@@ -895,26 +947,15 @@ class RLJob:
                 model_cfg.get("init_adapter_revision", "main") or "main"
             ).strip() or "main"
 
+        resolved_init_revision = init_revision
         if init_repo and init_artifact_type == "adapter":
-            init_adapter = download_hf_lora_adapter(
-                repo_id=init_repo, revision=init_revision
-            )
-            lora_runtime_kwargs = resolve_hf_lora_runtime_kwargs(
-                init_adapter,
-                expected_r=lora_cfg.get("r") if "r" in lora_cfg else None,
-                expected_alpha=lora_cfg.get("alpha") if "alpha" in lora_cfg else None,
-                expected_dropout=lora_cfg.get("dropout")
-                if "dropout" in lora_cfg
-                else None,
-                expected_bias=lora_cfg.get("bias") if "bias" in lora_cfg else None,
-                expected_target_modules=lora_cfg.get("target_modules")
-                if "target_modules" in lora_cfg
-                else None,
+            resolved_init_revision = resolve_hf_repo_revision(
+                repo_id=init_repo,
+                revision=init_revision,
             )
             print(
                 "[RLJob] Using init adapter "
-                f"{init_repo}@{init_adapter.resolved_revision} "
-                f"({init_adapter.weights_in_repo}).",
+                f"{init_repo}@{resolved_init_revision}.",
                 flush=True,
             )
         elif init_repo and init_artifact_type == "full_model":
@@ -941,17 +982,14 @@ class RLJob:
                 f"{init_repo}@{resolved_revision}.",
                 flush=True,
             )
-        elif init_adapter is not None:
-            adapter_base_model_name = str(
-                init_adapter.config.get("base_model_name_or_path") or ""
-            ).strip()
-            if adapter_base_model_name:
-                resolved_model_name = adapter_base_model_name
-                print(
-                    "[RLJob] Loading the init adapter on top of its recorded base "
-                    f"model {resolved_model_name}.",
-                    flush=True,
-                )
+        elif init_repo and init_artifact_type == "adapter":
+            resolved_model_name = init_repo
+            resolved_revision = resolved_init_revision
+            print(
+                "[RLJob] Loading the init adapter directly via Unsloth's "
+                "continued-LoRA path.",
+                flush=True,
+            )
 
         model_name = resolved_model_name
         seq_len = model_cfg.get("max_seq_length", 2048)
@@ -1001,6 +1039,14 @@ class RLJob:
             )
             return model, tokenizer
 
+        if init_repo and init_artifact_type == "adapter":
+            print(
+                "[RLJob] Keeping the loaded Unsloth LoRA model as-is for RL "
+                "training.",
+                flush=True,
+            )
+            return model, tokenizer
+
         print("[RLJob] Applying Unsloth LoRA scaffolding...", flush=True)
         model = FastLanguageModel.get_peft_model(
             model,
@@ -1014,20 +1060,6 @@ class RLJob:
             ),
             random_state=train_cfg.get("seed", 3407),
         )
-
-        if init_adapter is not None:
-            print(
-                "[RLJob] Seeding the Unsloth LoRA model with init adapter weights "
-                "so GRPO keeps its native load_lora path.",
-                flush=True,
-            )
-            loaded_tensors = strict_load_hf_lora_adapter_weights(model, init_adapter)
-            print(
-                "[RLJob] Successfully loaded init adapter "
-                f"from {init_repo}@{init_adapter.resolved_revision} "
-                f"({loaded_tensors} tensors).",
-                flush=True,
-            )
 
         return model, tokenizer
 
