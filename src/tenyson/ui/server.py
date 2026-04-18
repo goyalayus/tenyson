@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from datasets import Dataset
+import importlib
+import importlib.util
 import json
 import mimetypes
 import os
 from pathlib import Path
+import re
+import subprocess
+import sys
 import threading
 import time
+import tempfile
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import parse_qs, urlparse
 import webbrowser
@@ -17,12 +25,14 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tenyson.core import wandb_store
+from tenyson.core.stage_templates import STAGE_TEMPLATE_CONFIG_KEY
 
 
 _DEFAULT_HISTORY_LIMIT = 240
 _DEFAULT_CACHE_TTL_SECONDS = 5.0
 _DEFAULT_PROJECT_RUN_SCAN_LIMIT = 400
 _DEFAULT_EXPERIMENT_RUN_LIMIT = 200
+_DEFAULT_SFT_PREVIEW_COUNT = 5
 _INTERNAL_HISTORY_KEYS = {"_step", "_runtime", "_timestamp"}
 _PHASE_ORDER = {"sft": 0, "eval": 1, "rl": 2}
 _PREFERRED_HISTORY_KEYS = {
@@ -140,10 +150,642 @@ def _json_ready(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _normalize_path(value: str | Path | None) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return str(Path(text).expanduser().resolve())
+
+
+def _coerce_chat_message_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_coerce_chat_message_text(item) for item in value]
+        return "\n".join(part for part in parts if part).strip()
+    if isinstance(value, Mapping):
+        if "text" in value:
+            return _coerce_chat_message_text(value.get("text"))
+        return str(value).strip()
+    return str(value or "").strip()
+
+
+def _normalize_chat_messages(value: Any) -> List[Dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[Dict[str, str]] = []
+    for raw_item in value:
+        item = _coerce_mapping(raw_item)
+        role = str(item.get("role") or "").strip().lower()
+        content = _coerce_chat_message_text(item.get("content"))
+        if not role or not content:
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _render_message_block(role: str, content: str) -> str:
+    normalized_role = str(role or "").strip().lower()
+    if normalized_role == "user":
+        return content
+    label = normalized_role.replace("_", " ").upper() or "MESSAGE"
+    return f"{label}\n{content}"
+
+
+def _chat_messages_to_preview(
+    messages: Any,
+    *,
+    example_index: int,
+) -> Optional[Dict[str, Any]]:
+    normalized = _normalize_chat_messages(messages)
+    if not normalized:
+        return None
+
+    assistant_index = -1
+    for index in range(len(normalized) - 1, -1, -1):
+        if normalized[index]["role"] == "assistant":
+            assistant_index = index
+            break
+    if assistant_index < 0:
+        return None
+
+    prompt_parts: List[str] = []
+    system_parts: List[str] = []
+    for message in normalized[:assistant_index]:
+        role = message["role"]
+        content = message["content"]
+        if role == "system":
+            system_parts.append(content)
+            continue
+        prompt_parts.append(_render_message_block(role, content))
+
+    completion = normalized[assistant_index]["content"]
+    prompt = "\n\n".join(part for part in prompt_parts if part).strip()
+    system_prompt = "\n\n".join(part for part in system_parts if part).strip()
+    if not prompt and not completion:
+        return None
+
+    return {
+        "row_kind": "sft_preview",
+        "example_index": example_index,
+        "system_prompt": system_prompt or None,
+        "prompt": prompt,
+        "completion": completion,
+    }
+
+
+def _resolve_dashboard_module(module_name: str, *, experiment_id: str) -> Any:
+    normalized_name = str(module_name or "").strip()
+    if not normalized_name:
+        raise ModuleNotFoundError("Empty module name.")
+    try:
+        return importlib.import_module(normalized_name)
+    except ModuleNotFoundError:
+        if "." in normalized_name:
+            raise
+
+    candidates = list(_repo_root().glob(f"examples/*/{normalized_name}.py"))
+    if not candidates:
+        raise
+
+    experiment_hint = str(experiment_id or "").strip().lower()
+    candidates.sort(
+        key=lambda path: (
+            0 if path.parent.name.lower() and path.parent.name.lower() in experiment_hint else 1,
+            str(path),
+        )
+    )
+    chosen = candidates[0]
+    module_key = f"tenyson_ui_preview_{chosen.parent.name}_{chosen.stem}"
+    cached = sys.modules.get(module_key)
+    if cached is not None:
+        return cached
+
+    spec = importlib.util.spec_from_file_location(module_key, chosen)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(
+            f"Could not resolve preview module for {normalized_name!r}."
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_sft_preview_dataset(
+    config_preview: Mapping[str, Any],
+    *,
+    experiment_id: str,
+) -> Optional[tuple[Dataset, str]]:
+    raw_templates = _coerce_mapping(config_preview.get(STAGE_TEMPLATE_CONFIG_KEY))
+    payload = _coerce_mapping(raw_templates.get("sft_dataset"))
+    if not payload:
+        return None
+
+    module_name = str(payload.get("module") or "").strip()
+    factory_name = str(payload.get("factory") or "").strip()
+    kwargs = _coerce_mapping(payload.get("kwargs"))
+    messages_column = str(kwargs.get("messages_column") or "messages").strip() or "messages"
+
+    if (
+        module_name == "tenyson.core.chat_sft"
+        and factory_name == "_bound_chat_sft_dataset_from_callable_ref"
+    ):
+        target_module_name = str(kwargs.get("module_name") or "").strip()
+        function_name = str(kwargs.get("function_name") or "").strip()
+        bound_kwargs = _coerce_mapping(kwargs.get("bound_kwargs"))
+        if not target_module_name or not function_name:
+            return None
+        try:
+            module = _resolve_dashboard_module(
+                target_module_name,
+                experiment_id=experiment_id,
+            )
+        except Exception:
+            module = None
+        train_builder = getattr(module, function_name, None) if module is not None else None
+        if callable(train_builder):
+            dataset = train_builder(**bound_kwargs)
+            if isinstance(dataset, Dataset):
+                return dataset, messages_column
+        hub_preview = _load_preview_from_hub_dataset_binding(
+            bound_kwargs,
+            function_name=function_name,
+        )
+        if hub_preview is not None:
+            return hub_preview, messages_column
+        return None
+
+    if module_name == "tenyson.core.chat_sft" and factory_name == "hub_chat_sft_dataset":
+        try:
+            from tenyson.core.chat_sft import hub_chat_sft_dataset
+
+            template = hub_chat_sft_dataset(**kwargs)
+            dataset = template.train(dict(config_preview), None)
+        except Exception:
+            return None
+        if isinstance(dataset, Dataset):
+            return dataset, messages_column
+        return None
+
+    return None
+
+
+def _load_preview_from_hub_dataset_binding(
+    bound_kwargs: Mapping[str, Any],
+    *,
+    function_name: str,
+) -> Optional[Dataset]:
+    dataset_name = str(bound_kwargs.get("dataset_name") or "").strip()
+    if not dataset_name:
+        return None
+    try:
+        from datasets import load_dataset
+
+        dataset = load_dataset(dataset_name, split="train")
+    except Exception:
+        return None
+    if not isinstance(dataset, Dataset):
+        return None
+
+    turn_match = re.search(r"turn[_-]?(\d+)", str(function_name or ""), re.IGNORECASE)
+    if turn_match and "turn_index" in dataset.column_names:
+        target_turn = int(turn_match.group(1))
+        dataset = dataset.filter(lambda row: int(row["turn_index"]) == target_turn)
+    return dataset
+
+
+def _maybe_add_sft_preview_rows(
+    results_payload: Mapping[str, Any],
+    config_preview: Mapping[str, Any],
+    *,
+    experiment_id: str,
+    phase: str,
+) -> Dict[str, Any]:
+    payload = _coerce_mapping(results_payload)
+    if str(phase or "").strip().lower() != "sft":
+        return payload
+    if payload.get("detailed_results"):
+        return payload
+
+    preview_bundle = _load_sft_preview_dataset(
+        config_preview,
+        experiment_id=experiment_id,
+    )
+    if preview_bundle is None:
+        return payload
+
+    dataset, messages_column = preview_bundle
+    preview_rows: List[Dict[str, Any]] = []
+    preview_limit = min(len(dataset), _DEFAULT_SFT_PREVIEW_COUNT)
+    for index in range(preview_limit):
+        raw_row = dataset[index]
+        row = _coerce_mapping(raw_row)
+        preview = _chat_messages_to_preview(
+            row.get(messages_column),
+            example_index=index + 1,
+        )
+        if preview is not None:
+            preview_rows.append(preview)
+
+    if not preview_rows:
+        return payload
+
+    metrics = _coerce_mapping(payload.get("metrics"))
+    metrics.setdefault("preview_examples", len(preview_rows))
+    metrics.setdefault("train_rows", len(dataset))
+    payload["metrics"] = metrics
+    payload["detailed_results"] = preview_rows
+    payload["sample_kind"] = "sft_preview"
+    return payload
+
+
+def _preview_row_from_sft_dataset_row(
+    raw_row: Mapping[str, Any],
+    *,
+    example_index: int,
+) -> Dict[str, Any]:
+    row = _coerce_mapping(raw_row)
+    messages_preview = _chat_messages_to_preview(
+        row.get("messages"),
+        example_index=example_index,
+    )
+    if messages_preview is not None:
+        if "source_row_index" in row:
+            messages_preview["source_row_index"] = row.get("source_row_index")
+        if "answer" in row:
+            messages_preview["answer"] = row.get("answer")
+        return messages_preview
+
+    prompt = str(row.get("prompt") or "").strip()
+    completion = str(row.get("completion") or "").strip()
+    return {
+        "row_kind": "sft_preview",
+        "example_index": example_index,
+        "prompt": prompt,
+        "completion": completion,
+        "system_prompt": None,
+    }
+
+
+def _summarize_sft_dataset_binding(config: Mapping[str, Any]) -> Dict[str, Any]:
+    raw_templates = _coerce_mapping(config.get(STAGE_TEMPLATE_CONFIG_KEY))
+    payload = _coerce_mapping(raw_templates.get("sft_dataset"))
+    kwargs = _coerce_mapping(payload.get("kwargs"))
+    summary: Dict[str, Any] = {}
+    if not payload:
+        return summary
+
+    summary["factory_module"] = str(payload.get("module") or "").strip() or None
+    summary["factory_name"] = str(payload.get("factory") or "").strip() or None
+
+    bound_kwargs = _coerce_mapping(kwargs.get("bound_kwargs"))
+    dataset_name = str(
+        bound_kwargs.get("dataset_name")
+        or kwargs.get("default_dataset")
+        or ""
+    ).strip()
+    if dataset_name:
+        summary["dataset_name"] = dataset_name
+
+    module_name = str(kwargs.get("module_name") or "").strip()
+    function_name = str(kwargs.get("function_name") or "").strip()
+    if module_name and function_name:
+        summary["builder_ref"] = f"{module_name}.{function_name}"
+    return summary
+
+
+def _build_sft_preflight_stage_preview(stage: Any) -> Dict[str, Any]:
+    dataset = stage.task.get_sft_dataset(stage.config, None)
+    if not isinstance(dataset, Dataset):
+        raise TypeError(
+            f'SFT preflight expected datasets.Dataset for stage "{stage.id}".'
+        )
+
+    preview_rows = [
+        _preview_row_from_sft_dataset_row(dataset[index], example_index=index + 1)
+        for index in range(min(len(dataset), _DEFAULT_SFT_PREVIEW_COUNT))
+    ]
+    binding_summary = _summarize_sft_dataset_binding(stage.config)
+    return {
+        "stage_id": stage.id,
+        "run_name": stage.run_name,
+        "model_name": str(
+            _coerce_mapping(stage.config.get("model")).get("name") or ""
+        ).strip()
+        or None,
+        "dataset_name": binding_summary.get("dataset_name"),
+        "builder_ref": binding_summary.get("builder_ref"),
+        "factory_ref": (
+            f"{binding_summary.get('factory_module')}.{binding_summary.get('factory_name')}"
+            if binding_summary.get("factory_module")
+            and binding_summary.get("factory_name")
+            else None
+        ),
+        "train_rows": len(dataset),
+        "preview_examples": len(preview_rows),
+        "rows": preview_rows,
+    }
+
+
+def _build_preflight_preview_payload_local(
+    experiment_file: str | Path,
+) -> Dict[str, Any]:
+    from tenyson.core.experiment_runtime import (
+        DEFAULT_FUNCTIONAL_FILENAME,
+        bootstrap_local_experiment,
+    )
+    from tenyson.core.functional import load_functional_manifest
+    from tenyson.core.run_config import shared_overrides_from_env
+    from tenyson.experiment import ConfigTemplates
+    from tenyson.loader import load_module_from_path
+
+    experiment_path = Path(str(experiment_file)).expanduser().resolve()
+    context = bootstrap_local_experiment(experiment_path)
+    manifest = load_functional_manifest(context.file(DEFAULT_FUNCTIONAL_FILENAME))
+    module = load_module_from_path(str(experiment_path))
+    build = getattr(module, "build", None)
+    if not callable(build):
+        raise ValueError(
+            f"Expected a callable build(exp) in {experiment_path}."
+        )
+
+    _bind_preflight_stage_builder_methods()
+
+    session = _PreflightStageBuilderSession(
+        task=manifest.task,
+        templates=ConfigTemplates.from_directory(
+            context.project_root / "config_templates"
+        ),
+        shared_overrides=shared_overrides_from_env(),
+    )
+    runtime = _PreflightRuntime(manifest=manifest, session=session)
+    build(runtime.controller())
+    stages = runtime.stage_specs()
+    sft_stages = [
+        _build_sft_preflight_stage_preview(stage)
+        for stage in stages
+        if str(getattr(stage, "run_type", "")).strip().lower() == "sft"
+    ]
+
+    return {
+        "experiment_file": str(experiment_path),
+        "functional_file": str(context.file(DEFAULT_FUNCTIONAL_FILENAME)),
+        "environment_name": str(
+            getattr(manifest.task, "get_environment_name", lambda: None)()
+            or context.base_dir.name
+        ).strip()
+        or context.base_dir.name,
+        "sft_stage_count": len(sft_stages),
+        "sft_stages": sft_stages,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _build_preflight_preview_payload(
+    experiment_file: str | Path,
+) -> Dict[str, Any]:
+    experiment_path = Path(str(experiment_file)).expanduser().resolve()
+    repo_root = _repo_root()
+    worker_python = str(
+        os.getenv("TENYSON_UI_PREFLIGHT_PYTHON") or "python3"
+    ).strip() or "python3"
+    worker_code = "\n".join(
+        [
+            "from pathlib import Path",
+            "import json",
+            "import sys",
+            "from tenyson.ui.server import _build_preflight_preview_payload_local",
+            "payload = _build_preflight_preview_payload_local(sys.argv[1])",
+            "Path(sys.argv[2]).write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')",
+        ]
+    )
+    env = dict(os.environ)
+    pythonpath_parts = [str(repo_root / "src")]
+    existing_pythonpath = str(env.get("PYTHONPATH") or "").strip()
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(part for part in pythonpath_parts if part)
+
+    output_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            output_path = Path(handle.name)
+
+        completed = subprocess.run(
+            [
+                worker_python,
+                "-c",
+                worker_code,
+                str(experiment_path),
+                str(output_path),
+            ],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if completed.returncode != 0:
+            failure_bits = []
+            stderr_text = str(completed.stderr or "").strip()
+            stdout_text = str(completed.stdout or "").strip()
+            if stderr_text:
+                failure_bits.append(stderr_text)
+            if stdout_text:
+                failure_bits.append(stdout_text)
+            detail = "\n\n".join(bit for bit in failure_bits if bit).strip()
+            if not detail:
+                detail = "No error output captured."
+            raise RuntimeError(
+                "Local preflight worker failed while building the SFT preview.\n\n"
+                f"{detail}"
+            )
+
+        if output_path is None or not output_path.exists():
+            raise RuntimeError(
+                "Local preflight worker finished, but no preview payload was written."
+            )
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("Local preflight worker returned invalid preview JSON.")
+        return payload
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Local preflight worker timed out while building the SFT preview."
+        ) from exc
+    finally:
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+
+
 class _DashboardTokenizerFallback:
     def encode(self, text: Any, add_special_tokens: bool = False) -> List[int]:
         _unused = add_special_tokens
         return list(range(len(str(text or ""))))
+
+
+class _PreflightStageBuilderSession:
+    def __init__(
+        self,
+        *,
+        task: Any,
+        templates: Any,
+        shared_overrides: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        self.task = task
+        self.templates = templates
+        self.shared_overrides = (
+            deepcopy(shared_overrides) if shared_overrides else None
+        )
+
+    sft = staticmethod(lambda *args, **kwargs: None)  # type: ignore[assignment]
+    rl = staticmethod(lambda *args, **kwargs: None)  # type: ignore[assignment]
+    eval = staticmethod(lambda *args, **kwargs: None)  # type: ignore[assignment]
+    _build_stage = staticmethod(lambda *args, **kwargs: None)  # type: ignore[assignment]
+
+
+class _PreflightValue:
+    def __init__(self, *, kind: str, ref: str) -> None:
+        self.kind = str(kind)
+        self.ref = str(ref)
+
+
+def _bind_preflight_stage_builder_methods() -> None:
+    from tenyson.experiment import ExperimentSession
+
+    _PreflightStageBuilderSession.sft = ExperimentSession.sft  # type: ignore[method-assign]
+    _PreflightStageBuilderSession.rl = ExperimentSession.rl  # type: ignore[method-assign]
+    _PreflightStageBuilderSession.eval = ExperimentSession.eval  # type: ignore[method-assign]
+    _PreflightStageBuilderSession._build_stage = (  # type: ignore[method-assign]
+        ExperimentSession._build_stage
+    )
+
+
+class _PreflightController:
+    def __init__(self, *, runtime: "_PreflightRuntime") -> None:
+        self._runtime = runtime
+
+    def seed(self, alias: str) -> Any:
+        return self._runtime.manifest.resolve_seed(alias)
+
+    def artifact(self, stage_id: str) -> Any:
+        from tenyson.experiment import _DeferredStageArtifactRef
+
+        return _DeferredStageArtifactRef(stage_id=str(stage_id))
+
+    def require_artifact(self, stage_id: str) -> Any:
+        return self.artifact(stage_id)
+
+    def adapter(self, stage_id: str) -> Any:
+        return self.artifact(stage_id)
+
+    def require_adapter(self, stage_id: str) -> Any:
+        return self.artifact(stage_id)
+
+    def result(self, stage_id: str) -> _PreflightValue:
+        return _PreflightValue(kind="result", ref=str(stage_id))
+
+    def sft(self, stage_id: str, **kwargs: Any) -> _PreflightValue:
+        return self.run(self.sft_stage(stage_id, **kwargs))
+
+    def rl(self, stage_id: str, **kwargs: Any) -> _PreflightValue:
+        return self.run(self.rl_stage(stage_id, **kwargs))
+
+    def eval(self, stage_id: str, **kwargs: Any) -> _PreflightValue:
+        return self.run(self.eval_stage(stage_id, **kwargs))
+
+    def sft_stage(self, stage_id: str, **kwargs: Any) -> Any:
+        return self._build_stage("sft", stage_id, **kwargs)
+
+    def rl_stage(self, stage_id: str, **kwargs: Any) -> Any:
+        return self._build_stage("rl", stage_id, **kwargs)
+
+    def eval_stage(self, stage_id: str, **kwargs: Any) -> Any:
+        return self._build_stage("eval", stage_id, **kwargs)
+
+    def run(self, stage: Any) -> _PreflightValue:
+        return _PreflightValue(kind="run", ref=str(stage.id))
+
+    def run_parallel(
+        self,
+        _label: str,
+        stages: Sequence[Any],
+    ) -> Dict[str, _PreflightValue]:
+        return {
+            str(stage.id): _PreflightValue(kind="run", ref=str(stage.id))
+            for stage in stages
+        }
+
+    def run_branches(
+        self,
+        branches: Mapping[str, Callable[["_PreflightController"], Any] | Sequence[Any]],
+    ) -> Dict[str, Any]:
+        return self._runtime.run_branches(branches)
+
+    def _build_stage(self, run_type: str, stage_id: str, **kwargs: Any) -> Any:
+        params = dict(kwargs)
+        run_name = params.get("run")
+        if run_name is not None:
+            params["run"] = self._runtime.manifest.resolve_run(str(run_name))
+        stage = getattr(self._runtime.session, run_type)(stage_id, **params)
+        self._runtime.register_stage(stage)
+        return stage
+
+
+class _PreflightBranchController(_PreflightController):
+    pass
+
+
+class _PreflightRuntime:
+    def __init__(self, *, manifest: Any, session: _PreflightStageBuilderSession) -> None:
+        self.manifest = manifest
+        self.session = session
+        self._stage_specs: List[Any] = []
+        self._stage_ids: set[str] = set()
+
+    def controller(self) -> _PreflightController:
+        return _PreflightController(runtime=self)
+
+    def register_stage(self, stage: Any) -> None:
+        stage_id = str(getattr(stage, "id", "")).strip()
+        if not stage_id or stage_id in self._stage_ids:
+            return
+        self._stage_ids.add(stage_id)
+        self._stage_specs.append(stage)
+
+    def run_branches(
+        self,
+        branches: Mapping[str, Callable[["_PreflightBranchController"], Any] | Sequence[Any]],
+    ) -> Dict[str, Any]:
+        results: Dict[str, Any] = {}
+        for label, plan in branches.items():
+            if callable(plan):
+                results[str(label)] = plan(_PreflightBranchController(runtime=self))
+                continue
+            for stage in plan:
+                self.register_stage(stage)
+            results[str(label)] = {
+                str(getattr(stage, "id", "")): _PreflightValue(
+                    kind="run",
+                    ref=str(getattr(stage, "id", "")),
+                )
+                for stage in plan
+            }
+        return results
+
+    def stage_specs(self) -> List[Any]:
+        return list(self._stage_specs)
 
 
 def _is_wordle_like_eval(
@@ -303,6 +945,7 @@ def _count_statuses(runs: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
 class DashboardServerConfig:
     backend_ref: str
     experiment_id: Optional[str] = None
+    experiment_file: Optional[str] = None
     host: str = "127.0.0.1"
     port: int = 8787
     refresh_seconds: float = 10.0
@@ -317,6 +960,7 @@ class DashboardDataService:
         *,
         backend_ref: str,
         default_experiment_id: Optional[str] = None,
+        preflight_experiment_path: Optional[str] = None,
         cache_ttl_seconds: float = _DEFAULT_CACHE_TTL_SECONDS,
         history_limit: int = _DEFAULT_HISTORY_LIMIT,
     ) -> None:
@@ -325,6 +969,7 @@ class DashboardDataService:
         self.default_experiment_id = (
             str(default_experiment_id or "").strip() or None
         )
+        self.preflight_experiment_path = _normalize_path(preflight_experiment_path)
         self.cache_ttl_seconds = max(0.0, float(cache_ttl_seconds))
         self.history_limit = max(10, int(history_limit))
         self._cache_lock = threading.Lock()
@@ -332,6 +977,7 @@ class DashboardDataService:
         self._experiment_runs_cache: Dict[str, tuple[float, List[Any]]] = {}
         self._experiment_snapshot_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         self._run_detail_cache: Dict[tuple[str, str, str], tuple[float, Dict[str, Any]]] = {}
+        self._preflight_cache: tuple[float, Dict[str, Any]] | None = None
 
     def _prewarm_default_experiment(self) -> None:
         experiment_id = str(self.default_experiment_id or "").strip()
@@ -356,6 +1002,24 @@ class DashboardDataService:
 
     def project_url(self) -> str:
         return self.target.project_url
+
+    def has_preflight(self) -> bool:
+        return self.preflight_experiment_path is not None
+
+    def get_preflight_preview(self) -> Dict[str, Any]:
+        if self.preflight_experiment_path is None:
+            raise ValueError("No preflight experiment file configured.")
+
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._preflight_cache
+            if cached is not None and (now - cached[0]) <= self.cache_ttl_seconds:
+                return cached[1]
+
+        payload = _build_preflight_preview_payload(self.preflight_experiment_path)
+        with self._cache_lock:
+            self._preflight_cache = (now, payload)
+        return payload
 
     def _cached_project_runs(self) -> Optional[List[Any]]:
         now = time.monotonic()
@@ -730,6 +1394,12 @@ class DashboardDataService:
             results_payload, job_result_payload = result_pair
 
         results_payload = _maybe_enrich_wordle_eval_results(results_payload, config_preview)
+        results_payload = _maybe_add_sft_preview_rows(
+            results_payload,
+            config_preview,
+            experiment_id=experiment_id,
+            phase=phase,
+        )
         detail = {
             "summary": summary,
             "result_payload": _json_ready(results_payload),
@@ -814,8 +1484,13 @@ def _build_request_handler(
                             "default_experiment_id": service.default_experiment_id,
                             "project_url": service.project_url(),
                             "refresh_seconds": config.refresh_seconds,
+                            "preflight_available": service.has_preflight(),
+                            "preflight_experiment_file": service.preflight_experiment_path,
                         }
                     )
+                    return
+                if parsed.path == "/api/preflight":
+                    self._write_json(service.get_preflight_preview())
                     return
                 if parsed.path == "/api/experiments":
                     self._write_json(
@@ -874,6 +1549,7 @@ def serve_dashboard(config: DashboardServerConfig) -> None:
     service = DashboardDataService(
         backend_ref=config.backend_ref,
         default_experiment_id=config.experiment_id,
+        preflight_experiment_path=config.experiment_file,
         cache_ttl_seconds=max(
             float(config.cache_ttl_seconds),
             float(config.refresh_seconds) + 1.0,
@@ -926,6 +1602,11 @@ def _parse_args() -> DashboardServerConfig:
         or os.getenv("TENYSON_RECOVER_EXPERIMENT_ID"),
         help="Experiment id to open by default.",
     )
+    parser.add_argument(
+        "--experiment-file",
+        default=os.getenv("TENYSON_UI_EXPERIMENT_FILE"),
+        help="Local experiment.py file to inspect in preflight mode.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument(
@@ -954,6 +1635,7 @@ def _parse_args() -> DashboardServerConfig:
     return DashboardServerConfig(
         backend_ref=backend_ref,
         experiment_id=str(args.experiment_id or "").strip() or None,
+        experiment_file=_normalize_path(args.experiment_file),
         host=str(args.host),
         port=int(args.port),
         refresh_seconds=max(2.0, float(args.refresh_seconds)),
