@@ -78,14 +78,14 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
                 {"text": "<U> hello <A> world <U> again <A> world"},
             ])
 
-    def test_excludes_trailing_eos_token_from_assistant_labels(self) -> None:
+    def test_includes_trailing_eos_token_in_assistant_labels(self) -> None:
         tokenizer = SimpleTokenizer()
         collator = CompletionOnlyDataCollator(tokenizer, response_template="<A>")
 
         batch = collator([{"text": "<U> hello <A> world <E>"}])
 
         self.assertEqual(batch["input_ids"].tolist(), [[1, 3, 2, 4, 99]])
-        self.assertEqual(batch["labels"].tolist(), [[-100, -100, -100, 4, -100]])
+        self.assertEqual(batch["labels"].tolist(), [[-100, -100, -100, 4, 99]])
 
     def test_excludes_eos_followed_by_trailing_newline(self) -> None:
         tokenizer = SimpleTokenizer()
@@ -96,7 +96,7 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
         self.assertEqual(batch["input_ids"].tolist(), [[1, 3, 2, 4, 99, 98]])
         self.assertEqual(
             batch["labels"].tolist(),
-            [[-100, -100, -100, 4, -100, -100]],
+            [[-100, -100, -100, 4, 99, -100]],
         )
 
     def test_preserves_content_newline_before_response_terminator(self) -> None:
@@ -108,7 +108,7 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
         self.assertEqual(batch["input_ids"].tolist(), [[1, 3, 2, 4, 98, 99, 98]])
         self.assertEqual(
             batch["labels"].tolist(),
-            [[-100, -100, -100, 4, 98, -100, -100]],
+            [[-100, -100, -100, 4, 98, 99, -100]],
         )
 
     def test_instruction_template_limits_assistant_spans_between_user_turns(self) -> None:
@@ -125,7 +125,7 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
 
         self.assertEqual(
             batch["labels"].tolist(),
-            [[-100, -100, -100, 4, -100, -100, -100, -100, 4, -100]],
+            [[-100, -100, -100, 4, 99, -100, -100, -100, 4, 99]],
         )
 
     def test_packed_style_multi_example_sequence_has_no_boundary_attention_mask(self) -> None:
@@ -146,7 +146,7 @@ class CompletionOnlyCollatorTests(unittest.TestCase):
 
         self.assertEqual(
             batch["labels"].tolist(),
-            [[-100, -100, -100, 4, -100, -100, -100, -100, 4, -100]],
+            [[-100, -100, -100, 4, 99, -100, -100, -100, 4, 99]],
         )
         self.assertEqual(
             batch["attention_mask"].tolist(),

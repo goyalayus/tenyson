@@ -28,6 +28,8 @@
 
   const state = {
     config: null,
+    preflight: null,
+    preflightLoading: false,
     experiments: [],
     experimentsLoaded: false,
     selectedExperimentId: null,
@@ -39,6 +41,7 @@
     selectedPanel: initialRoute.panel || "overview",
     showFailuresOnly: false,
     rewardFilterMode: "any",
+    expandedSampleKeys: new Set(),
     refreshTimer: null,
     refreshInFlight: false,
     experimentRequestToken: 0,
@@ -62,6 +65,9 @@
     detailStageNote: document.getElementById("detail-stage-note"),
     detailMeta: document.getElementById("detail-meta"),
     detailMetrics: document.getElementById("detail-metrics"),
+    preflightSummaryNote: document.getElementById("preflight-summary-note"),
+    preflightSummary: document.getElementById("preflight-summary"),
+    preflightContent: document.getElementById("preflight-content"),
     historySummary: document.getElementById("history-summary"),
     historyCharts: document.getElementById("history-charts"),
     evalSummary: document.getElementById("eval-summary"),
@@ -90,6 +96,7 @@
       state.selectedRunSummary = null;
       state.runDetail = null;
       state.runDetailLoading = false;
+      state.expandedSampleKeys.clear();
       void loadExperimentSnapshot(elements.experimentSelect.value, {
         preferredRunKey: null,
         preserveCurrentRun: false,
@@ -146,6 +153,9 @@
       if (!state.config) {
         state.config = await fetchJson("/api/config");
       }
+      if (state.config && state.config.preflight_available && !state.preflightLoading) {
+        void loadPreflight({ force: Boolean(settings.resetSelection) });
+      }
       scheduleAutoRefresh();
       const bootstrapExperimentId = pickPreferredExperimentId({
         resetSelection: Boolean(settings.resetSelection),
@@ -190,14 +200,8 @@
   function scheduleAutoRefresh() {
     if (state.refreshTimer !== null) {
       window.clearInterval(state.refreshTimer);
+      state.refreshTimer = null;
     }
-    const refreshSeconds =
-      state.config && Number.isFinite(state.config.refresh_seconds)
-        ? Number(state.config.refresh_seconds)
-        : 10;
-    state.refreshTimer = window.setInterval(() => {
-      void refreshDashboard();
-    }, Math.max(2, refreshSeconds) * 1000);
   }
 
   function pickPreferredExperimentId(options) {
@@ -240,6 +244,7 @@
       state.selectedRunSummary = null;
       state.runDetail = null;
       state.runDetailLoading = false;
+      state.expandedSampleKeys.clear();
       renderExperimentSelect();
       renderNoExperiments();
       writeRoute();
@@ -255,6 +260,39 @@
         preserveCurrentRun: !settings.resetSelection,
         showLoadingState: !state.experimentSnapshot,
       });
+    }
+  }
+
+  async function loadPreflight(options) {
+    const settings = options || {};
+    const available = Boolean(state.config && state.config.preflight_available);
+    if (!available) {
+      state.preflight = null;
+      state.preflightLoading = false;
+      renderPreflight();
+      return;
+    }
+    if (state.preflightLoading) {
+      return;
+    }
+    if (state.preflight && !settings.force) {
+      renderPreflight();
+      return;
+    }
+
+    state.preflightLoading = true;
+    renderPreflight();
+    try {
+      state.preflight = await fetchJson("/api/preflight");
+    } catch (error) {
+      state.preflight = {
+        error: normalizeErrorMessage(error),
+      };
+    } finally {
+      state.preflightLoading = false;
+      renderPreflight();
+      syncPanelAvailability();
+      syncActivePanel();
     }
   }
 
@@ -315,6 +353,7 @@
 
       state.selectedRunSummary = nextRun;
       state.selectedRunKey = nextRun ? buildRunKey(nextRun) : null;
+      state.expandedSampleKeys.clear();
       renderRunList();
       writeRoute();
 
@@ -333,10 +372,14 @@
   async function loadRunDetail(runSummary, options) {
     const settings = options || {};
     const selectedKey = buildRunKey(runSummary);
+    const previousKey = state.selectedRunKey;
     state.selectedRunSummary = runSummary;
     state.selectedRunKey = selectedKey;
     state.runDetail = null;
     state.runDetailLoading = true;
+    if (previousKey !== selectedKey) {
+      state.expandedSampleKeys.clear();
+    }
     renderRunList();
     renderRunSummarySnapshot(runSummary, { loadingDetail: true });
     writeRoute();
@@ -374,6 +417,7 @@
     appendEmptyState(elements.runList, "Loading runs...");
     appendEmptyState(elements.heroCards, "Loading experiment summary...");
     clearRunDetail("Select a run to inspect telemetry.");
+    renderPreflight();
     renderEvalSamples();
     renderRawPayload();
     updateIndicator("neutral", "Waiting for telemetry");
@@ -389,15 +433,13 @@
           ? buildLink("Open W&B project", state.config.project_url)
           : "n/a"
       ),
-      metaItem(
-        "Auto refresh",
-        state.config ? `${state.config.refresh_seconds}s` : "n/a"
-      ),
+      metaItem("Refresh", "Manual"),
     ]);
     appendEmptyState(elements.heroCards, "No experiments found in this W&B project yet.");
     appendEmptyState(elements.runList, "No runs available.");
     elements.runCountBadge.textContent = "0";
     clearRunDetail("No experiment selected.");
+    renderPreflight();
     renderEvalSamples();
     renderRawPayload();
     updateIndicator("neutral", "No experiment selected");
@@ -414,6 +456,7 @@
     appendEmptyState(elements.runList, message);
     elements.runCountBadge.textContent = "0";
     clearRunDetail(message);
+    renderPreflight();
     renderEvalSamples();
     renderRawPayload();
     updateIndicator("failed", message);
@@ -450,6 +493,7 @@
     elements.rawPayload.textContent = "Waiting for canonical payload…";
     clearNode(elements.evalTableBody);
     appendTableMessage("Waiting for the selected run before loading sample rows.");
+    renderPreflight();
     syncPanelAvailability();
     syncActivePanel();
   }
@@ -460,6 +504,7 @@
     appendEmptyState(elements.heroCards, "Experiment snapshot could not be loaded.");
     elements.runCountBadge.textContent = "0";
     clearRunDetail(message);
+    renderPreflight();
     renderEvalSamples();
     renderRawPayload();
     updateIndicator("failed", message);
@@ -505,7 +550,7 @@
             ? buildLink("Open W&B project", state.config.project_url)
             : "n/a"
         ),
-        metaItem("Auto refresh", `${state.config.refresh_seconds}s`),
+        metaItem("Refresh", "Manual"),
       ]);
       return;
     }
@@ -527,7 +572,7 @@
           ? buildLink("Open W&B project", experiment.project_url)
           : "n/a"
       ),
-      metaItem("Auto refresh", `${state.config.refresh_seconds}s`),
+      metaItem("Refresh", "Manual"),
       metaItem("Phase mix", phaseSummary || "No runs yet"),
       metaItem("Status mix", statusSummary || "No statuses yet"),
       metaItem(
@@ -706,19 +751,47 @@
     const detailMessage = message || "No run selected.";
     state.runDetail = null;
     state.runDetailLoading = false;
-    elements.detailTitle.textContent = "Select a run";
-    elements.detailSubtitle.textContent = "Pick a run from the left to inspect it.";
-    elements.detailStageNote.textContent = "Snapshot ready";
-    applyStatusPill(elements.detailStatus, "idle");
-    renderFactRow([buildFactChip("Selection", "No run selected")]);
-    renderActionRow([]);
-    appendEmptyState(elements.detailMeta, detailMessage);
-    appendEmptyState(elements.detailMetrics, "Run-level metrics will appear here.");
+    if (state.config && state.config.preflight_available && state.selectedPanel === "preflight") {
+      elements.detailTitle.textContent = "Local preflight";
+      elements.detailSubtitle.textContent = state.config.preflight_experiment_file
+        ? shortPathLabel(state.config.preflight_experiment_file)
+        : "Inspecting the local experiment before launch.";
+      elements.detailStageNote.textContent = "Preview ready";
+      applyStatusPill(elements.detailStatus, "ready");
+      renderFactRow([
+        buildFactChip("Mode", "Preflight"),
+        buildFactChip(
+          "Experiment",
+          state.config.preflight_experiment_file
+            ? shortPathLabel(state.config.preflight_experiment_file)
+            : "Local experiment"
+        ),
+      ]);
+      renderActionRow([]);
+      appendEmptyState(
+        elements.detailMeta,
+        "Local experiment details appear in the preflight tab."
+      );
+      appendEmptyState(
+        elements.detailMetrics,
+        "Run-level metrics will appear here after you launch something."
+      );
+    } else {
+      elements.detailTitle.textContent = "Select a run";
+      elements.detailSubtitle.textContent = "Pick a run from the left to inspect it.";
+      elements.detailStageNote.textContent = "Snapshot ready";
+      applyStatusPill(elements.detailStatus, "idle");
+      renderFactRow([buildFactChip("Selection", "No run selected")]);
+      renderActionRow([]);
+      appendEmptyState(elements.detailMeta, detailMessage);
+      appendEmptyState(elements.detailMetrics, "Run-level metrics will appear here.");
+    }
     elements.historySummary.textContent = "No series loaded";
     appendEmptyState(elements.historyCharts, "Metric history will appear here.");
     elements.rawPayload.textContent = detailMessage;
     syncPanelAvailability();
     syncActivePanel();
+    renderPreflight();
     renderEvalSamples();
     updateDocumentTitle();
   }
@@ -742,6 +815,7 @@
     appendEmptyState(elements.historyCharts, message);
     elements.rawPayload.textContent = message;
     state.runDetail = null;
+    renderPreflight();
     syncPanelAvailability();
     syncActivePanel();
     renderEvalSamples();
@@ -764,6 +838,7 @@
     });
 
     renderHistoryCharts();
+    renderPreflight();
     renderEvalSamples();
     renderRawPayload();
   }
@@ -954,6 +1029,178 @@
     elements.historySummary.textContent = `Showing ${selectedKeys.length} of ${allKeys.length} numeric series across ${pluralize(rows.length, "point")}`;
   }
 
+  function renderPreflight() {
+    clearNode(elements.preflightSummary);
+    clearNode(elements.preflightContent);
+
+    const available = Boolean(state.config && state.config.preflight_available);
+    if (!available) {
+      elements.preflightSummaryNote.textContent = "No local experiment preview configured";
+      appendEmptyState(
+        elements.preflightContent,
+        "Start the dashboard with --experiment-file to inspect SFT data before launch."
+      );
+      return;
+    }
+
+    if (state.preflightLoading && !state.preflight) {
+      elements.preflightSummaryNote.textContent = "Loading local SFT preview…";
+      appendEmptyState(
+        elements.preflightContent,
+        "Building the local experiment preview in the background."
+      );
+      return;
+    }
+
+    const payload = asObject(state.preflight);
+    if (payload.error) {
+      elements.preflightSummaryNote.textContent = "Local preview failed";
+      appendEmptyState(elements.preflightContent, String(payload.error));
+      return;
+    }
+
+    const stages = Array.isArray(payload.sft_stages) ? payload.sft_stages : [];
+    const totalRows = stages.reduce(
+      (sum, stage) => sum + Number(asObject(stage).train_rows || 0),
+      0
+    );
+    const totalPreviewExamples = stages.reduce(
+      (sum, stage) => sum + Number(asObject(stage).preview_examples || 0),
+      0
+    );
+    const summaryMetrics = {
+      sft_stages: stages.length,
+      train_rows: totalRows,
+      preview_examples: totalPreviewExamples,
+    };
+    renderMetricCards(elements.preflightSummary, summaryMetrics);
+    elements.preflightSummaryNote.textContent = payload.refreshed_at
+      ? `Refreshed ${formatTimestamp(payload.refreshed_at)}`
+      : "Local preview ready";
+
+    if (!stages.length) {
+      appendEmptyState(
+        elements.preflightContent,
+        "No SFT stages were found in this local experiment."
+      );
+      return;
+    }
+
+    stages.forEach((stage) => {
+      elements.preflightContent.appendChild(buildPreflightStageCard(stage));
+    });
+  }
+
+  function buildPreflightStageCard(stageLike) {
+    const stage = asObject(stageLike);
+    const rows = Array.isArray(stage.rows) ? stage.rows : [];
+
+    const card = document.createElement("article");
+    card.className = "preflight-stage";
+
+    const header = document.createElement("div");
+    header.className = "preflight-stage-header";
+
+    const copy = document.createElement("div");
+    copy.className = "preflight-stage-copy";
+    copy.appendChild(
+      createText("h3", "", stage.stage_id || stage.run_name || "SFT stage")
+    );
+    copy.appendChild(
+      createText(
+        "div",
+        "muted-copy",
+        stage.dataset_name ||
+          stage.builder_ref ||
+          stage.factory_ref ||
+          "Locally bound SFT dataset"
+      )
+    );
+    header.appendChild(copy);
+
+    const meta = document.createElement("div");
+    meta.className = "preflight-meta";
+    meta.appendChild(buildPreflightPill("Rows", formatMetricValue(stage.train_rows, "train_rows")));
+    meta.appendChild(
+      buildPreflightPill(
+        "Preview",
+        formatMetricValue(stage.preview_examples, "preview_examples")
+      )
+    );
+    if (stage.model_name) {
+      meta.appendChild(buildPreflightPill("Model", String(stage.model_name)));
+    }
+    header.appendChild(meta);
+    card.appendChild(header);
+
+    if (!rows.length) {
+      appendEmptyState(card, "No preview rows available for this SFT stage.");
+      return card;
+    }
+
+    appendSampleTable(
+      card,
+      buildPreflightColumns(rows),
+      rows.map((row) => ({
+        raw: row,
+        reward: null,
+        outcome: { passed: true, reasons: [] },
+      }))
+    );
+    return card;
+  }
+
+  function buildPreflightPill(label, value) {
+    const pill = document.createElement("div");
+    pill.className = "preflight-pill";
+    pill.appendChild(createText("span", "muted-copy", `${label}:`));
+    pill.appendChild(createText("span", "", value == null ? "n/a" : String(value)));
+    return pill;
+  }
+
+  function buildPreflightColumns(rows) {
+    const includeSystem = rows.some((row) => Boolean(asObject(row).system_prompt));
+    const columns = [buildExampleColumn()];
+    if (includeSystem) {
+      columns.push(buildSystemColumn("System", 220));
+    }
+    columns.push(buildPromptColumn("Prompt", 360));
+    columns.push(buildCompletionColumn("Completion", 420));
+    return columns;
+  }
+
+  function appendSampleTable(container, columns, rows) {
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    const table = document.createElement("table");
+    table.className = "eval-table";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    columns.forEach((column) => {
+      const th = document.createElement("th");
+      th.textContent = column.label;
+      if (column.headerClassName) {
+        th.className = column.headerClassName;
+      }
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+
+    const tbody = document.createElement("tbody");
+    rows.forEach((row) => {
+      const tr = document.createElement("tr");
+      columns.forEach((column) => {
+        tr.appendChild(column.render(row));
+      });
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    container.appendChild(wrap);
+  }
+
   function renderEvalSamples() {
     if (state.runDetailLoading && !state.runDetail) {
       clearNode(elements.evalSummary);
@@ -1079,6 +1326,20 @@
     const first = rows.length ? asObject(rows[0].raw) : {};
     const baseColumns = [buildStatusColumn()];
 
+    if (isSftPreviewRow(first)) {
+      const includeSystem = rows.some((row) => {
+        const raw = asObject(row.raw);
+        return Boolean(raw.system_prompt);
+      });
+      const columns = [buildExampleColumn()];
+      if (includeSystem) {
+        columns.push(buildSystemColumn("System", 220));
+      }
+      columns.push(buildPromptColumn("Prompt", 360));
+      columns.push(buildCompletionColumn("Completion", 420));
+      return columns;
+    }
+
     if (isArithmeticEvalRow(first)) {
       return baseColumns.concat([
         buildProblemColumn(),
@@ -1151,6 +1412,37 @@
     };
   }
 
+  function buildExampleColumn() {
+    return {
+      label: "Example",
+      render(row) {
+        const raw = asObject(row.raw);
+        const value =
+          raw.example_index == null ? "n/a" : `#${String(raw.example_index)}`;
+        return buildTextCell(value, "example-cell cell-example sample-mono");
+      },
+    };
+  }
+
+  function buildSystemColumn(label, previewLength) {
+    return {
+      label: label,
+      render(row) {
+        const cell = document.createElement("td");
+        cell.className = "system-cell cell-system";
+        cell.appendChild(
+          buildSampleCopy(
+            row.raw && row.raw.system_prompt ? String(row.raw.system_prompt) : "",
+            "system-copy",
+            previewLength,
+            buildSampleExpansionKey(row.raw, "system_prompt")
+          )
+        );
+        return cell;
+      },
+    };
+  }
+
   function buildParsedColumn(label) {
     return {
       label: label,
@@ -1170,7 +1462,8 @@
           buildSampleCopy(
             row.raw && row.raw.completion ? String(row.raw.completion) : "",
             "completion-copy",
-            previewLength
+            previewLength,
+            buildSampleExpansionKey(row.raw, "completion")
           )
         );
         return cell;
@@ -1185,7 +1478,12 @@
         const cell = document.createElement("td");
         cell.className = "prompt-cell cell-prompt";
         cell.appendChild(
-          buildSampleCopy(resolvePromptPreview(row.raw), "prompt-copy", previewLength)
+          buildSampleCopy(
+            resolvePromptPreview(row.raw),
+            "prompt-copy",
+            previewLength,
+            buildSampleExpansionKey(row.raw, "prompt")
+          )
         );
         return cell;
       },
@@ -1230,7 +1528,7 @@
     return cell;
   }
 
-  function buildSampleCopy(text, className, previewLength) {
+  function buildSampleCopy(text, className, previewLength, expansionKey) {
     const fullText = String(text || "");
     if (!fullText.trim()) {
       return createText("div", `copy-inline muted-copy ${className}`, "n/a");
@@ -1238,7 +1536,36 @@
     if (fullText.length <= Math.max(80, previewLength / 2)) {
       return createText("div", `copy-inline ${className}`, fullText);
     }
-    return buildExpandableCopy(className, fullText, previewLength);
+    return buildExpandableCopy(className, fullText, previewLength, expansionKey);
+  }
+
+  function buildSampleExpansionKey(rawRow, fieldName) {
+    const record = asObject(rawRow);
+    const runKey = state.selectedRunKey || "no-run";
+    const rolloutBatchId = String(record.rollout_batch_id || "");
+    const rolloutStep = String(record.rollout_step || "");
+    const globalStep = String(record.global_step || "");
+    const fieldValue = String(record[fieldName] || "");
+    return [
+      runKey,
+      fieldName,
+      globalStep,
+      rolloutStep,
+      rolloutBatchId,
+      fieldValue,
+    ].join("::");
+  }
+
+  function shortPathLabel(value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      return "n/a";
+    }
+    const parts = text.split(/[\\/]/).filter(Boolean);
+    if (parts.length <= 2) {
+      return text;
+    }
+    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
   }
 
   function resolvePromptPreview(rawRow) {
@@ -1259,6 +1586,11 @@
       record.right != null &&
       Object.prototype.hasOwnProperty.call(record, "expected_answer")
     );
+  }
+
+  function isSftPreviewRow(rawRow) {
+    const record = asObject(rawRow);
+    return String(record.row_kind || "") === "sft_preview";
   }
 
   function findParsedValue(rawRow) {
@@ -1623,7 +1955,7 @@
     });
   }
 
-  function buildExpandableCopy(className, text, previewLength) {
+  function buildExpandableCopy(className, text, previewLength, expansionKey) {
     const wrapper = document.createElement("div");
     wrapper.className = "expand-shell";
     const fullText = String(text || "");
@@ -1633,10 +1965,22 @@
     if (previewText !== fullText) {
       const details = document.createElement("details");
       details.className = "expand-panel";
+      const key = String(expansionKey || "");
+      if (key && state.expandedSampleKeys.has(key)) {
+        details.open = true;
+      }
       const summary = createText("summary", "expand-toggle", "Show full");
       details.addEventListener("toggle", () => {
+        if (key) {
+          if (details.open) {
+            state.expandedSampleKeys.add(key);
+          } else {
+            state.expandedSampleKeys.delete(key);
+          }
+        }
         summary.textContent = details.open ? "Show less" : "Show full";
       });
+      summary.textContent = details.open ? "Show less" : "Show full";
       details.appendChild(summary);
       details.appendChild(createText("div", className, fullText));
       wrapper.appendChild(details);
@@ -1885,6 +2229,7 @@
 
   function syncPanelAvailability() {
     const hasRunSelection = Boolean(state.selectedRunSummary);
+    const preflightAvailable = Boolean(state.config && state.config.preflight_available);
     const evalAvailable =
       isEvalLikeRun(state.selectedRunSummary) ||
       Boolean(
@@ -1894,11 +2239,18 @@
       );
 
     elements.tabButtons.forEach((button) => {
+      if (button.dataset.panel === "preflight") {
+        button.disabled = !preflightAvailable;
+        return;
+      }
       if (button.dataset.panel === "samples") {
         button.disabled = !evalAvailable;
       }
     });
 
+    if (!preflightAvailable && state.selectedPanel === "preflight") {
+      state.selectedPanel = "overview";
+    }
     if (hasRunSelection && !evalAvailable && state.selectedPanel === "samples") {
       state.selectedPanel = "overview";
     }
@@ -1920,6 +2272,7 @@
 
   function maybeLoadRunDetailForPanel() {
     if (
+      state.selectedPanel === "preflight" ||
       state.selectedPanel === "overview" ||
       state.runDetail ||
       state.runDetailLoading ||
@@ -1935,9 +2288,7 @@
     elements.refreshButton.textContent = isBusy ? "Refreshing..." : "Refresh";
     elements.refreshLabel.textContent = isBusy
       ? "Syncing telemetry…"
-      : state.config
-      ? `Auto refresh every ${Math.max(2, Number(state.config.refresh_seconds) || 10)}s`
-      : "Telemetry idle";
+      : "Manual refresh only";
   }
 
   function statusTone(status) {

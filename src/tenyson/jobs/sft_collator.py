@@ -46,27 +46,7 @@ class CompletionOnlyDataCollator:
                     "that appears where a non-assistant turn starts."
                 )
             self._instruction_template_ids = instruction_ids
-        self._response_end_token_sequences: List[List[int]] = []
         self._whitespace_token_cache: Dict[int, bool] = {}
-        eos_token = getattr(tokenizer, "eos_token", None)
-        if isinstance(eos_token, str) and eos_token:
-            eos_token_ids = tokenizer.encode(eos_token, add_special_tokens=False)
-            if eos_token_ids:
-                self._response_end_token_sequences.append(eos_token_ids)
-        eos_token_id = getattr(tokenizer, "eos_token_id", None)
-        if isinstance(eos_token_id, int) and eos_token_id >= 0:
-            self._response_end_token_sequences.append([eos_token_id])
-        deduped_sequences = []
-        seen_sequences = set()
-        for token_ids in self._response_end_token_sequences:
-            token_ids_tuple = tuple(token_ids)
-            if token_ids_tuple in seen_sequences:
-                continue
-            seen_sequences.add(token_ids_tuple)
-            deduped_sequences.append(token_ids)
-        self._response_end_token_sequences = sorted(
-            deduped_sequences, key=len, reverse=True
-        )
 
     def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # Examples may have "text" (from formatting_func) or "input_ids" (pre-tokenized).
@@ -162,25 +142,14 @@ class CompletionOnlyDataCollator:
 
     def _trim_response_end(self, input_ids: List[int], start: int, end: int) -> int:
         """
-        Exclude a chat-template response terminator from the supervised span.
+        Exclude trailing whitespace after the assistant response.
 
-        We only trim trailing whitespace when it appears after a known response-end
-        sequence such as `<|im_end|>`. Plain content whitespace at the end of the
-        assistant message is preserved.
+        The assistant response terminator itself stays inside the supervised span so
+        the model is trained to emit it. We only trim whitespace that appears after
+        the end of the assistant turn.
         """
-        candidate_end = end
-        while candidate_end > start and self._is_whitespace_token(
-            input_ids[candidate_end - 1]
-        ):
-            candidate_end -= 1
-
-        for end_sequence in self._response_end_token_sequences:
-            seq_len = len(end_sequence)
-            if candidate_end - seq_len < start:
-                continue
-            if input_ids[candidate_end - seq_len : candidate_end] == end_sequence:
-                return candidate_end - seq_len
-
+        while end > start and self._is_whitespace_token(input_ids[end - 1]):
+            end -= 1
         return end
 
     def _find_response_spans(self, input_ids: List[int]) -> List[tuple[int, int]]:

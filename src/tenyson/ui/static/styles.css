@@ -249,6 +249,55 @@ input {
   padding: 18px;
 }
 
+.preflight-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.preflight-stage {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-muted);
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.preflight-stage-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.preflight-stage-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.preflight-stage-copy h3 {
+  font-size: 1.2rem;
+}
+
+.preflight-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preflight-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
 .section-header {
   display: flex;
   align-items: center;
